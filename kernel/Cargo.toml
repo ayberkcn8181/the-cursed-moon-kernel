@@ -1,0 +1,16 @@
+[package]
+name = "tcmk-kernel"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "tcmk-kernel"
+path = "src/main.rs"
+
+[profile.dev]
+panic = "abort"
+opt-level = 1
+
+[profile.release]
+panic = "abort"
+lto = true

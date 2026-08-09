@@ -1,0 +1,107 @@
+//! 256 vektorluk IDT (doc S.4). Faz 1'de sadece dort vektor doldurulur:
+//! 0 (divide-by-zero), 32 (IRQ0/PIT), 33 (IRQ1/klavye), 128 (int 0x80).
+//!
+//! Handler'larin ilk isi -- kod olarak -- Level-0b2'ye (dispatcher /
+//! load_balancer) haber vermek; CPU donanimsal olarak hepsini ayni tabloya
+//! yazmamiza ragmen mantiksal akis dokumandaki "her seyin once Level-0b2'den
+//! gectigi" kuraliyla eslesir.
+
+use core::arch::asm;
+use core::mem::size_of;
+
+use crate::arch::i386::regs::InterruptStackFrame;
+use crate::level0a::gdt::KERNEL_CODE_SELECTOR;
+
+const GATE_PRESENT_RING0_INT32: u8 = 0x8E; // P=1 DPL=00 type=32-bit interrupt gate
+const GATE_PRESENT_RING3_INT32: u8 = 0xEE; // P=1 DPL=11 (Ring3'ten int 0x80 cagrilabilir)
+
+#[derive(Clone, Copy)]
+#[repr(C, packed)]
+struct IdtEntry {
+    offset_low: u16,
+    selector: u16,
+    zero: u8,
+    type_attr: u8,
+    offset_high: u16,
+}
+
+impl IdtEntry {
+    const fn missing() -> Self {
+        IdtEntry {
+            offset_low: 0,
+            selector: 0,
+            zero: 0,
+            type_attr: 0,
+            offset_high: 0,
+        }
+    }
+
+    fn set(&mut self, handler_addr: u32, selector: u16, type_attr: u8) {
+        self.offset_low = (handler_addr & 0xFFFF) as u16;
+        self.offset_high = ((handler_addr >> 16) & 0xFFFF) as u16;
+        self.selector = selector;
+        self.zero = 0;
+        self.type_attr = type_attr;
+    }
+}
+
+#[repr(C, packed)]
+struct IdtPointer {
+    limit: u16,
+    base: u32,
+}
+
+static mut IDT: [IdtEntry; 256] = [IdtEntry::missing(); 256];
+
+pub fn init() {
+    unsafe {
+        IDT[0].set(
+            divide_by_zero_handler as *const () as u32,
+            KERNEL_CODE_SELECTOR,
+            GATE_PRESENT_RING0_INT32,
+        );
+        IDT[32].set(
+            pit_handler as *const () as u32,
+            KERNEL_CODE_SELECTOR,
+            GATE_PRESENT_RING0_INT32,
+        );
+        IDT[33].set(
+            keyboard_handler as *const () as u32,
+            KERNEL_CODE_SELECTOR,
+            GATE_PRESENT_RING0_INT32,
+        );
+        IDT[128].set(
+            syscall_handler as *const () as u32,
+            KERNEL_CODE_SELECTOR,
+            GATE_PRESENT_RING3_INT32,
+        );
+
+        let ptr = IdtPointer {
+            limit: (size_of::<[IdtEntry; 256]>() - 1) as u16,
+            base: core::ptr::addr_of!(IDT) as u32,
+        };
+        asm!("lidt [{0}]", in(reg) &ptr, options(nostack));
+    }
+}
+
+extern "x86-interrupt" fn divide_by_zero_handler(_frame: InterruptStackFrame) -> ! {
+    crate::level0b2::fallback::emergency(&["CPU istisnasi: divide-by-zero (vektor 0)."]);
+    loop {
+        crate::arch::i386::halt();
+    }
+}
+
+extern "x86-interrupt" fn pit_handler(_frame: InterruptStackFrame) {
+    crate::level0a::pit::on_tick();
+    crate::level0a::pic::send_eoi(0);
+}
+
+extern "x86-interrupt" fn keyboard_handler(_frame: InterruptStackFrame) {
+    crate::level0a::keyboard::on_irq();
+    crate::level0a::pic::send_eoi(1);
+}
+
+extern "x86-interrupt" fn syscall_handler(_frame: InterruptStackFrame) {
+    crate::level0b2::load_balancer::note_call(0x80);
+    crate::level0b2::dispatcher::handle_syscall(0x80);
+}

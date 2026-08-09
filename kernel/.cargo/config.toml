@@ -1,0 +1,10 @@
+[unstable]
+build-std = ["core"]
+build-std-features = ["compiler-builtins-mem"]
+json-target-spec = true
+
+[build]
+target = "../targets/i686-tcmk.json"
+
+[target.'cfg(target_arch = "x86")']
+rustflags = ["-C", "link-arg=-T../boot/linker/i386.ld"]
