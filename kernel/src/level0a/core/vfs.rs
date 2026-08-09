@@ -112,6 +112,17 @@ pub fn as_slice(node: usize) -> Option<&'static [u8]> {
     }
 }
 
+/// Dugumun yol adi (kabuk `ls` icin).
+pub fn path_of(node: usize) -> Option<&'static str> {
+    if node >= NODE_COUNT.load(Ordering::Relaxed) {
+        return None;
+    }
+    unsafe {
+        let nodes = core::ptr::addr_of!(NODES) as *const Node;
+        Some((*nodes.add(node)).path)
+    }
+}
+
 pub fn node_count() -> usize {
     NODE_COUNT.load(Ordering::Relaxed)
 }

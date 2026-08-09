@@ -42,6 +42,12 @@ static HELLO_ELF: &[u8] = include_bytes!("../../userland/hello.elf");
 #[cfg(target_arch = "x86")]
 static HELLO_EXE: &[u8] = include_bytes!("../../userland/hello.exe");
 
+/// Ring 3 GUI uygulamalari -- `tools/gen_gui_app.py`.
+#[cfg(target_arch = "x86")]
+static PAINT_ELF: &[u8] = include_bytes!("../../userland/paint.elf");
+#[cfg(target_arch = "x86")]
+static PLASMA_ELF: &[u8] = include_bytes!("../../userland/plasma.elf");
+
 /// Linux (ELF64, x86_64) kullanici programi -- `tools/gen_hello_elf64.py`.
 #[cfg(target_arch = "x86_64")]
 static HELLO_ELF64: &[u8] = include_bytes!("../../userland/hello64.elf");
@@ -54,6 +60,8 @@ static BOOT_MSG: &[u8] = b"/boot/msg.txt: VFS uzerinden okundu (RAMFS).\n";
 static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/hello", HELLO_ELF),
     ("/bin/hello.exe", HELLO_EXE),
+    ("/bin/paint", PAINT_ELF),
+    ("/bin/plasma", PLASMA_ELF),
     ("/boot/msg.txt", BOOT_MSG),
 ];
 
@@ -70,7 +78,7 @@ const USER_BINARIES: &[&str] = &["/bin/hello", "/bin/hello.exe"];
 const USER_BINARIES: &[&str] = &["/bin/hello"];
 
 #[no_mangle]
-pub extern "C" fn kernel_main(multiboot_magic: u32, _multiboot_info_addr: u32) -> ! {
+pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info_addr: usize) -> ! {
     // Multiboot speknine gore IF=0 girilmesi beklenir; buna guvenmek yerine
     // kesmeleri kendimiz ve kosulsuzca kapatiyoruz (savunmaci varsayim --
     // IDT/PIC hazir olmadan hicbir kesme kabul edilmemeli).
@@ -78,6 +86,13 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, _multiboot_info_addr: u32) -
 
     level0a::drivers::serial::init();
     level0a::drivers::vga::init();
+
+    // Framebuffer'i mumkun oldugunca erken ac: boot logu da grafik
+    // konsolda goruntulensin (doc S.7 Faz 13).
+    unsafe {
+        let fb = boot::multiboot::framebuffer(multiboot_info_addr);
+        level0a::drivers::gfx::init(fb);
+    }
 
     if multiboot_magic != BOOT_MAGIC {
         level0b2::fallback::emergency(&["Multiboot magic gecersiz -- boot guvenilir degil."]);
@@ -88,6 +103,7 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, _multiboot_info_addr: u32) -
     level0a::idt::init();
     level0a::pic::remap();
     level0a::pit::init(100);
+    unsafe { level0a::input::init_mouse() };
 
     level0b2::dispatcher::print_banner();
 
@@ -106,31 +122,38 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, _multiboot_info_addr: u32) -
         None => level0b2::fallback::emergency(&["worker gorevi olusturulamadi."]),
     }
 
-    // Idle gorevi (task 0): sisteme nabiz attirir ve State Monitor'u besler.
+    // Idle gorevi (task 0) ayni zamanda **masaustu dongusudur**:
+    // girdiyi isler, pencereleri birlestirir ve State Monitor'u besler.
     let mut last_report_tick = 0u32;
 
     loop {
         level0b2::state_monitor::tick();
 
+        if level0a::wm::active() {
+            level0a::wm::handle_input();
+            level0a::wm::compose();
+        }
+
         if scheduler::needs_resched() {
             scheduler::yield_now();
         }
 
-        // ~5 saniyede bir sistem durumu raporu (100 Hz PIT -> 500 tick).
+        // ~10 saniyede bir sistem durumu raporu (100 Hz PIT).
         let ticks = level0a::pit::ticks();
-        if ticks >= last_report_tick + 500 {
+        if ticks >= last_report_tick + 1000 {
             last_report_tick = ticks;
             crate::println!(
-                "[LEVEL-0b2] durum: Level-0a={:?} | tick={} nabiz={} gecis={} gorev={}",
+                "[LEVEL-0b2] durum: Level-0a={:?} tick={} gorev={} pencere={}",
                 level0b2::state_monitor::health(),
                 ticks,
-                level0a::pit::heartbeat(),
-                scheduler::switch_count(),
-                scheduler::task_count()
+                scheduler::task_count(),
+                level0a::wm::window_count()
             );
         }
 
-        arch::cpu::halt();
+        if !level0a::wm::active() {
+            arch::cpu::halt();
+        }
     }
 }
 
@@ -197,11 +220,16 @@ extern "C" fn worker_task() -> ! {
         crate::println!();
 
         // Izolasyon dogrulamasi: cekirdek sayfalari Ring 3'e kapali kalmali.
+        // Adresler sabit yazilmaz: bellek haritasi degistiginde test de
+        // kendiliginden dogru yeri kontrol etsin.
         crate::println!(
-            "[worker] izolasyon: user@0x300000={} kernel@0x100000={} heap@0x200000={}",
-            level0a::core::mmu::is_user_accessible(0x0030_0000),
+            "[worker] izolasyon: user@{:#x}={} kernel@{:#x}={} heap@{:#x}={}",
+            level0a::core::mmu::USER_MEM_START,
+            level0a::core::mmu::is_user_accessible(level0a::core::mmu::USER_MEM_START),
+            0x0010_0000,
             level0a::core::mmu::is_user_accessible(0x0010_0000),
-            level0a::core::mmu::is_user_accessible(0x0020_0000),
+            level0a::core::kmalloc::HEAP_START,
+            level0a::core::mmu::is_user_accessible(level0a::core::kmalloc::HEAP_START),
         );
 
         // Guvenlik regresyon testi: sys_open'a CEKIRDEK isaretcisi verilirse
@@ -231,6 +259,9 @@ extern "C" fn worker_task() -> ! {
         );
     }
 
+    // --- GUI'yi baslat (grafiksel alfa) ---
+    start_desktop();
+
     crate::println!("[worker] isim bitti, sys_exit cagriliyor.");
     unsafe {
         arch::cpu::syscall3(SYS_EXIT as Word, 0, 0, 0);
@@ -239,6 +270,32 @@ extern "C" fn worker_task() -> ! {
     // sys_exit geri donmez; yine de tip sistemi icin sonsuz dongu.
     loop {
         arch::cpu::halt();
+    }
+}
+
+/// Masaustunu ayaga kaldirir: WM devralir, sistem pencereleri acilir ve
+/// iki Ring 3 GUI uygulamasi baslatilir.
+fn start_desktop() {
+    if !level0a::drivers::gfx::available() {
+        crate::println!("[worker] framebuffer yok; GUI atlaniyor.");
+        return;
+    }
+
+    level0a::wm::start();
+
+    // Sistem gunlugu penceresi: cekirdek kaydini canli gosterir.
+    level0a::wm::create("Sistem Gunlugu", 380, 60, 610, 200, true);
+
+    // Etkilesimli kabuk.
+    level0a::shell::start(30, 300);
+
+    // Ring 3 GUI uygulamalari (her biri kendi gorevinde).
+    #[cfg(target_arch = "x86")]
+    for app in ["paint", "plasma"] {
+        match level0a::launcher::spawn_user_app(app) {
+            Ok(()) => crate::println!("[worker] '{}' baslatildi.", app),
+            Err(e) => crate::println!("[worker] '{}' baslatilamadi: {}", app, e),
+        }
     }
 }
 

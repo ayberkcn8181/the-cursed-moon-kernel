@@ -10,6 +10,7 @@
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::level0a::core::{fd, kmalloc, mmu, scheduler, vfs};
+use crate::level0a::drivers::gfx;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ServiceState {
@@ -66,7 +67,33 @@ pub unsafe fn bring_up(ramfs_files: &[(&'static str, &'static [u8])]) {
     crate::println!("[LEVEL-0a] Executor katmani baslatiliyor...");
 
     mmu::init();
+
+    // DIKKAT -- SIRA KRITIK: framebuffer cekirdegin identity map'inin
+    // DISINDADIR (tipik olarak ~0xFD000000). Sayfalama acildiktan sonraki
+    // ILK `println!` bile framebuffer konsoluna cizmeye calisir; esleme
+    // yapilmadan once hicbir sey yazdirilmamalidir, aksi halde page fault
+    // -> triple fault.
+    let fb_mapped = match gfx::physical_range() {
+        Some((phys, len)) => {
+            #[cfg(target_arch = "x86")]
+            {
+                mmu::map_mmio(phys, len)
+            }
+            // x86_64'te ust 1 GiB (0xC0000000+) boot stub'inda zaten eslendi.
+            #[cfg(target_arch = "x86_64")]
+            {
+                let _ = (phys, len);
+                true
+            }
+        }
+        None => false,
+    };
+
+    // Bu noktadan itibaren yazdirmak guvenli.
     register("vmm", mmu::is_enabled());
+    if gfx::available() {
+        register("framebuffer", fb_mapped);
+    }
 
     // Heap'in gercekten yazilabilir oldugunu tahsis ederek dogrula.
     let probe = kmalloc::kmalloc(64);

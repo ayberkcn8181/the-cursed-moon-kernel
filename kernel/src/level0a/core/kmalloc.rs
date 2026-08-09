@@ -1,4 +1,8 @@
-//! Cekirdek ici bump allocator (doc S.5: Heap 0x00200000-0x002FFFFF, 1 MiB).
+//! Cekirdek ici bump allocator.
+//!
+//! Heap 8 MiB'e tasindi: framebuffer'in 3 MiB'lik arka tamponu cekirdek
+//! `.bss`'ini ~5 MiB'e cikardi ve eski 2 MiB'lik heap konumu imajin
+//! uzerine biniyordu (doc S.5'teki harita Faz 13 ile guncellendi).
 //!
 //! Faz 2 kapsaminda kasten en basit haliyle: tahsis edilen bellek geri
 //! verilmez (`kfree` yok). Gercek bir serbest-liste/slab allocator Faz 9+
@@ -6,8 +10,8 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-pub const HEAP_START: usize = 0x0020_0000;
-pub const HEAP_SIZE: usize = 1024 * 1024; // 1 MiB
+pub const HEAP_START: usize = 0x0080_0000; // 8 MiB
+pub const HEAP_SIZE: usize = 4 * 1024 * 1024; // 4 MiB
 pub const HEAP_END: usize = HEAP_START + HEAP_SIZE;
 
 static NEXT_FREE: AtomicUsize = AtomicUsize::new(HEAP_START);

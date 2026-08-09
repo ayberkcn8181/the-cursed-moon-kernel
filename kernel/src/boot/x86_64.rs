@@ -29,7 +29,17 @@ mb2_start:
     .long mb2_end - mb2_start                         /* baslik uzunlugu  */
     .long -(0xE85250D6 + 0 + (mb2_end - mb2_start))   /* checksum         */
 
+    /* Framebuffer etiketi (tip 5): GUI icin lineer framebuffer iste. */
+    .align 8
+    .short 5
+    .short 0
+    .long 20
+    .long 1024      /* genislik  */
+    .long 768       /* yukseklik */
+    .long 32        /* bit/piksel */
+
     /* bitis etiketi (tip 0, boyut 8) */
+    .align 8
     .short 0
     .short 0
     .long 8
@@ -82,12 +92,23 @@ _start:
     cmp ecx, 512
     jne 2b
 
-    /* PD_LAPIC: 0xFEE00000'i kapsayan 2 MiB girdi.
-       0xFEE00000 - 0xC0000000 = 0x2EE00000 -> girdi indeksi 0x2EE00000/2MiB = 375 */
-    mov eax, 0xFEE00000
-    or eax, 0b10011011      /* Present|Writable|PageSize|PWT|PCD (cache disabled) */
-    mov [pd_lapic_table + 375 * 8], eax
-    mov dword ptr [pd_lapic_table + 375 * 8 + 4], 0
+    /* PD_LAPIC: 0xC0000000-0xFFFFFFFF araliginin TAMAMINI 2 MiB'lik
+       sayfalarla esle. Bu aralikta hem LAPIC (0xFEE00000) hem de QEMU'nun
+       framebuffer'i (~0xFD000000) bulunur; tek tek esleyip adres
+       tahmininde bulunmaktansa 1 GiB'i birden acmak hem basit hem
+       dayanikli. */
+    xor ecx, ecx
+3:
+    mov eax, 0x200000
+    mul ecx
+    add eax, 0xC0000000
+    adc edx, 0
+    or eax, 0b10000011      /* Present | Writable | PageSize */
+    mov [pd_lapic_table + ecx * 8], eax
+    mov [pd_lapic_table + ecx * 8 + 4], edx
+    inc ecx
+    cmp ecx, 512
+    jne 3b
 
     /* --- CR3 = PML4 --- */
     lea eax, [pml4_table]

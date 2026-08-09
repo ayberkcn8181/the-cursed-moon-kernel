@@ -31,7 +31,15 @@ pub fn on_irq() {
     }
 
     let ch = SCANCODE_ASCII[scancode as usize];
-    if ch != 0 {
+    if ch == 0 {
+        return;
+    }
+
+    // GUI aktifken tuslar olay kuyruguna gider (pencereler tuketir);
+    // GUI yokken dogrudan konsola yankilanir.
+    if crate::level0a::drivers::console::wm_owns_screen() {
+        crate::level0a::input::on_key(ch);
+    } else {
         crate::print!("{}", ch as char);
     }
 }

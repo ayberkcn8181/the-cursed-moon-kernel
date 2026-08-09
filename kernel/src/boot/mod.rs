@@ -1,3 +1,5 @@
+pub mod multiboot;
+
 #[cfg(target_arch = "x86")]
 pub mod i386;
 

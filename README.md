@@ -26,8 +26,47 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 5 | POSIX dosya cagrilari + VFS/RAMFS + FD tablosu + brk | ✅ |
 | 7 | **Windows NT/PE**: PE32 yukleyici + reloc + `int 0x2E` | ✅ (i386) |
 | 4 | **x86_64 portu**: Long Mode, 4 seviyeli sayfalama, ELF64, `syscall` | ✅ |
+| 13 | **Framebuffer/grafik**: 1024x768x32, bitmap font, cift tampon | ✅ (i386) |
+| 14 | **Pencere yoneticisi**: kompozitor, fare, surukleme, GUI syscall'lari | ✅ (i386) |
 | 6 | AArch64 portu (EL1/EL0, GIC, `svc #0`) | ⏳ yapilmadi |
-| 8+ | fork/execve + sinyaller, ekosistem | ⏳ yapilmadi |
+| 8+ | fork/execve + sinyaller, ext2, musl/busybox | ⏳ yapilmadi |
+
+## Grafiksel Alfa
+
+`make ARCH=i386 run` ile acilan masaustu:
+
+![TCMK masaustu](docs/screenshot-desktop.png)
+
+Ekranda gorunenler:
+
+- **TCMK Paint** ve **TCMK Plasma** -- Ring 3'te calisan iki ayri **kullanici
+  uygulamasi**. Her biri kendi scheduler gorevinde kosar, kendi piksel
+  tamponuna **dogrudan yazar** (cizim cekirdekten gecmez) ve `win_poll_key`
+  ile klavye olayi okur.
+- **TCMK Shell** -- etkilesimli kabuk: `help`, `ps`, `mem`, `ls`, `cat`,
+  `run`, `win`, `uptime`, `clear`.
+- **Sistem Gunlugu** -- cekirdek kaydinin canli goruntusu (konsol halka
+  tamponu her karede pencereye cizilir).
+- Ust cubukta canli gorev/pencere/tick/nabiz sayaclari, altta fare imleci.
+
+Pencereler baslik cubugundan **suruklenebilir**, tiklama ile one alinir ve
+odak degistirir. Klavye odakli pencereye yonlendirilir.
+
+### GUI sistem cagrilari
+
+POSIX/NT'de karsiligi olmayan islevler icin `0x500+` araligi ayrildi:
+
+| Numara | Cagri | Islev |
+|---|---|---|
+| 0x500 | `win_create(baslik, (x<<16)\|y, (w<<16)\|h)` | pencere ac |
+| 0x501 | `win_buffer(id)` | piksel tamponunun adresi |
+| 0x502 | `win_size(id)` | (genislik<<16)\|yukseklik |
+| 0x503 | `win_flush(id)` | kareyi bitir, CPU'yu birak |
+| 0x504 | `win_poll_key(id)` | bekleyen tus (0 = yok) |
+| 0x505 | `mouse_state()` | fare konumu + tus durumu |
+
+Pencere tamponu `mmu::protect_user_range` ile Ring 3'e acilir; uygulama
+piksellerini kendisi yazar, cekirdek yalnizca kompozisyon yapar.
 
 ## Desteklenen mimariler
 
@@ -233,9 +272,26 @@ gercekten uygulandigini gosterir.
 ## Userland ikililerini yeniden uretme
 
 ```
-make userland                       # i386: hello.elf + hello.exe
+make userland                       # tum i386 ikilileri (hello/exe/paint/plasma)
 python3 tools/gen_hello_elf64.py userland/hello64.elf   # x86_64
+python3 tools/gen_font.py           # 8x16 bitmap fontu yeniden uret
 ```
+
+## Alfa'nin bilinen sinirlari
+
+Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
+
+- **Surec basina adres uzayi yok.** Tum Ring 3 uygulamalari ayni sayfa
+  tablosunu paylasir; her biri kullanici bolgesinde ayri bir "slot"a
+  yuklenir (256 KiB). Bu, uygulamalarin birbirinin bellegini okuyabilmesi
+  demektir. Cozum `mmu_as_create_clone` (doc Faz 8).
+- **Zamanlama isbirlikcidir.** Uygulama `win_flush` cagirmazsa CPU'yu
+  birakmaz. Gercek preemption, kesme icinden baglam degistirmeyi gerektirir.
+- **GUI yalnizca i386'da.** x86_64 cekirdegi calisir ve framebuffer'i
+  eslerse de GUI uygulamalari su an yalnizca ELF32 olarak uretiliyor.
+- **Uygulamalar elle yazilmis makine kodudur** (`tools/gen_gui_app.py`).
+  Gercek bir derleyici zinciri (musl/newlib) Faz 11-12 konusudur.
+- Dosya sistemi salt okunur RAMFS; kalici depolama (ext2) yok.
 
 ## Kapsam Disi (sonraki fazlar)
 

@@ -31,6 +31,14 @@ pub struct Task {
     pub state: TaskState,
     pub stack_pointer: usize,
     pub name: &'static str,
+    /// Bu gorev Ring 3'e girdiginde TSS.esp0/rsp0'a yazilacak yigin.
+    /// Her gorevin AYRI olmasi sarttir: aksi halde iki Ring 3 sureci
+    /// ayni cekirdek yiginini ezer.
+    pub kernel_stack_top: usize,
+    /// Ring 3'ten `sys_exit` ile donus icin saklanan cekirdek baglami.
+    pub user_resume: usize,
+    /// Gorev su an Ring 3'te mi calisiyor?
+    pub in_user_mode: bool,
 }
 
 impl Task {
@@ -39,6 +47,9 @@ impl Task {
             state: TaskState::Unused,
             stack_pointer: 0,
             name: "",
+            kernel_stack_top: 0,
+            user_resume: 0,
+            in_user_mode: false,
         }
     }
 }
@@ -75,10 +86,17 @@ pub fn spawn(name: &'static str, entry: extern "C" fn() -> !) -> Option<usize> {
         let stack_top = stack.add(TASK_STACK_SIZE) as *mut usize;
         let sp = bootstrap_stack(stack_top, entry);
 
+        // Ring 3 gecisleri icin AYRI bir cekirdek yigini.
+        let kstack = kmalloc::kmalloc_aligned(TASK_STACK_SIZE, 16)?;
+        let kstack_top = kstack.add(TASK_STACK_SIZE) as usize;
+
         let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
         (*tasks.add(index)).state = TaskState::Ready;
         (*tasks.add(index)).stack_pointer = sp;
         (*tasks.add(index)).name = name;
+        (*tasks.add(index)).kernel_stack_top = kstack_top;
+        (*tasks.add(index)).user_resume = 0;
+        (*tasks.add(index)).in_user_mode = false;
 
         TASK_COUNT.store(index + 1, Ordering::Relaxed);
         Some(index)
@@ -123,6 +141,16 @@ pub fn yield_now() {
         (*tasks.add(next_index)).state = TaskState::Running;
         CURRENT.store(next_index, Ordering::Relaxed);
         SWITCHES.fetch_add(1, Ordering::Relaxed);
+
+        // Gelen gorevin cekirdek yiginini donanima bildir. Bu satir olmadan
+        // iki Ring 3 sureci ayni TSS yiginini paylasir ve birbirinin
+        // syscall cercevesini ezer.
+        let incoming_kstack = (*tasks.add(next_index)).kernel_stack_top;
+        if incoming_kstack != 0 {
+            crate::level0a::gdt::set_kernel_stack(incoming_kstack);
+            #[cfg(target_arch = "x86_64")]
+            crate::level0a::syscall_msr::set_kernel_stack(incoming_kstack);
+        }
 
         let old_sp_slot = core::ptr::addr_of_mut!((*tasks.add(current_index)).stack_pointer);
         let new_sp = (*tasks.add(next_index)).stack_pointer;
@@ -173,4 +201,28 @@ pub fn switch_count() -> usize {
 
 pub fn task_count() -> usize {
     TASK_COUNT.load(Ordering::Relaxed)
+}
+
+// --- Ring 3 baglami (gorev basina) ---
+
+/// Calisan gorevin Ring 3 `resume` slotuna isaretci.
+pub fn current_resume_slot() -> *mut usize {
+    unsafe {
+        let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+        core::ptr::addr_of_mut!((*tasks.add(CURRENT.load(Ordering::Relaxed))).user_resume)
+    }
+}
+
+pub fn set_current_in_user_mode(flag: bool) {
+    unsafe {
+        let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+        (*tasks.add(CURRENT.load(Ordering::Relaxed))).in_user_mode = flag;
+    }
+}
+
+pub fn current_in_user_mode() -> bool {
+    unsafe {
+        let tasks = core::ptr::addr_of!(TASKS) as *const Task;
+        (*tasks.add(CURRENT.load(Ordering::Relaxed))).in_user_mode
+    }
 }

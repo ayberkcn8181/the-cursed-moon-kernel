@@ -23,9 +23,12 @@ pub fn remap() {
         // ICW4: 8086 modu
         outb(PIC1_DATA, 0x01);
         outb(PIC2_DATA, 0x01);
-        // Maske: sadece IRQ0 (PIT) ve IRQ1 (klavye) acik.
-        outb(PIC1_DATA, 0xFC);
-        outb(PIC2_DATA, 0xFF);
+        // Maske: IRQ0 (PIT), IRQ1 (klavye) ve IRQ2 (slave kaskadi) acik.
+        // IRQ12 (PS/2 fare) slave denetleyicidedir; kaskad hatti kapaliysa
+        // fare kesmesi master'a hic ulasmaz -- bu klasik bir tuzaktir.
+        outb(PIC1_DATA, 0xF8);
+        // Slave: yalnizca IRQ12 (bit 4) acik.
+        outb(PIC2_DATA, 0xEF);
     }
 }
 

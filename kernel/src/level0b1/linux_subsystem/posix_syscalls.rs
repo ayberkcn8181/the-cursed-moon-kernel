@@ -14,7 +14,21 @@
 
 use crate::arch::cpu::regs::SyscallFrame;
 use crate::level0a::core::mmu;
+use crate::level0a::gui_api;
 use crate::level0a::kernel_api::{self, KernelError};
+
+// --- TCMK'ye ozgu GUI cagrilari ---
+//
+// POSIX'te karsiligi olmayan islevler icin 0x500+ araligi ayrildi. Bu
+// aralik hem i386 hem x86_64 Linux numaralarinin cok uzerindedir, bu
+// yuzden iki mimaride de catisma olmaz. (NT tarafi 0x1000+ kullanir.)
+pub const SYS_WIN_CREATE: u32 = 0x500;
+pub const SYS_WIN_BUFFER: u32 = 0x501;
+pub const SYS_WIN_SIZE: u32 = 0x502;
+pub const SYS_WIN_FLUSH: u32 = 0x503;
+pub const SYS_WIN_POLL_KEY: u32 = 0x504;
+pub const SYS_MOUSE_STATE: u32 = 0x505;
+pub const SYS_YIELD: u32 = 0x506;
 
 // Linux syscall numaralari MIMARIYE GORE DEGISIR -- ayni isim, farkli sayi.
 // Bunu tek bir kumeyle gecistirmek Faz 4'te gercek bir hataya yol acti:
@@ -108,6 +122,49 @@ pub fn dispatch(frame: &mut SyscallFrame) {
             // brk bir ADRES dondurur, hata kodu degil -- isaretli
             // donusum yapilmadan dogrudan yazilir.
             frame.set_return(kernel_api::brk(arg1));
+            return;
+        }
+
+        // --- GUI cagrilari: adres/durum dondururler, errno degil ---
+        SYS_WIN_CREATE => {
+            // arg1 = baslik isaretcisi, arg2 = (x<<16)|y, arg3 = (w<<16)|h
+            let mut storage = [0u8; PATH_MAX];
+            let title = unsafe { copy_user_cstr(arg1, &mut storage) }.unwrap_or("app");
+            let (x, y) = (arg2 >> 16, arg2 & 0xFFFF);
+            let (w, h) = (arg3 >> 16, arg3 & 0xFFFF);
+            let ret = match gui_api::create_window(title, x, y, w, h) {
+                Ok(id) => id,
+                Err(_) => usize::MAX,
+            };
+            frame.set_return(ret);
+            return;
+        }
+        SYS_WIN_BUFFER => {
+            frame.set_return(gui_api::window_buffer(arg1).unwrap_or(0));
+            return;
+        }
+        SYS_WIN_SIZE => {
+            frame.set_return(gui_api::window_size(arg1).unwrap_or(0));
+            return;
+        }
+        SYS_WIN_FLUSH => {
+            // Kompozitor her karede zaten cizer; flush yalnizca uygulamanin
+            // CPU'yu birakma noktasidir.
+            crate::level0a::core::scheduler::yield_now();
+            frame.set_return(0);
+            return;
+        }
+        SYS_WIN_POLL_KEY => {
+            frame.set_return(gui_api::poll_key(arg1) as usize);
+            return;
+        }
+        SYS_MOUSE_STATE => {
+            frame.set_return(gui_api::mouse_state());
+            return;
+        }
+        SYS_YIELD => {
+            crate::level0a::core::scheduler::yield_now();
+            frame.set_return(0);
             return;
         }
 

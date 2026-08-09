@@ -59,6 +59,12 @@ struct Prepared {
 ///
 /// # Safety
 /// `run_image` ile ayni onkosullar.
+pub unsafe fn run_from_vfs_dynamic(path: &str) -> Result<(), SpawnError> {
+    let node = vfs::lookup(path).ok_or(SpawnError::NotFound)?;
+    let image = vfs::as_slice(node).ok_or(SpawnError::NotFound)?;
+    run_image(path, image)
+}
+
 pub unsafe fn run_from_vfs(path: &'static str) -> Result<(), SpawnError> {
     let node = vfs::lookup(path).ok_or(SpawnError::NotFound)?;
     let image = vfs::as_slice(node).ok_or(SpawnError::NotFound)?;

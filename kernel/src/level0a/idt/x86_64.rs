@@ -80,6 +80,12 @@ pub fn init() {
             KERNEL_CODE_SELECTOR,
             GATE_PRESENT_RING0_INT,
         );
+        // IRQ12 = PS/2 fare (PIC remap sonrasi vektor 44).
+        IDT[44].set(
+            mouse_handler as *const () as u64,
+            KERNEL_CODE_SELECTOR,
+            GATE_PRESENT_RING0_INT,
+        );
         IDT[128].set(
             syscall_entry as *const () as u64,
             KERNEL_CODE_SELECTOR,
@@ -114,6 +120,11 @@ extern "x86-interrupt" fn pit_handler(_frame: InterruptStackFrame) {
 extern "x86-interrupt" fn keyboard_handler(_frame: InterruptStackFrame) {
     crate::level0a::keyboard::on_irq();
     crate::level0a::pic::send_eoi(1);
+}
+
+extern "x86-interrupt" fn mouse_handler(_frame: InterruptStackFrame) {
+    crate::level0a::input::on_mouse_irq();
+    crate::level0a::pic::send_eoi(12);
 }
 
 // x86_64'te `pusha` yoktur; registerlar `SyscallFrame` alan sirasina

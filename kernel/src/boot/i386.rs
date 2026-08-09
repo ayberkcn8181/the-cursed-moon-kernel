@@ -9,12 +9,22 @@ use core::arch::global_asm;
 
 global_asm!(
     r#"
+/* Multiboot1 basligi.
+   flags bit 0 = modulleri sayfa hizala, bit 1 = bellek bilgisi,
+   bit 2 = VIDEO MODU iste (GUI icin lineer framebuffer).
+   Bit 2 acikken baslik 48 bayta uzar: bit 16 kapali olsa bile
+   adres alanlari (offset 12..28) YER TUTMAK ZORUNDA. */
 .section .multiboot_header, "a"
 .align 4
 multiboot_header:
-    .long 0x1BADB002
-    .long 0x00000003
-    .long -(0x1BADB002 + 0x00000003)
+    .long 0x1BADB002                        /* magic    */
+    .long 0x00000007                        /* flags    */
+    .long -(0x1BADB002 + 0x00000007)        /* checksum */
+    .long 0, 0, 0, 0, 0                     /* adres alanlari (kullanilmiyor) */
+    .long 0                                 /* mode_type = 0 -> lineer grafik */
+    .long 1024                              /* genislik */
+    .long 768                               /* yukseklik */
+    .long 32                                /* bit/piksel */
 
 .section .bss
 .align 16

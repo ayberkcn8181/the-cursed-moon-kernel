@@ -80,32 +80,32 @@ extern "C" {
 /// Ring 3 baglaminin geri donus noktasi. Tek bir kullanici programi
 /// destekledigimiz icin (Faz 3) tek slot yeterli; Faz 8'de process basina
 /// tasinacak.
-static mut RESUME_SLOT: usize = 0;
-static mut IN_USER_MODE: bool = false;
+/// Ring 3 baglami artik **gorev basina** tutulur (bkz.
+/// `scheduler::current_resume_slot`). Tek global slot kullanmak, ikinci bir
+/// GUI uygulamasi baslatildiginda ilkinin donus adresini eziyordu.
 
 /// Ring 3'e gecip kullanici programini calistirir; program `sys_exit`
 /// cagirdiginda buraya doner.
 ///
 /// # Safety
 /// `entry` ve `user_stack_top` kullaniciya acik (PTE User biti set) ve
-/// gecerli sayfalarda olmalidir; TSS.esp0 gecerli bir cekirdek yiginini
+/// gecerli sayfalarda olmalidir; TSS gecerli bir cekirdek yiginini
 /// gostermelidir.
 pub unsafe fn run_user_program(entry: usize, user_stack_top: usize) {
-    IN_USER_MODE = true;
-    arch_enter_user_mode(entry, user_stack_top, core::ptr::addr_of_mut!(RESUME_SLOT));
-    IN_USER_MODE = false;
+    use crate::level0a::core::scheduler;
+
+    scheduler::set_current_in_user_mode(true);
+    arch_enter_user_mode(entry, user_stack_top, scheduler::current_resume_slot());
+    scheduler::set_current_in_user_mode(false);
 }
 
-/// Ring 3'te bir kullanici programi calisiyor mu?
+/// Calisan gorev Ring 3'te bir program yurutuyor mu?
 pub fn in_user_mode() -> bool {
-    unsafe { core::ptr::addr_of!(IN_USER_MODE).read_volatile() }
+    crate::level0a::core::scheduler::current_in_user_mode()
 }
 
-/// `sys_exit` Ring 3'ten geldiginde cagrilir: cekirdek baglamini geri
-/// yukleyip `run_user_program`'in cagrildigi yere doner.
-///
 /// # Safety
 /// Yalnizca `in_user_mode()` dogruyken cagrilmalidir.
 pub unsafe fn leave_user_mode() -> ! {
-    arch_return_from_user(core::ptr::addr_of_mut!(RESUME_SLOT))
+    arch_return_from_user(crate::level0a::core::scheduler::current_resume_slot())
 }

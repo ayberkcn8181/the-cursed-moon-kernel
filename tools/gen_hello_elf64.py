@@ -24,7 +24,7 @@ Kullanim:
 import struct
 import sys
 
-USER_BASE = 0x0030_0000
+USER_BASE = 0x00C0_0000
 
 EHDR_SIZE = 64
 PHDR_SIZE = 56

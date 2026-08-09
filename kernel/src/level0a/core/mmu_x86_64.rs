@@ -27,8 +27,8 @@ const CR0_PG: u64 = 1 << 31;
 const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
 /// Kullanici (Ring 3) bellek bolgesi -- i386 ile ayni adresler.
-pub const USER_MEM_START: usize = 0x0030_0000;
-pub const USER_MEM_SIZE: usize = 0x0010_0000; // 1 MiB
+pub const USER_MEM_START: usize = 0x00C0_0000; // 12 MiB
+pub const USER_MEM_SIZE: usize = 0x0020_0000; // 2 MiB (tam bir 2 MiB sayfa)
 
 /// Boot stub'inin ilk 1 GiB icin kurdugu esleme.
 const IDENTITY_MAPPED_BYTES: usize = 1024 * 1024 * 1024;

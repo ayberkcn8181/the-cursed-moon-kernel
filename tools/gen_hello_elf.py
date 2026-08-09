@@ -24,7 +24,7 @@ import sys
 
 # Kullanici bellek bolgesi -- kernel/src/level0a/core/mmu_i386.rs icindeki
 # USER_MEM_START ile ayni olmalidir.
-USER_BASE = 0x0030_0000
+USER_BASE = 0x00C0_0000
 
 EHDR_SIZE = 52
 PHDR_SIZE = 32

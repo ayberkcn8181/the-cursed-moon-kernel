@@ -107,13 +107,22 @@ pub fn init() {
     });
 }
 
-/// VGA'ya ve (otomatik test/gozlem icin) COM1 seri porta ayni metni yazar.
+/// Tum cikis kanallarina ayni metni yazar.
+///
+/// - COM1 seri port: her zaman (otomatik test/gozlem icin).
+/// - Framebuffer varsa `console` halka tamponu (GUI bunu pencerede gosterir).
+/// - Framebuffer yoksa klasik VGA metin modu.
 struct DualWriter;
 
 impl fmt::Write for DualWriter {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        unsafe { (*WRITER.0.get()).write_str(s)? };
         super::serial::write_str(s);
+
+        if super::gfx::available() {
+            super::console::write_str(s);
+        } else {
+            unsafe { (*WRITER.0.get()).write_str(s)? };
+        }
         Ok(())
     }
 }
