@@ -1,5 +1,6 @@
 //! The Cursed Moon Kernel (TCMK) -- Rust portu.
 //! Faz 1: Boot & Level-0b2 Temeli. Faz 2: Level-0a Cekirdek Temeli.
+//! Faz 3: Level-0b1 ELF/POSIX + Ring 3 userland.
 //!
 //! Katman ozeti (bkz. proje dokumantasyonu):
 //!   Level-0b2 -> Merkezi Denetleyici (dispatcher/state_monitor/load_balancer/fallback)
@@ -20,6 +21,10 @@ use core::panic::PanicInfo;
 
 use level0a::core::scheduler;
 use level0b1::linux_subsystem::posix_syscalls::{SYS_EXIT, SYS_WRITE};
+
+/// Faz 3 kullanici programi. `tools/gen_hello_elf.py` ile uretilir;
+/// Faz 5'te VFS'ten (`/bin/hello`) okunacak, gomulu hali fallback kalacak.
+static HELLO_ELF: &[u8] = include_bytes!("../../userland/hello.elf");
 
 #[no_mangle]
 pub extern "C" fn kernel_main(multiboot_magic: u32, _multiboot_info_addr: u32) -> ! {
@@ -114,6 +119,27 @@ extern "C" fn worker_task() -> ! {
         crate::println!("[worker] gecersiz fd sonucu: {}", bad as i32);
 
         scheduler::yield_now();
+    }
+
+    // --- Faz 3: gercek Ring 3 userland ---
+    // TSS'i kur, gomulu ELF'i yukle ve iret ile Ring 3'e gec.
+    unsafe {
+        let kstack = level0a::core::kmalloc::kmalloc_aligned(16 * 1024, 16)
+            .expect("TSS icin cekirdek yigini ayrilamadi");
+        level0a::gdt::install_tss(kstack.add(16 * 1024) as u32);
+
+        match level0b1::process::run_elf("hello.elf", HELLO_ELF) {
+            Ok(()) => crate::println!("[worker] Ring 3 testi basarili."),
+            Err(e) => crate::println!("[worker] Ring 3 testi BASARISIZ: {:?}", e),
+        }
+
+        // Izolasyon dogrulamasi: cekirdek sayfalari Ring 3'e kapali kalmali.
+        crate::println!(
+            "[worker] izolasyon: user@0x300000={} kernel@0x100000={} heap@0x200000={}",
+            level0a::core::mmu::is_user_accessible(0x0030_0000),
+            level0a::core::mmu::is_user_accessible(0x0010_0000),
+            level0a::core::mmu::is_user_accessible(0x0020_0000),
+        );
     }
 
     crate::println!("[worker] isim bitti, sys_exit cagriliyor.");

@@ -4,6 +4,7 @@ use core::arch::asm;
 
 pub mod context;
 pub mod regs;
+pub mod usermode;
 
 #[inline(always)]
 pub unsafe fn outb(port: u16, val: u8) {

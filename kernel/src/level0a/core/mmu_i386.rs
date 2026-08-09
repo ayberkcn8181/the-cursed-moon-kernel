@@ -20,7 +20,13 @@ const IDENTITY_MAPPED_BYTES: usize = ENTRIES * PAGE_SIZE;
 
 const PTE_PRESENT: u32 = 1 << 0;
 const PTE_WRITABLE: u32 = 1 << 1;
+const PTE_USER: u32 = 1 << 2;
 const CR0_PG: u32 = 1 << 31;
+
+/// Kullanici (Ring 3) bellek bolgesinin baslangici -- doc'taki
+/// `TCMK_USER_MEM_START` ile ayni deger.
+pub const USER_MEM_START: usize = 0x0030_0000;
+pub const USER_MEM_SIZE: usize = 0x0010_0000; // 1 MiB (0x300000-0x3FFFFF)
 
 /// Alanlara yalnizca ham isaretci uzerinden erisilir (asagida
 /// `addr_of_mut!`), bu yuzden derleyici "hic okunmadi" sanir.
@@ -51,6 +57,58 @@ pub unsafe fn init() {
 
     write_cr3(pd as u32);
     write_cr0(read_cr0() | CR0_PG);
+}
+
+/// Verilen araligi Ring 3'ten erisilebilir yapar (PTE User biti).
+///
+/// PDE'ye de User biti konur; bu tek basina cekirdegi acmaz, cunku gercek
+/// erisim kontrolu PDE **ve** PTE'nin birlikte User olmasini gerektirir --
+/// cekirdek sayfalarinin PTE'lerinde User biti kapali kaldigi surece
+/// Ring 3 onlara erisemez (doc S.7 Faz 5: `mmu_protect_user_range`).
+///
+/// # Safety
+/// Yalnizca gercekten kullaniciya ait olmasi gereken araliklar icin
+/// cagrilmalidir; cekirdek bolgeleri verilirse izolasyon kirilir.
+pub unsafe fn protect_user_range(start: usize, len: usize) {
+    if len == 0 {
+        return;
+    }
+
+    let first = start / PAGE_SIZE;
+    let last = (start + len - 1) / PAGE_SIZE;
+
+    let pt = core::ptr::addr_of_mut!(FIRST_PAGE_TABLE) as *mut u32;
+    for page in first..=last {
+        if page >= ENTRIES {
+            break; // Faz 3'te yalnizca ilk 4 MiB eslenmis durumda.
+        }
+        let entry = pt.add(page).read();
+        pt.add(page).write(entry | PTE_USER | PTE_WRITABLE);
+    }
+
+    let pd = core::ptr::addr_of_mut!(PAGE_DIRECTORY) as *mut u32;
+    let pde = pd.read();
+    pd.write(pde | PTE_USER);
+
+    flush_tlb();
+}
+
+/// CR3'u yeniden yukleyerek TLB'yi bosaltir.
+unsafe fn flush_tlb() {
+    let pd = core::ptr::addr_of!(PAGE_DIRECTORY) as u32;
+    write_cr3(pd);
+}
+
+/// Bir adresin Ring 3'e acik olup olmadigini bildirir (dogrulama amacli).
+pub fn is_user_accessible(addr: usize) -> bool {
+    let page = addr / PAGE_SIZE;
+    if page >= ENTRIES {
+        return false;
+    }
+    unsafe {
+        let pt = core::ptr::addr_of!(FIRST_PAGE_TABLE) as *const u32;
+        pt.add(page).read() & PTE_USER != 0
+    }
 }
 
 pub fn is_enabled() -> bool {

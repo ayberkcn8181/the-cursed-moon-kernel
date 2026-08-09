@@ -39,8 +39,19 @@ pub unsafe fn write(fd: u32, buf: *const u8, len: usize) -> Result<usize, Kernel
     Ok(len)
 }
 
-/// Calisan gorevi sonlandirir (doc S.6: sys_exit).
+/// Calisan gorevi/sureci sonlandirir (doc S.6: sys_exit).
+///
+/// Iki farkli baglam vardir:
+///   - **Ring 3 sureci**: kullanici kendi yigininda, cekirdek ise TSS.esp0
+///     yiginindadir. Gorev degistirme yapilamaz; saklanmis cekirdek baglami
+///     geri yuklenerek `run_user_program`'in cagrildigi yere donulur.
+///   - **Ring 0 cekirdek gorevi**: normal scheduler sonlandirmasi.
 pub fn exit_current_task(code: u32) -> ! {
+    if crate::arch::i386::usermode::in_user_mode() {
+        crate::println!("[LEVEL-0a] Ring 3 sureci cikis kodu {} ile sonlandi.", code);
+        unsafe { crate::arch::i386::usermode::leave_user_mode() }
+    }
+
     crate::println!(
         "[LEVEL-0a] gorev '{}' cikis kodu {} ile sonlandi.",
         crate::level0a::core::scheduler::current_name(),
