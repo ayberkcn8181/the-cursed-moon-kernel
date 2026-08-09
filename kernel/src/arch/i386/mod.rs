@@ -2,6 +2,7 @@
 
 use core::arch::asm;
 
+pub mod context;
 pub mod regs;
 
 #[inline(always)]
@@ -49,9 +50,45 @@ pub fn without_interrupts<F: FnOnce() -> R, R>(f: F) -> R {
     ret
 }
 
-/// Faz 1 dogrulamasi: kullanici-modu uygulamasi henuz olmadigi icin
-/// int 0x80 hattinin Level-0b2 dispatcher'ina kadar ulastigini kanitlamak
-/// icin cekirdegin kendisi tetikler.
-pub unsafe fn int80_selftest() {
-    asm!("int 0x80", options(nomem, nostack));
+/// i386 Linux ABI ile `int 0x80` sistem cagrisi tetikler
+/// (EAX=numara, EBX/ECX/EDX=arg1..3, donus EAX -- doc S.6).
+///
+/// Faz 2'de henuz Ring 3 kullanici programi yok; cagriyi cekirdegin kendisi
+/// yapar, ancak gectigi yol gercek olanla ayni: IDT vektor 128 -> Level-0b2
+/// dispatcher -> Level-0b1 POSIX subsystem -> Level-0a.
+///
+/// # Safety
+/// Isaretcı argumanlari gecerli bellek gostermelidir.
+pub unsafe fn syscall3(number: u32, arg1: u32, arg2: u32, arg3: u32) -> u32 {
+    let ret: u32;
+    asm!(
+        "int 0x80",
+        inout("eax") number => ret,
+        in("ebx") arg1,
+        in("ecx") arg2,
+        in("edx") arg3,
+        options(nostack),
+    );
+    ret
+}
+
+/// CR3'e sayfa dizini fiziksel adresini yukler.
+///
+/// # Safety
+/// `pd_phys` gecerli, 4 KiB hizali bir sayfa dizinini gostermelidir.
+pub unsafe fn write_cr3(pd_phys: u32) {
+    asm!("mov cr3, {0}", in(reg) pd_phys, options(nostack, preserves_flags));
+}
+
+pub fn read_cr0() -> u32 {
+    let value: u32;
+    unsafe { asm!("mov {0}, cr0", out(reg) value, options(nomem, nostack, preserves_flags)) };
+    value
+}
+
+/// # Safety
+/// CR0.PG'yi acmak, cagirmadan once gecerli bir sayfa tablosunun CR3'e
+/// yuklenmis ve calisan kodun identity-map edilmis olmasini gerektirir.
+pub unsafe fn write_cr0(value: u32) {
+    asm!("mov cr0, {0}", in(reg) value, options(nostack, preserves_flags));
 }

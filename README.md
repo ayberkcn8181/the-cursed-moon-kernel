@@ -14,8 +14,9 @@ Katmanlar (Ring donanim izolasyonuna dayanir):
 - **Level-0a** (Ring 0): Ana cekirdek — GDT/IDT/PIC/PIT/klavye/VGA,
   ileride scheduler/VMM/VFS.
 
-Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin. **Bu repo su an
-sadece Faz 1'i (Boot & Level-0b2 Temeli) icerir.**
+Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
+**Tamamlanan fazlar: Faz 1 (Boot & Level-0b2 Temeli), Faz 2 (Level-0a
+Cekirdek Temeli).**
 
 ## Gereksinimler
 
@@ -52,6 +53,34 @@ QEMU'da (`make run`, veya headless `qemu-system-i386 -cdrom build/tcmk.iso
    "olu" sayip Fallback Interface'i tetikliyor
    (`Level-0a YANIT VERMIYOR (heartbeat kayboldu)` mesaji).
 
+## Faz 2 Dogrulama Listesi
+
+`make run` ciktisinda:
+
+1. ✅ **Sayfalama:** `paging=acik identity=4 MiB` -- 0-4 MiB identity map,
+   CR0.PG acik (kernel@1M, heap@2M, VGA@0xB8000 hepsi bu araliktadir).
+2. ✅ **kmalloc:** 1 MiB bump heap (0x00200000-0x002FFFFF); worker gorevinin
+   16 KiB yigini buradan tahsis edilir.
+3. ✅ **Scheduler:** idle + worker arasinda round-robin gecis
+   (`gecis=` sayaci artar); `sys_exit` sonrasi worker `Terminated` olur ve
+   bir daha secilmez.
+4. ✅ **Tam syscall zinciri:** worker'in `int 0x80`'i
+   Level-0b2 dispatcher -> Level-0b1 POSIX -> Level-0a `kernel_api`
+   yolunu izler; `sys_write` 38 bayt doner, gecersiz fd `-9` (-EBADF) doner,
+   `sys_exit` gorevi sonlandirir.
+5. ✅ **Servis yonetimi:** `vmm`, `kmalloc`, `scheduler` servisleri
+   `[ACTIVE]` olarak raporlanir (systemd-benzeri kayit tablosu).
+6. ✅ **Co-Service / Hata Toleransi:** scheduler durursa (nabiz=0) State
+   Monitor Level-0a'yi `Dead` isaretler; syscall'lar Level-0b1'e HIC
+   ugramadan Fallback Interface'in `emulate_syscall`'ina duser ve
+   `[co-service]` onekiyle islenmeye devam eder -- sistem ayakta kalir.
+
+### Faz 2 manuel testi (Co-Service)
+
+`scheduler.rs::yield_now` icindeki `pit::beat()` cagrisini yorum satirina
+alip yeniden derleyin: ~5 saniye sonra Level-0a `Dead` olur ve syscall'lar
+`[co-service]` onekiyle Fallback tarafindan islenmeye baslar.
+
 ## Bilinen Tuzaklar (debugging notlari)
 
 Faz 1 gelistirilirken iki kritik hataya rastlandi; ileride x86_64/AArch64
@@ -72,6 +101,15 @@ portlarinda benzer tuzaklara dikkat:
   kaydedilen "kesme durumu" ROM-shadow bolgesinden okunan rastgele/kod
   baytlariydi. Boyle bir belirti gorulurse once ESP/stack kurulumunu
   supheli goruntuleyin.
+- **Heartbeat "gecis sayisi" degil, "dongu ilerliyor mu" olcmelidir.**
+  Faz 2'de nabiz once yalnizca baglam DEGISIMINDE artiriliyordu; worker
+  bitip geriye tek basina idle kalinca gecis olmadigi icin nabiz durdu ve
+  Fallback tamamen saglikli bir sistemde yanlislikla devreye girdi. Dogrusu:
+  `yield_now`'un basinda, erken donusten once `beat()`.
+- `extern "x86-interrupt"` syscall girisi icin YETERSIZDIR: Linux ABI'si
+  numara/argumanlari registerlarda tasir, o ABI ise registerlara erisim
+  vermez. int 0x80 girisi `pusha` + frame isaretcisi ile elle yazilmalidir
+  (bkz. `level0a/idt.rs::syscall_entry`).
 
 ## Neden Rust, neden bu araclar
 

@@ -6,10 +6,10 @@
 //! yazmamiza ragmen mantiksal akis dokumandaki "her seyin once Level-0b2'den
 //! gectigi" kuraliyla eslesir.
 
-use core::arch::asm;
+use core::arch::{asm, global_asm};
 use core::mem::size_of;
 
-use crate::arch::i386::regs::InterruptStackFrame;
+use crate::arch::i386::regs::{InterruptStackFrame, SyscallFrame};
 use crate::level0a::gdt::KERNEL_CODE_SELECTOR;
 
 const GATE_PRESENT_RING0_INT32: u8 = 0x8E; // P=1 DPL=00 type=32-bit interrupt gate
@@ -71,7 +71,7 @@ pub fn init() {
             GATE_PRESENT_RING0_INT32,
         );
         IDT[128].set(
-            syscall_handler as *const () as u32,
+            syscall_entry as *const () as u32,
             KERNEL_CODE_SELECTOR,
             GATE_PRESENT_RING3_INT32,
         );
@@ -101,7 +101,37 @@ extern "x86-interrupt" fn keyboard_handler(_frame: InterruptStackFrame) {
     crate::level0a::pic::send_eoi(1);
 }
 
-extern "x86-interrupt" fn syscall_handler(_frame: InterruptStackFrame) {
-    crate::level0b2::load_balancer::note_call(0x80);
-    crate::level0b2::dispatcher::handle_syscall(0x80);
+// int 0x80 girisi.
+//
+// `extern "x86-interrupt"` burada YETMEZ: Linux ABI'si syscall numarasini ve
+// argumanlari REGISTERLARDA tasir (EAX/EBX/ECX/EDX/ESI/EDI), o ABI ise
+// registerlara erisim vermez. Bu yuzden giris elle yazilir: `pusha` tum
+// genel registerlari `SyscallFrame` duzeninde yigina koyar, frame'in adresi
+// Rust tarafina verilir, `popa` ise -- handler EAX slotunu guncelledigi icin --
+// donus degerini kullaniciya tasir.
+global_asm!(
+    r#"
+.section .text
+.global syscall_entry
+.type syscall_entry, @function
+syscall_entry:
+    pusha
+    push esp                /* &SyscallFrame */
+    call syscall_dispatch_rust
+    add esp, 4
+    popa
+    iretd
+"#
+);
+
+extern "C" {
+    fn syscall_entry();
+}
+
+#[no_mangle]
+extern "C" fn syscall_dispatch_rust(frame: *mut SyscallFrame) {
+    // Doc S.3: cagri once Level-0b2'ye duser, oradan Level-0b1'e dagitilir.
+    unsafe {
+        crate::level0b2::dispatcher::handle_syscall(&mut *frame);
+    }
 }

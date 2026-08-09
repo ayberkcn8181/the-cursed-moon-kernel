@@ -10,6 +10,14 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 /// gelir.
 const DEAD_THRESHOLD: u32 = 500;
 
+/// Doc S.2.2.A: State Monitor'un izledigi uc durum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Level0aHealth {
+    Healthy,
+    Busy,
+    Dead,
+}
+
 static LAST_HEARTBEAT: AtomicU32 = AtomicU32::new(0);
 static STALE_TICKS: AtomicU32 = AtomicU32::new(0);
 static FALLBACK_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -29,4 +37,19 @@ pub fn tick() {
     if stale >= DEAD_THRESHOLD && !FALLBACK_ACTIVE.swap(true, Ordering::Relaxed) {
         crate::level0b2::fallback::level0a_dead();
     }
+}
+
+/// Nabiz hic durmadiysa Healthy; gecikme baslamis ama esik asilmamissa Busy.
+pub fn health() -> Level0aHealth {
+    if FALLBACK_ACTIVE.load(Ordering::Relaxed) {
+        return Level0aHealth::Dead;
+    }
+    if STALE_TICKS.load(Ordering::Relaxed) > DEAD_THRESHOLD / 2 {
+        return Level0aHealth::Busy;
+    }
+    Level0aHealth::Healthy
+}
+
+pub fn level0a_is_dead() -> bool {
+    FALLBACK_ACTIVE.load(Ordering::Relaxed)
 }
