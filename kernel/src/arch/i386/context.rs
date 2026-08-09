@@ -43,7 +43,7 @@ arch_context_switch:
 
 extern "C" {
     /// Bkz. yukaridaki `global_asm!` blogu.
-    pub fn arch_context_switch(old_sp_slot: *mut u32, new_sp: u32);
+    pub fn arch_context_switch(old_sp_slot: *mut usize, new_sp: usize);
 }
 
 /// Yeni bir gorevin yigininin, `arch_context_switch`'in geri yukleme
@@ -57,14 +57,14 @@ extern "C" {
 /// # Safety
 /// `stack_top` gecerli, en az 6 kelime yer birakan, 4 bayt hizali bir
 /// cekirdek yigini tepesi olmalidir.
-pub unsafe fn bootstrap_stack(stack_top: *mut u32, entry: extern "C" fn() -> !) -> u32 {
+pub unsafe fn bootstrap_stack(stack_top: *mut usize, entry: extern "C" fn() -> !) -> usize {
     let mut sp = stack_top;
 
     // EFLAGS baslangici: IF=1 (bit 9) + her zaman 1 olan bit 1.
-    const INITIAL_EFLAGS: u32 = 0x0000_0202;
+    const INITIAL_EFLAGS: usize = 0x0000_0202;
 
     sp = sp.offset(-1);
-    sp.write(entry as usize as u32); // `ret` hedefi
+    sp.write(entry as usize); // `ret` hedefi
     sp = sp.offset(-1);
     sp.write(0); // EBP
     sp = sp.offset(-1);
@@ -76,5 +76,5 @@ pub unsafe fn bootstrap_stack(stack_top: *mut u32, entry: extern "C" fn() -> !) 
     sp = sp.offset(-1);
     sp.write(INITIAL_EFLAGS);
 
-    sp as u32
+    sp as usize
 }

@@ -16,7 +16,7 @@ Katmanlar (Ring donanim izolasyonuna dayanir):
 
 Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 
-**Tamamlanan fazlar (hepsi i386):**
+**Tamamlanan fazlar:**
 
 | Faz | Icerik | Durum |
 |-----|--------|-------|
@@ -24,16 +24,31 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 2 | Level-0a cekirdek temeli (kmalloc/paging/scheduler/syscall zinciri) | ✅ |
 | 3 | Level-0b1 ELF32 yukleyici + Ring 3 userland (TSS/iret) | ✅ |
 | 5 | POSIX dosya cagrilari + VFS/RAMFS + FD tablosu + brk | ✅ |
-| 7 | **Windows NT/PE**: PE32 yukleyici + reloc + `int 0x2E` | ✅ |
-| 4 | x86_64 portu (Long Mode, ELF64, `syscall`) | ⏳ yapilmadi |
+| 7 | **Windows NT/PE**: PE32 yukleyici + reloc + `int 0x2E` | ✅ (i386) |
+| 4 | **x86_64 portu**: Long Mode, 4 seviyeli sayfalama, ELF64, `syscall` | ✅ |
 | 6 | AArch64 portu (EL1/EL0, GIC, `svc #0`) | ⏳ yapilmadi |
 | 8+ | fork/execve + sinyaller, ekosistem | ⏳ yapilmadi |
 
-> **Not:** Faz 4 (x86_64) ve Faz 6 (AArch64) bilincli olarak atlandi.
-> Bunlar ayri ve buyuk mimari portlaridir (Long Mode boot, 4 seviyeli
-> sayfalama, `syscall`/`svc` ABI, ELF64). Kod tabani bunlara hazir:
-> mimariye ozel her sey `arch/i386/` ve `level0a/core/mmu_i386.rs` icinde
-> izole edilmis durumda (doc S.15 ilke 2).
+## Desteklenen mimariler
+
+| | i386 | x86_64 |
+|---|---|---|
+| Boot | Multiboot1 | Multiboot2 + Long Mode gecisi |
+| Sayfalama | 2 seviye, 4 KiB, 4 MiB identity | 4 seviye, 2 MiB huge + 4 KiB split, 1 GiB identity |
+| Linux syscall | `int 0x80` | `syscall` komutu (MSR: EFER/STAR/LSTAR/SFMASK) |
+| Windows syscall | `int 0x2E` | — (PE32+ Faz 7'nin 64-bit ayagi) |
+| Ikili formatlar | ELF32 + PE32 | ELF64 |
+| Kesme denetleyici | PIC 8259A | PIC 8259A (APIC ileride) |
+
+```
+make ARCH=i386   run
+make ARCH=x86_64 run
+```
+
+Ortak katmanlar (`level0a`, `level0b1`, `level0b2`) **tek bir kod tabanidir**;
+mimariye ozel her sey `arch/<arch>/`, `level0a/gdt/<arch>.rs`,
+`level0a/idt/<arch>.rs` ve `level0a/core/mmu_<arch>.rs` icinde izole
+(doc S.15 ilke 2). Ortak kod donanima her zaman `arch::cpu` uzerinden erisir.
 
 ## Gereksinimler
 
@@ -143,7 +158,25 @@ portlarinda benzer tuzaklara dikkat:
 - `extern "x86-interrupt"` syscall girisi icin YETERSIZDIR: Linux ABI'si
   numara/argumanlari registerlarda tasir, o ABI ise registerlara erisim
   vermez. int 0x80 girisi `pusha` + frame isaretcisi ile elle yazilmalidir
-  (bkz. `level0a/idt.rs::syscall_entry`).
+  (bkz. `level0a/idt/i386.rs::syscall_entry`).
+
+Faz 4 (x86_64) sirasinda cikan uc hata:
+
+- **Linux syscall numaralari mimariye gore DEGISIR.** i386'da `write`=4,
+  `exit`=1; x86_64'te `write`=1, `exit`=60. Tek kumeyle gecistirilince
+  x86_64 userland `write`(=1) cagirdi, cekirdek bunu i386'nin `exit`'i
+  sandi ve programi "cikis kodu 1" ile sonlandirdi -- program hicbir sey
+  yazmadan "basariyla" bitmis gibi gorundu.
+- **`syscall` komutu Ring 0'dan cagrilamaz.** Donusu `sysretq`'tir ve
+  `sysretq` HER ZAMAN Ring 3'e doner; Ring 0'daki bir cagiran kendini
+  Ring 3'te bulur. Cekirdek ici `syscall3` yardimcisi bu yuzden x86_64'te
+  de `int 0x80` kullanir (bkz. `arch/x86_64/mod.rs`).
+- **Boot stub'inda User biti dagitmayin.** Long Mode'a gecerken kurulan
+  2 MiB'lik identity girdilerine User biti konursa cekirdegin TAMAMI
+  Ring 3'e acilir. Dogrusu: bit verilmez, kullanici bolgesi sonradan
+  `mmu::protect_user_range` ile ilgili 2 MiB girdisi 4 KiB'lik tabloya
+  bolunerek sayfa sayfa acilir (ayni 2 MiB'i paylasan cekirdek heap'i
+  boylece kapali kalir).
 
 ## Neden Rust, neden bu araclar
 
@@ -200,7 +233,8 @@ gercekten uygulandigini gosterir.
 ## Userland ikililerini yeniden uretme
 
 ```
-make userland && make iso
+make userland                       # i386: hello.elf + hello.exe
+python3 tools/gen_hello_elf64.py userland/hello64.elf   # x86_64
 ```
 
 ## Kapsam Disi (sonraki fazlar)

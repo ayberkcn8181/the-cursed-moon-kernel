@@ -12,16 +12,38 @@
 //!    6 = sys_close   (EBX = fd)
 //!   45 = sys_brk     (EBX = yeni break, 0 ise mevcut break dondurulur)
 
-use crate::arch::i386::regs::SyscallFrame;
+use crate::arch::cpu::regs::SyscallFrame;
 use crate::level0a::core::mmu;
 use crate::level0a::kernel_api::{self, KernelError};
 
-pub const SYS_EXIT: u32 = 1;
-pub const SYS_READ: u32 = 3;
-pub const SYS_WRITE: u32 = 4;
-pub const SYS_OPEN: u32 = 5;
-pub const SYS_CLOSE: u32 = 6;
-pub const SYS_BRK: u32 = 45;
+// Linux syscall numaralari MIMARIYE GORE DEGISIR -- ayni isim, farkli sayi.
+// Bunu tek bir kumeyle gecistirmek Faz 4'te gercek bir hataya yol acti:
+// x86_64 userland `write`(=1) cagirdi, cekirdek 1'i i386'nin `exit`'i sandi
+// ve programi "cikis kodu 1" ile sonlandirdi.
+#[cfg(target_arch = "x86")]
+pub use i386_numbers::*;
+#[cfg(target_arch = "x86_64")]
+pub use x86_64_numbers::*;
+
+#[cfg(target_arch = "x86")]
+mod i386_numbers {
+    pub const SYS_EXIT: u32 = 1;
+    pub const SYS_READ: u32 = 3;
+    pub const SYS_WRITE: u32 = 4;
+    pub const SYS_OPEN: u32 = 5;
+    pub const SYS_CLOSE: u32 = 6;
+    pub const SYS_BRK: u32 = 45;
+}
+
+#[cfg(target_arch = "x86_64")]
+mod x86_64_numbers {
+    pub const SYS_READ: u32 = 0;
+    pub const SYS_WRITE: u32 = 1;
+    pub const SYS_OPEN: u32 = 2;
+    pub const SYS_CLOSE: u32 = 3;
+    pub const SYS_BRK: u32 = 12;
+    pub const SYS_EXIT: u32 = 60;
+}
 
 // Linux hata kodlari negatif dondurulur (ornegin -EBADF = -9).
 const EBADF: i32 = 9;
@@ -53,15 +75,15 @@ pub fn dispatch(frame: &mut SyscallFrame) {
     let result: i32 = match number {
         SYS_EXIT => {
             // Geri donmez.
-            kernel_api::exit_current_task(arg1);
+            kernel_api::exit_current_task(arg1 as u32);
         }
 
-        SYS_WRITE => match unsafe { kernel_api::write(arg1, arg2 as *const u8, arg3 as usize) } {
+        SYS_WRITE => match unsafe { kernel_api::write(arg1 as u32, arg2 as *const u8, arg3) } {
             Ok(written) => written as i32,
             Err(e) => errno_of(e),
         },
 
-        SYS_READ => match unsafe { kernel_api::read(arg1, arg2 as *mut u8, arg3 as usize) } {
+        SYS_READ => match unsafe { kernel_api::read(arg1 as u32, arg2 as *mut u8, arg3) } {
             Ok(read) => read as i32,
             Err(e) => errno_of(e),
         },
@@ -77,12 +99,17 @@ pub fn dispatch(frame: &mut SyscallFrame) {
             }
         }
 
-        SYS_CLOSE => match kernel_api::close(arg1) {
+        SYS_CLOSE => match kernel_api::close(arg1 as u32) {
             Ok(()) => 0,
             Err(e) => errno_of(e),
         },
 
-        SYS_BRK => kernel_api::brk(arg1 as usize) as i32,
+        SYS_BRK => {
+            // brk bir ADRES dondurur, hata kodu degil -- isaretli
+            // donusum yapilmadan dogrudan yazilir.
+            frame.set_return(kernel_api::brk(arg1));
+            return;
+        }
 
         _ => {
             crate::println!(
@@ -93,7 +120,7 @@ pub fn dispatch(frame: &mut SyscallFrame) {
         }
     };
 
-    frame.set_return(result as u32);
+    frame.set_return(result as isize as usize);
 }
 
 /// Kullanici alanindaki NUL sonlandirmali diziyi cekirdek tamponuna kopyalar.
@@ -104,14 +131,14 @@ pub fn dispatch(frame: &mut SyscallFrame) {
 ///
 /// # Safety
 /// Cagirann `storage`'i gecerli bir tampon olarak vermesi gerekir.
-unsafe fn copy_user_cstr(ptr: u32, storage: &mut [u8; PATH_MAX]) -> Option<&str> {
+unsafe fn copy_user_cstr(ptr: usize, storage: &mut [u8; PATH_MAX]) -> Option<&str> {
     if ptr == 0 {
         return None;
     }
 
     let mut len = 0usize;
     while len < PATH_MAX {
-        let addr = ptr as usize + len;
+        let addr = ptr + len;
 
         // Kullaniciya ait olmayan bir sayfaya gecildiyse dur.
         if !mmu::is_user_accessible(addr) {

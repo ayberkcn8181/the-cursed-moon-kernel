@@ -2,7 +2,7 @@
 //! G/C ile ekrana yansitilir (doc S.4). Faz 1'de sadece temel US duzeni
 //! (kucuk harf) desteklenir; shift/caps Faz 2+'ya birakilir.
 
-use crate::arch::i386::inb;
+use crate::arch::cpu::inb;
 
 const DATA_PORT: u16 = 0x60;
 

@@ -42,12 +42,21 @@ impl SyscallFrame {
     }
 
     /// i386 Linux ABI: EBX, ECX, EDX, ESI, EDI = arg1..arg5.
-    pub fn args(&self) -> [u32; 5] {
-        [self.ebx, self.ecx, self.edx, self.esi, self.edi]
+    ///
+    /// Donus tipi `usize`: ortak katmanlar (POSIX/NT cevirmenleri) boylece
+    /// i386 ve x86_64'te ayni kodla calisir.
+    pub fn args(&self) -> [usize; 5] {
+        [
+            self.ebx as usize,
+            self.ecx as usize,
+            self.edx as usize,
+            self.esi as usize,
+            self.edi as usize,
+        ]
     }
 
     /// Donus degeri EAX uzerinden verilir.
-    pub fn set_return(&mut self, value: u32) {
-        self.eax = value;
+    pub fn set_return(&mut self, value: usize) {
+        self.eax = value as u32;
     }
 }

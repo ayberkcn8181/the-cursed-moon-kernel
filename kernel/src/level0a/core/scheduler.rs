@@ -12,7 +12,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use crate::arch::i386::context::{arch_context_switch, bootstrap_stack};
+use crate::arch::cpu::context::{arch_context_switch, bootstrap_stack};
 use crate::level0a::core::kmalloc;
 
 pub const MAX_TASKS: usize = 8;
@@ -29,7 +29,7 @@ pub enum TaskState {
 #[derive(Clone, Copy)]
 pub struct Task {
     pub state: TaskState,
-    pub stack_pointer: u32,
+    pub stack_pointer: usize,
     pub name: &'static str,
 }
 
@@ -65,14 +65,14 @@ pub fn init() {
 /// Yeni bir cekirdek gorevi olusturur; yigini kmalloc'tan alinir.
 /// Basarisizlik nedenleri: gorev tablosu dolu veya heap tukendi.
 pub fn spawn(name: &'static str, entry: extern "C" fn() -> !) -> Option<usize> {
-    crate::arch::i386::without_interrupts(|| unsafe {
+    crate::arch::cpu::without_interrupts(|| unsafe {
         let index = TASK_COUNT.load(Ordering::Relaxed);
         if index >= MAX_TASKS {
             return None;
         }
 
         let stack = kmalloc::kmalloc_aligned(TASK_STACK_SIZE, 16)?;
-        let stack_top = stack.add(TASK_STACK_SIZE) as *mut u32;
+        let stack_top = stack.add(TASK_STACK_SIZE) as *mut usize;
         let sp = bootstrap_stack(stack_top, entry);
 
         let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
@@ -105,7 +105,7 @@ pub fn yield_now() {
     // sekilde bosta calisiyordur, olu degil.
     crate::level0a::pit::beat();
 
-    let (current_index, next_index) = crate::arch::i386::without_interrupts(|| {
+    let (current_index, next_index) = crate::arch::cpu::without_interrupts(|| {
         let current = CURRENT.load(Ordering::Relaxed);
         (current, pick_next(current))
     });
@@ -132,7 +132,7 @@ pub fn yield_now() {
 
 /// Calisan gorevi sonlandirir ve bir daha asla ona donmez.
 pub fn terminate_current() -> ! {
-    crate::arch::i386::without_interrupts(|| unsafe {
+    crate::arch::cpu::without_interrupts(|| unsafe {
         let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
         let current = CURRENT.load(Ordering::Relaxed);
         (*tasks.add(current)).state = TaskState::Terminated;
@@ -142,7 +142,7 @@ pub fn terminate_current() -> ! {
         yield_now();
         // Baska hazir gorev kalmadiysa (ornegin tum worker'lar bitti) CPU'yu
         // bosuna dondurmemek icin bir sonraki kesmeye kadar bekle.
-        crate::arch::i386::halt();
+        crate::arch::cpu::halt();
     }
 }
 

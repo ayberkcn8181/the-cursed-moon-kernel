@@ -102,7 +102,7 @@ unsafe impl Sync for WriterCell {}
 static WRITER: WriterCell = WriterCell(UnsafeCell::new(Writer::new()));
 
 pub fn init() {
-    crate::arch::i386::without_interrupts(|| unsafe {
+    crate::arch::cpu::without_interrupts(|| unsafe {
         (*WRITER.0.get()).clear();
     });
 }
@@ -120,7 +120,7 @@ impl fmt::Write for DualWriter {
 
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
-    crate::arch::i386::without_interrupts(|| {
+    crate::arch::cpu::without_interrupts(|| {
         let _ = DualWriter.write_fmt(args);
     });
 }

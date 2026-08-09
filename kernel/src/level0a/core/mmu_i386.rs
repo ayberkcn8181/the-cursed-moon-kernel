@@ -11,7 +11,7 @@
 //! Faz 4'te 16 MiB'e ve LAPIC bolgesine genisletilecek; kullanici sayfa
 //! korumasi (User biti) Faz 3'te eklenecek.
 
-use crate::arch::i386::{read_cr0, write_cr0, write_cr3};
+use crate::arch::cpu::{read_cr0, write_cr0, write_cr3};
 
 const PAGE_SIZE: usize = 4096;
 const ENTRIES: usize = 1024;

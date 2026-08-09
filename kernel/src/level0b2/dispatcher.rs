@@ -8,7 +8,7 @@
 //! olu ise cagri Level-0b1'e hic verilmez, Fallback Interface'in sinirli
 //! emulasyonuna dusulur (doc S.11).
 
-use crate::arch::i386::regs::SyscallFrame;
+use crate::arch::cpu::regs::SyscallFrame;
 use crate::level0b2::{fallback, load_balancer, state_monitor};
 
 pub fn print_banner() {

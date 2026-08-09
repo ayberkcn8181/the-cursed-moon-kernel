@@ -2,7 +2,7 @@
 //! IRQ0 (PIT) ve IRQ1 (klavye) maskesi acilir; digerleri Faz 4'te
 //! APIC/IOAPIC gelene kadar maskeli kalir.
 
-use crate::arch::i386::outb;
+use crate::arch::cpu::outb;
 
 const PIC1_CMD: u16 = 0x20;
 const PIC1_DATA: u16 = 0x21;

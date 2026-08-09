@@ -10,7 +10,7 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use crate::arch::i386::outb;
+use crate::arch::cpu::outb;
 
 const PIT_CHANNEL0_DATA: u16 = 0x40;
 const PIT_COMMAND: u16 = 0x43;

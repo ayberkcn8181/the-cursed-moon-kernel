@@ -2,7 +2,7 @@
 //! otomatik dogrulama icin (doc S.8'deki `qemu ... -serial stdio`
 //! komutuyla eslesir). Faz 1'de sadece polling tabanli yazma vardir.
 
-use crate::arch::i386::{inb, outb};
+use crate::arch::cpu::{inb, outb};
 
 const COM1: u16 = 0x3F8;
 

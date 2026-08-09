@@ -9,7 +9,7 @@
 use core::arch::{asm, global_asm};
 use core::mem::size_of;
 
-use crate::arch::i386::regs::{InterruptStackFrame, SyscallFrame};
+use crate::arch::cpu::regs::{InterruptStackFrame, SyscallFrame};
 use crate::level0a::gdt::KERNEL_CODE_SELECTOR;
 
 const GATE_PRESENT_RING0_INT32: u8 = 0x8E; // P=1 DPL=00 type=32-bit interrupt gate
@@ -93,7 +93,7 @@ pub fn init() {
 extern "x86-interrupt" fn divide_by_zero_handler(_frame: InterruptStackFrame) -> ! {
     crate::level0b2::fallback::emergency(&["CPU istisnasi: divide-by-zero (vektor 0)."]);
     loop {
-        crate::arch::i386::halt();
+        crate::arch::cpu::halt();
     }
 }
 

@@ -31,7 +31,7 @@ static mut TABLE: [FileDescriptor; MAX_FDS] = [FileDescriptor::empty(); MAX_FDS]
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 pub fn init() {
-    crate::arch::i386::without_interrupts(|| unsafe {
+    crate::arch::cpu::without_interrupts(|| unsafe {
         let table = core::ptr::addr_of_mut!(TABLE) as *mut FileDescriptor;
         for i in 0..MAX_FDS {
             table.add(i).write(FileDescriptor::empty());
@@ -42,7 +42,7 @@ pub fn init() {
 
 /// Bos bir tanimlayici ayirir ve VFS dugumune baglar.
 pub fn allocate(node: usize) -> Option<usize> {
-    crate::arch::i386::without_interrupts(|| unsafe {
+    crate::arch::cpu::without_interrupts(|| unsafe {
         let table = core::ptr::addr_of_mut!(TABLE) as *mut FileDescriptor;
         for fd in FIRST_FREE_FD..MAX_FDS {
             if !(*table.add(fd)).used {
@@ -77,7 +77,7 @@ pub fn advance(fd: usize, delta: usize) {
     if fd >= MAX_FDS {
         return;
     }
-    crate::arch::i386::without_interrupts(|| unsafe {
+    crate::arch::cpu::without_interrupts(|| unsafe {
         let table = core::ptr::addr_of_mut!(TABLE) as *mut FileDescriptor;
         if (*table.add(fd)).used {
             (*table.add(fd)).offset += delta;
@@ -89,7 +89,7 @@ pub fn close(fd: usize) -> bool {
     if fd < FIRST_FREE_FD || fd >= MAX_FDS {
         return false;
     }
-    crate::arch::i386::without_interrupts(|| unsafe {
+    crate::arch::cpu::without_interrupts(|| unsafe {
         let table = core::ptr::addr_of_mut!(TABLE) as *mut FileDescriptor;
         if !(*table.add(fd)).used {
             return false;

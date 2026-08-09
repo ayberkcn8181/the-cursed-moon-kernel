@@ -12,7 +12,7 @@
 //! kararli numaralandirmasini kullanir (0x1000+), boylece bir syscall'in
 //! POSIX mi NT mi oldugu numaradan da ayirt edilebilir.
 
-use crate::arch::i386::regs::SyscallFrame;
+use crate::arch::cpu::regs::SyscallFrame;
 use crate::level0a::core::mmu;
 use crate::level0a::kernel_api::{self, KernelError};
 
@@ -60,19 +60,19 @@ pub fn dispatch(frame: &mut SyscallFrame) {
             "[LEVEL-0b1] NT: {} NT servis araliginda degil (int 0x80 mi olmaliydi?).",
             number
         );
-        frame.set_return(STATUS_NOT_IMPLEMENTED);
+        frame.set_return(STATUS_NOT_IMPLEMENTED as usize);
         return;
     }
 
     let status: u32 = match number {
         NT_TERMINATE_PROCESS => {
             // NtTerminateProcess(ProcessHandle, ExitStatus). Geri donmez.
-            kernel_api::exit_current_task(arg2);
+            kernel_api::exit_current_task(arg2 as u32);
         }
 
         NT_WRITE_CONSOLE => {
             // NtWriteConsole(Handle, Buffer, Length)
-            match unsafe { kernel_api::write(arg1, arg2 as *const u8, arg3 as usize) } {
+            match unsafe { kernel_api::write(arg1 as u32, arg2 as *const u8, arg3) } {
                 Ok(_) => STATUS_SUCCESS,
                 Err(e) => ntstatus_of(e),
             }
@@ -88,7 +88,7 @@ pub fn dispatch(frame: &mut SyscallFrame) {
                 Some(path) => match kernel_api::open(path) {
                     // Handle'i cagirana EDX uzerinden bildiriyoruz.
                     Ok(handle) => {
-                        frame.edx = handle as u32;
+                        set_out(frame, handle);
                         STATUS_SUCCESS
                     }
                     Err(e) => ntstatus_of(e),
@@ -99,16 +99,16 @@ pub fn dispatch(frame: &mut SyscallFrame) {
 
         NT_READ_FILE => {
             // NtReadFile(Handle, Buffer, Length) -> okunan bayt EDX'te
-            match unsafe { kernel_api::read(arg1, arg2 as *mut u8, arg3 as usize) } {
+            match unsafe { kernel_api::read(arg1 as u32, arg2 as *mut u8, arg3) } {
                 Ok(read) => {
-                    frame.edx = read as u32;
+                    set_out(frame, read);
                     STATUS_SUCCESS
                 }
                 Err(e) => ntstatus_of(e),
             }
         }
 
-        NT_CLOSE => match kernel_api::close(arg1) {
+        NT_CLOSE => match kernel_api::close(arg1 as u32) {
             Ok(()) => STATUS_SUCCESS,
             Err(e) => ntstatus_of(e),
         },
@@ -122,19 +122,32 @@ pub fn dispatch(frame: &mut SyscallFrame) {
         }
     };
 
-    frame.set_return(status);
+    frame.set_return(status as usize);
+}
+
+/// NT cagrilarinin "cikti" degerini (handle, okunan bayt sayisi) cagirana
+/// bildirdigi register: i386'da EDX, x86_64'te RDX. Mimariden bagimsiz
+/// kalmasi icin tek yerde toplanmistir.
+#[cfg(target_arch = "x86")]
+fn set_out(frame: &mut SyscallFrame, value: usize) {
+    frame.edx = value as u32;
+}
+
+#[cfg(target_arch = "x86_64")]
+fn set_out(frame: &mut SyscallFrame, value: usize) {
+    frame.rdx = value as u64;
 }
 
 /// POSIX tarafindakiyle ayni guvenlik kurali: kullanici alanindan gelen
 /// isaretci once `mmu::is_user_accessible` ile dogrulanir.
-unsafe fn copy_user_cstr(ptr: u32, storage: &mut [u8; PATH_MAX]) -> Option<&str> {
+unsafe fn copy_user_cstr(ptr: usize, storage: &mut [u8; PATH_MAX]) -> Option<&str> {
     if ptr == 0 {
         return None;
     }
 
     let mut len = 0usize;
     while len < PATH_MAX {
-        let addr = ptr as usize + len;
+        let addr = ptr + len;
         if !mmu::is_user_accessible(addr) {
             return None;
         }

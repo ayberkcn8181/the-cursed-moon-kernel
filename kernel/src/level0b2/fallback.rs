@@ -10,7 +10,7 @@
 
 use core::panic::PanicInfo;
 
-use crate::arch::i386::regs::SyscallFrame;
+use crate::arch::cpu::regs::SyscallFrame;
 
 /// Fallback modunda desteklenen minimal syscall kumesi.
 const SYS_EXIT: u32 = 1;
@@ -35,7 +35,7 @@ pub fn emulate_syscall(frame: &mut SyscallFrame) {
             if buf.is_null() {
                 -ENOSYS
             } else {
-                let bytes = unsafe { core::slice::from_raw_parts(buf, arg3 as usize) };
+                let bytes = unsafe { core::slice::from_raw_parts(buf, arg3) };
                 crate::print!("[co-service] ");
                 for &byte in bytes {
                     crate::print!("{}", byte as char);
@@ -54,7 +54,7 @@ pub fn emulate_syscall(frame: &mut SyscallFrame) {
         }
     };
 
-    frame.set_return(result as u32);
+    frame.set_return(result as isize as usize);
 }
 
 /// NT tarafinin Co-Service karsiligi: Level-0a olu iken `int 0x2E`
@@ -76,7 +76,7 @@ pub fn emulate_nt_syscall(frame: &mut SyscallFrame) {
             if buf.is_null() {
                 STATUS_ACCESS_VIOLATION
             } else {
-                let bytes = unsafe { core::slice::from_raw_parts(buf, arg3 as usize) };
+                let bytes = unsafe { core::slice::from_raw_parts(buf, arg3) };
                 crate::print!("[co-service/nt] ");
                 for &byte in bytes {
                     crate::print!("{}", byte as char);
@@ -94,7 +94,7 @@ pub fn emulate_nt_syscall(frame: &mut SyscallFrame) {
         }
     };
 
-    frame.set_return(status);
+    frame.set_return(status as usize);
 }
 
 /// State Monitor, heartbeat kayboldugunu tespit ettiginde cagirir.
@@ -115,7 +115,7 @@ pub fn panic_screen(info: &PanicInfo) -> ! {
     crate::println!();
     crate::println!("[LEVEL-0b2][FALLBACK] KERNEL PANIC: {}", info);
     loop {
-        crate::arch::i386::disable_interrupts();
-        crate::arch::i386::halt();
+        crate::arch::cpu::disable_interrupts();
+        crate::arch::cpu::halt();
     }
 }

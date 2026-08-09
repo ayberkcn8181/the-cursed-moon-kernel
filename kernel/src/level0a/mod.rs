@@ -10,3 +10,6 @@ pub mod kernel_api;
 pub mod keyboard;
 pub mod pic;
 pub mod pit;
+
+#[cfg(target_arch = "x86_64")]
+pub mod syscall_msr;

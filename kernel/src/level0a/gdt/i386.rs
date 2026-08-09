@@ -149,10 +149,10 @@ pub fn init() {
 /// # Safety
 /// `kernel_stack_top` gecerli, cekirdege ait bir yigin tepesi olmalidir.
 /// `init()` cagrildiktan sonra ve yalnizca bir kez cagrilmalidir.
-pub unsafe fn install_tss(kernel_stack_top: u32) {
+pub unsafe fn install_tss(kernel_stack_top: usize) {
     let tss_ptr = core::ptr::addr_of_mut!(TSS);
     (*tss_ptr).ss0 = KERNEL_DATA_SELECTOR as u32;
-    (*tss_ptr).esp0 = kernel_stack_top;
+    (*tss_ptr).esp0 = kernel_stack_top as u32;
 
     let base = tss_ptr as u32;
     let limit = (size_of::<Tss>() - 1) as u32;
@@ -175,8 +175,8 @@ pub unsafe fn install_tss(kernel_stack_top: u32) {
 ///
 /// # Safety
 /// `kernel_stack_top` gecerli bir cekirdek yigini tepesi olmalidir.
-pub unsafe fn set_kernel_stack(kernel_stack_top: u32) {
-    core::ptr::addr_of_mut!((*core::ptr::addr_of_mut!(TSS)).esp0).write(kernel_stack_top);
+pub unsafe fn set_kernel_stack(kernel_stack_top: usize) {
+    core::ptr::addr_of_mut!((*core::ptr::addr_of_mut!(TSS)).esp0).write(kernel_stack_top as u32);
 }
 
 unsafe fn load(ptr: *const GdtPointer) {

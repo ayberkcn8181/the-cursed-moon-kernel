@@ -71,16 +71,16 @@ arch_return_from_user:
 extern "C" {
     /// Ring 3'e gecer. Program `sys_exit` cagirana kadar geri DONMEZ;
     /// donus `arch_return_from_user` uzerinden gerceklesir.
-    fn arch_enter_user_mode(entry: u32, user_stack_top: u32, resume_slot: *mut u32);
+    fn arch_enter_user_mode(entry: usize, user_stack_top: usize, resume_slot: *mut usize);
 
     /// `enter_user_mode`'un cagrildigi noktaya geri doner.
-    fn arch_return_from_user(resume_slot: *mut u32) -> !;
+    fn arch_return_from_user(resume_slot: *mut usize) -> !;
 }
 
 /// Ring 3 baglaminin geri donus noktasi. Tek bir kullanici programi
 /// destekledigimiz icin (Faz 3) tek slot yeterli; Faz 8'de process basina
 /// tasinacak.
-static mut RESUME_SLOT: u32 = 0;
+static mut RESUME_SLOT: usize = 0;
 static mut IN_USER_MODE: bool = false;
 
 /// Ring 3'e gecip kullanici programini calistirir; program `sys_exit`
@@ -90,7 +90,7 @@ static mut IN_USER_MODE: bool = false;
 /// `entry` ve `user_stack_top` kullaniciya acik (PTE User biti set) ve
 /// gecerli sayfalarda olmalidir; TSS.esp0 gecerli bir cekirdek yiginini
 /// gostermelidir.
-pub unsafe fn run_user_program(entry: u32, user_stack_top: u32) {
+pub unsafe fn run_user_program(entry: usize, user_stack_top: usize) {
     IN_USER_MODE = true;
     arch_enter_user_mode(entry, user_stack_top, core::ptr::addr_of_mut!(RESUME_SLOT));
     IN_USER_MODE = false;

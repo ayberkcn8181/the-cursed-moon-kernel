@@ -37,7 +37,7 @@ static NODE_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 /// Cekirdek imajina gomulu, salt okunur bir dosyayi RAMFS'e baglar.
 pub fn mount_static(path: &'static str, data: &'static [u8]) -> Option<usize> {
-    crate::arch::i386::without_interrupts(|| {
+    crate::arch::cpu::without_interrupts(|| {
         let index = NODE_COUNT.load(Ordering::Relaxed);
         if index >= MAX_NODES {
             return None;

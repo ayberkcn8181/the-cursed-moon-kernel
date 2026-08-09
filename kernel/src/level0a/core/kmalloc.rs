@@ -21,7 +21,7 @@ pub fn kmalloc_aligned(size: usize, align: usize) -> Option<*mut u8> {
         return None;
     }
 
-    crate::arch::i386::without_interrupts(|| {
+    crate::arch::cpu::without_interrupts(|| {
         let current = NEXT_FREE.load(Ordering::Relaxed);
         let start = (current + align - 1) & !(align - 1);
         let end = start.checked_add(size)?;

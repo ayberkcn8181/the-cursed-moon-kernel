@@ -8,3 +8,6 @@ target = "../targets/i686-tcmk.json"
 
 [target.'cfg(target_arch = "x86")']
 rustflags = ["-C", "link-arg=-T../boot/linker/i386.ld"]
+
+[target.'cfg(target_arch = "x86_64")']
+rustflags = ["-C", "link-arg=-T../boot/linker/x86_64.ld"]

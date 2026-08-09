@@ -22,33 +22,64 @@ use core::panic::PanicInfo;
 use level0a::core::scheduler;
 use level0b1::linux_subsystem::posix_syscalls::{SYS_EXIT, SYS_WRITE};
 
-/// Linux (ELF32) kullanici programi -- `tools/gen_hello_elf.py`.
+/// Mimarinin makine kelimesi -- syscall ABI'si bu genislikte calisir.
+#[cfg(target_arch = "x86")]
+type Word = u32;
+#[cfg(target_arch = "x86_64")]
+type Word = u64;
+
+/// Bootloader'in verdigi imza: i386 Multiboot1, x86_64 Multiboot2.
+#[cfg(target_arch = "x86")]
+const BOOT_MAGIC: u32 = 0x2BAD_B002;
+#[cfg(target_arch = "x86_64")]
+const BOOT_MAGIC: u32 = 0x36D7_6289;
+
+/// Linux (ELF32, i386) kullanici programi -- `tools/gen_hello_elf.py`.
+#[cfg(target_arch = "x86")]
 static HELLO_ELF: &[u8] = include_bytes!("../../userland/hello.elf");
 
-/// Windows (PE32) kullanici programi -- `tools/gen_pe_hello.py`.
+/// Windows (PE32, i386) kullanici programi -- `tools/gen_pe_hello.py`.
+#[cfg(target_arch = "x86")]
 static HELLO_EXE: &[u8] = include_bytes!("../../userland/hello.exe");
 
-/// Her iki programin da VFS uzerinden okudugu test dosyasi.
+/// Linux (ELF64, x86_64) kullanici programi -- `tools/gen_hello_elf64.py`.
+#[cfg(target_arch = "x86_64")]
+static HELLO_ELF64: &[u8] = include_bytes!("../../userland/hello64.elf");
+
+/// Kullanici programlarinin VFS uzerinden okudugu test dosyasi.
 static BOOT_MSG: &[u8] = b"/boot/msg.txt: VFS uzerinden okundu (RAMFS).\n";
 
 /// Acilista RAMFS'e baglanan gomulu dosyalar.
+#[cfg(target_arch = "x86")]
 static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/hello", HELLO_ELF),
     ("/bin/hello.exe", HELLO_EXE),
     ("/boot/msg.txt", BOOT_MSG),
 ];
 
+#[cfg(target_arch = "x86_64")]
+static RAMFS_FILES: &[(&str, &[u8])] = &[
+    ("/bin/hello", HELLO_ELF64),
+    ("/boot/msg.txt", BOOT_MSG),
+];
+
+/// Ring 3'te denenecek ikililer (mimariye gore).
+#[cfg(target_arch = "x86")]
+const USER_BINARIES: &[&str] = &["/bin/hello", "/bin/hello.exe"];
+#[cfg(target_arch = "x86_64")]
+const USER_BINARIES: &[&str] = &["/bin/hello"];
+
 #[no_mangle]
 pub extern "C" fn kernel_main(multiboot_magic: u32, _multiboot_info_addr: u32) -> ! {
     // Multiboot speknine gore IF=0 girilmesi beklenir; buna guvenmek yerine
     // kesmeleri kendimiz ve kosulsuzca kapatiyoruz (savunmaci varsayim --
     // IDT/PIC hazir olmadan hicbir kesme kabul edilmemeli).
-    arch::i386::disable_interrupts();
+    arch::cpu::disable_interrupts();
 
     level0a::drivers::serial::init();
     level0a::drivers::vga::init();
 
-    if multiboot_magic != 0x2BADB002 {
+    if multiboot_magic != BOOT_MAGIC {
         level0b2::fallback::emergency(&["Multiboot magic gecersiz -- boot guvenilir degil."]);
     }
 
@@ -65,7 +96,7 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, _multiboot_info_addr: u32) -
         level0a::core::init::bring_up(RAMFS_FILES);
     }
 
-    arch::i386::enable_interrupts();
+    arch::cpu::enable_interrupts();
 
     // Faz 2 gosterimi: bir worker gorevi olustur. Idle ile arasinda
     // round-robin gidip gelecek ve syscall'larini tam katman zinciri
@@ -99,7 +130,7 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, _multiboot_info_addr: u32) -
             );
         }
 
-        arch::i386::halt();
+        arch::cpu::halt();
     }
 }
 
@@ -117,17 +148,18 @@ extern "C" fn worker_task() -> ! {
         );
 
         let written = unsafe {
-            arch::i386::syscall3(
-                SYS_WRITE,
-                level0a::kernel_api::FD_STDOUT,
-                MESSAGE.as_ptr() as u32,
-                MESSAGE.len() as u32,
+            arch::cpu::syscall3(
+                SYS_WRITE as Word,
+                level0a::kernel_api::FD_STDOUT as Word,
+                MESSAGE.as_ptr() as Word,
+                MESSAGE.len() as Word,
             )
         };
         crate::println!("[worker] sys_write dondu: {} bayt", written as i32);
 
         // Gecersiz bir fd ile hata yolunu da dogrula (-EBADF = -9 beklenir).
-        let bad = unsafe { arch::i386::syscall3(SYS_WRITE, 99, MESSAGE.as_ptr() as u32, 4) };
+        let bad =
+            unsafe { arch::cpu::syscall3(SYS_WRITE as Word, 99, MESSAGE.as_ptr() as Word, 4) };
         crate::println!("[worker] gecersiz fd sonucu: {}", bad as i32);
 
         scheduler::yield_now();
@@ -138,17 +170,22 @@ extern "C" fn worker_task() -> ! {
     unsafe {
         let kstack = level0a::core::kmalloc::kmalloc_aligned(16 * 1024, 16)
             .expect("TSS icin cekirdek yigini ayrilamadi");
-        level0a::gdt::install_tss(kstack.add(16 * 1024) as u32);
+        let kstack_top = kstack.add(16 * 1024) as usize;
+        level0a::gdt::install_tss(kstack_top);
+
+        // x86_64'te Linux'un asil yolu `syscall` komutudur (doc S.15).
+        #[cfg(target_arch = "x86_64")]
+        level0a::syscall_msr::init(kstack_top);
 
         // --- Faz 3/5/7: CIFT UYUMLULUK GOSTERIMI ---
         // Ayni cekirdek, ayni Ring 3 ortami, iki farkli isletim sistemi
         // ikilisi. Fark yalnizca Level-0b1'deki cevirmendedir (doc S.1).
-        for path in ["/bin/hello", "/bin/hello.exe"] {
+        for &path in USER_BINARIES {
             crate::println!();
             let result = match level0b1::process::run_from_vfs(path) {
                 Err(level0b1::process::SpawnError::NotFound) => {
-                    crate::println!("[worker] {} VFS'te yok, gomulu imaja donuluyor.", path);
-                    level0b1::process::run_image("hello.elf", HELLO_ELF)
+                    crate::println!("[worker] {} VFS'te bulunamadi.", path);
+                    Err(level0b1::process::SpawnError::NotFound)
                 }
                 other => other,
             };
@@ -170,9 +207,9 @@ extern "C" fn worker_task() -> ! {
         // Guvenlik regresyon testi: sys_open'a CEKIRDEK isaretcisi verilirse
         // reddedilmeli (-EFAULT = -14). Aksi halde Ring 3 bir kullanici
         // programi cekirdek belleginden veri sizdirabilirdi.
-        let kernel_ptr = RAMFS_FILES.as_ptr() as u32;
-        let leak = arch::i386::syscall3(
-            level0b1::linux_subsystem::posix_syscalls::SYS_OPEN,
+        let kernel_ptr = RAMFS_FILES.as_ptr() as Word;
+        let leak = arch::cpu::syscall3(
+            level0b1::linux_subsystem::posix_syscalls::SYS_OPEN as Word,
             kernel_ptr,
             0,
             0,
@@ -196,12 +233,12 @@ extern "C" fn worker_task() -> ! {
 
     crate::println!("[worker] isim bitti, sys_exit cagriliyor.");
     unsafe {
-        arch::i386::syscall3(SYS_EXIT, 0, 0, 0);
+        arch::cpu::syscall3(SYS_EXIT as Word, 0, 0, 0);
     }
 
     // sys_exit geri donmez; yine de tip sistemi icin sonsuz dongu.
     loop {
-        arch::i386::halt();
+        arch::cpu::halt();
     }
 }
 
