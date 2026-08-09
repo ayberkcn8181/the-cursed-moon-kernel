@@ -9,7 +9,7 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::level0a::core::{kmalloc, mmu, scheduler};
+use crate::level0a::core::{fd, kmalloc, mmu, scheduler, vfs};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ServiceState {
@@ -55,11 +55,14 @@ fn register(name: &'static str, ok: bool) {
     );
 }
 
-/// Level-0a'yi ayaga kaldirir: sayfalama -> heap -> scheduler.
+/// Level-0a'yi ayaga kaldirir: sayfalama -> heap -> scheduler -> vfs/fd.
+///
+/// `ramfs_files`, RAMFS'e baglanacak (yol, icerik) ciftleridir; cekirdek
+/// imajina gomulu dosyalar (ornegin `/bin/hello`) buradan gelir.
 ///
 /// # Safety
 /// Kesmeler kapaliyken, yalnizca bir kez cagrilmalidir.
-pub unsafe fn bring_up() {
+pub unsafe fn bring_up(ramfs_files: &[(&'static str, &'static [u8])]) {
     crate::println!("[LEVEL-0a] Executor katmani baslatiliyor...");
 
     mmu::init();
@@ -71,6 +74,20 @@ pub unsafe fn bring_up() {
 
     scheduler::init();
     register("scheduler", scheduler::task_count() == 1);
+
+    let mut mounted = 0;
+    for (path, data) in ramfs_files {
+        if vfs::mount_static(path, data).is_some() {
+            mounted += 1;
+        }
+    }
+    register("vfs", mounted == ramfs_files.len() && vfs::node_count() == mounted);
+
+    fd::init();
+    // Acilista stdin/stdout/stderr disinda acik tanimlayici olmamali.
+    register("fd-table", fd::open_count() == 0);
+
+    vfs::list();
 
     crate::println!(
         "[LEVEL-0a] paging={} identity={} MiB | heap {} B kullanildi, {} KiB bos",

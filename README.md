@@ -15,8 +15,23 @@ Katmanlar (Ring donanim izolasyonuna dayanir):
   ileride scheduler/VMM/VFS.
 
 Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
-**Tamamlanan fazlar: Faz 1 (Boot & Level-0b2 Temeli), Faz 2 (Level-0a
-Cekirdek Temeli).**
+
+**Tamamlanan fazlar (hepsi i386):**
+
+| Faz | Icerik | Durum |
+|-----|--------|-------|
+| 1 | Boot & Level-0b2 temeli (GDT/IDT/PIC/PIT/VGA/klavye) | ✅ |
+| 2 | Level-0a cekirdek temeli (kmalloc/paging/scheduler/syscall zinciri) | ✅ |
+| 3 | Level-0b1 ELF32 yukleyici + Ring 3 userland (TSS/iret) | ✅ |
+| 5 | POSIX dosya cagrilari + VFS/RAMFS + FD tablosu + brk | ✅ |
+| 4 | x86_64 portu (Long Mode, ELF64, `syscall`) | ⏳ yapilmadi |
+| 6+ | AArch64, NT/PE, process/sinyal, ekosistem | ⏳ yapilmadi |
+
+> **Not:** Faz 4 (x86_64) ve Faz 6 (AArch64) bilincli olarak atlandi.
+> Bunlar ayri ve buyuk mimari portlaridir (Long Mode boot, 4 seviyeli
+> sayfalama, `syscall`/`svc` ABI, ELF64). Kod tabani bunlara hazir:
+> mimariye ozel her sey `arch/i386/` ve `level0a/core/mmu_i386.rs` icinde
+> izole edilmis durumda (doc S.15 ilke 2).
 
 ## Gereksinimler
 
@@ -75,6 +90,23 @@ QEMU'da (`make run`, veya headless `qemu-system-i386 -cdrom build/tcmk.iso
    ugramadan Fallback Interface'in `emulate_syscall`'ina duser ve
    `[co-service]` onekiyle islenmeye devam eder -- sistem ayakta kalir.
 
+## Faz 3 / Faz 5 Dogrulama Listesi
+
+1. ✅ **Ring 3 gercekten CPL=3:** `qemu -d int` ciktisi
+   `v=80 cpl=3 IP=001b:00300068 SP=0023:...` -- CS=0x1B (user code, RPL 3),
+   SS=0x23, kullanici yigininda.
+2. ✅ **ELF32 yukleme:** `/bin/hello` VFS'ten okunur, PT_LOAD segmenti
+   kullanici bolgesine kopyalanir, `.bss` sifirlanir.
+3. ✅ **Sayfa izolasyonu:** `user@0x300000=true`, `kernel@0x100000=false`,
+   `heap@0x200000=false` -- Ring 3 cekirdek belleğine erisemez.
+4. ✅ **POSIX dosya zinciri:** Ring 3 programi `sys_open("/boot/msg.txt")`
+   -> `sys_read` -> `sys_write(stdout)` -> `sys_close` -> `sys_brk` ->
+   `sys_exit` yapar; dosya icerigi ekrana basilir.
+5. ✅ **FD sizintisi yok:** `sys_exit` sonrasi acik tanimlayici sayisi 0.
+6. ✅ **Guvenlik:** `sys_open`'a cekirdek isaretcisi verilirse `-EFAULT`
+   (-14) doner -- kullanici alanindan gelen her isaretci
+   `mmu::is_user_accessible` ile dogrulanir.
+
 ### Faz 2 manuel testi (Co-Service)
 
 `scheduler.rs::yield_now` icindeki `pit::beat()` cagrisini yorum satirina
@@ -123,8 +155,14 @@ portlarinda benzer tuzaklara dikkat:
 - Tum `println!` ciktisi VGA'nin yaninda COM1 (0x3F8) seri porta da
   yansitilir, boylece `-serial stdio` ile GUI olmadan da dogrulanabilir.
 
+## Userland ikilisini yeniden uretme
+
+```
+python3 tools/gen_hello_elf.py userland/hello.elf && make iso
+```
+
 ## Kapsam Disi (sonraki fazlar)
 
-kmalloc/scheduler/paging (Faz 2), ELF loader + Ring 3 (Faz 3),
-x86_64/AArch64 portlari (Faz 4/6), POSIX/NT subsystem (Faz 5/7) — ayri
-planlarla ele alinacak.
+x86_64 (Faz 4) ve AArch64 (Faz 6) portlari, NT/PE uyumlulugu (Faz 7),
+fork/execve + sinyaller (Faz 8), ext2/tmpfs ve genis POSIX (Faz 9-10),
+musl/busybox + shell (Faz 11-12), framebuffer/virtio-net (Faz 13-14).

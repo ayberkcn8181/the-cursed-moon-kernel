@@ -5,7 +5,8 @@
 //! Ring 3 -> Ring 0 gecisi (int 0x80) TSS sayesinde otomatiktir.
 
 use crate::arch::i386::usermode;
-use crate::level0a::core::{kmalloc, mmu};
+use crate::level0a::core::{kmalloc, mmu, vfs};
+use crate::level0a::kernel_api;
 use crate::level0a::gdt;
 use crate::level0b1::binary_loader::elf32;
 
@@ -21,6 +22,19 @@ pub enum SpawnError {
     Elf(#[allow(dead_code)] elf32::ElfError),
     OutOfMemory,
     NoRoomForStack,
+    NotFound,
+}
+
+/// VFS'teki bir yoldan ELF calistirir (doc S.7 Faz 5:
+/// `elf_load_vfs("/bin/hello")`).
+///
+/// # Safety
+/// `run_elf` ile ayni onkosullar.
+pub unsafe fn run_elf_from_vfs(path: &'static str) -> Result<(), SpawnError> {
+    let node = vfs::lookup(path).ok_or(SpawnError::NotFound)?;
+    let image = vfs::as_slice(node).ok_or(SpawnError::NotFound)?;
+    crate::println!("[LEVEL-0b1] VFS'ten yukleniyor: {}", path);
+    run_elf(path, image)
 }
 
 /// Gomulu bir ELF imajini Ring 3'te calistirir; program `sys_exit`
@@ -42,6 +56,9 @@ pub unsafe fn run_elf(name: &str, image: &[u8]) -> Result<(), SpawnError> {
 
     // Tum kullanici bolgesini (kod + veri + yigin) Ring 3'e ac.
     mmu::protect_user_range(mmu::USER_MEM_START, stack_top - mmu::USER_MEM_START);
+
+    // Program break: imajin bittigi yerden yigin tabanina kadar buyuyebilir.
+    kernel_api::set_program_break(loaded.end as usize, stack_bottom);
 
     // Ring 3 -> Ring 0 gecisleri icin ayri bir cekirdek yigini.
     let kstack = kmalloc::kmalloc_aligned(KERNEL_STACK_SIZE, 16).ok_or(SpawnError::OutOfMemory)?;

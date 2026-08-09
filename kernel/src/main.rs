@@ -22,9 +22,15 @@ use core::panic::PanicInfo;
 use level0a::core::scheduler;
 use level0b1::linux_subsystem::posix_syscalls::{SYS_EXIT, SYS_WRITE};
 
-/// Faz 3 kullanici programi. `tools/gen_hello_elf.py` ile uretilir;
-/// Faz 5'te VFS'ten (`/bin/hello`) okunacak, gomulu hali fallback kalacak.
+/// Faz 3/5 kullanici programi. `tools/gen_hello_elf.py` ile uretilir ve
+/// RAMFS'e `/bin/hello` olarak baglanir.
 static HELLO_ELF: &[u8] = include_bytes!("../../userland/hello.elf");
+
+/// Kullanici programinin VFS uzerinden okuyacagi test dosyasi.
+static BOOT_MSG: &[u8] = b"/boot/msg.txt: VFS uzerinden okundu (RAMFS).\n";
+
+/// Acilista RAMFS'e baglanan gomulu dosyalar.
+static RAMFS_FILES: &[(&str, &[u8])] = &[("/bin/hello", HELLO_ELF), ("/boot/msg.txt", BOOT_MSG)];
 
 #[no_mangle]
 pub extern "C" fn kernel_main(multiboot_magic: u32, _multiboot_info_addr: u32) -> ! {
@@ -48,9 +54,9 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, _multiboot_info_addr: u32) -
 
     level0b2::dispatcher::print_banner();
 
-    // --- Faz 2: Level-0a'yi ayaga kaldir (paging -> heap -> scheduler) ---
+    // --- Faz 2/5: Level-0a'yi ayaga kaldir (paging -> heap -> scheduler -> vfs) ---
     unsafe {
-        level0a::core::init::bring_up();
+        level0a::core::init::bring_up(RAMFS_FILES);
     }
 
     arch::i386::enable_interrupts();
@@ -128,7 +134,15 @@ extern "C" fn worker_task() -> ! {
             .expect("TSS icin cekirdek yigini ayrilamadi");
         level0a::gdt::install_tss(kstack.add(16 * 1024) as u32);
 
-        match level0b1::process::run_elf("hello.elf", HELLO_ELF) {
+        // Faz 5: ikili artik VFS'ten okunur; gomulu imaj yedek yoldur.
+        let result = match level0b1::process::run_elf_from_vfs("/bin/hello") {
+            Err(level0b1::process::SpawnError::NotFound) => {
+                crate::println!("[worker] /bin/hello VFS'te yok, gomulu imaja donuluyor.");
+                level0b1::process::run_elf("hello.elf", HELLO_ELF)
+            }
+            other => other,
+        };
+        match result {
             Ok(()) => crate::println!("[worker] Ring 3 testi basarili."),
             Err(e) => crate::println!("[worker] Ring 3 testi BASARISIZ: {:?}", e),
         }
@@ -139,6 +153,32 @@ extern "C" fn worker_task() -> ! {
             level0a::core::mmu::is_user_accessible(0x0030_0000),
             level0a::core::mmu::is_user_accessible(0x0010_0000),
             level0a::core::mmu::is_user_accessible(0x0020_0000),
+        );
+
+        // Guvenlik regresyon testi: sys_open'a CEKIRDEK isaretcisi verilirse
+        // reddedilmeli (-EFAULT = -14). Aksi halde Ring 3 bir kullanici
+        // programi cekirdek belleginden veri sizdirabilirdi.
+        let kernel_ptr = RAMFS_FILES.as_ptr() as u32;
+        let leak = arch::i386::syscall3(
+            level0b1::linux_subsystem::posix_syscalls::SYS_OPEN,
+            kernel_ptr,
+            0,
+            0,
+        );
+        crate::println!(
+            "[worker] guvenlik: sys_open(cekirdek isaretcisi) -> {} ({})",
+            leak as i32,
+            if leak as i32 == -14 { "reddedildi, dogru" } else { "SIZINTI!" }
+        );
+
+        // FD sizintisi kontrolu: kullanici programi acti gi dosyayi kapatti mi?
+        let msg_size = level0a::core::vfs::lookup("/boot/msg.txt")
+            .and_then(level0a::core::vfs::size)
+            .unwrap_or(0);
+        crate::println!(
+            "[worker] vfs: /boot/msg.txt {} bayt | sys_exit sonrasi acik fd: {}",
+            msg_size,
+            level0a::core::fd::open_count()
         );
     }
 
