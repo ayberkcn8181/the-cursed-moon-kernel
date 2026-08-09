@@ -26,3 +26,19 @@ pub fn handle_syscall(frame: &mut SyscallFrame) {
 
     crate::level0b1::linux_subsystem::posix_syscalls::dispatch(frame);
 }
+
+/// IDT vektor 46'dan (int 0x2E) gelen Windows NT uyumlu sistem cagrisi.
+///
+/// Dagitici acisindan POSIX ile NT arasindaki tek fark hangi cevirmene
+/// verildigidir; durum kontrolu, yuk sayaci ve fallback yolu ortaktir.
+/// Doc S.1'in "cift uyumluluk" vaadi tam olarak burada somutlasir.
+pub fn handle_nt_syscall(frame: &mut SyscallFrame) {
+    load_balancer::note_call(0x2E);
+
+    if state_monitor::level0a_is_dead() {
+        fallback::emulate_nt_syscall(frame);
+        return;
+    }
+
+    crate::level0b1::nt_subsystem::nt_syscalls::dispatch(frame);
+}

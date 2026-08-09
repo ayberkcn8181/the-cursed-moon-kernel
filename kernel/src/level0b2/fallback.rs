@@ -57,6 +57,46 @@ pub fn emulate_syscall(frame: &mut SyscallFrame) {
     frame.set_return(result as u32);
 }
 
+/// NT tarafinin Co-Service karsiligi: Level-0a olu iken `int 0x2E`
+/// cagrilarini sinirli sekilde karsilar. POSIX tarafiyla ayni felsefe --
+/// cift uyumluluk fallback modunda da korunur.
+pub fn emulate_nt_syscall(frame: &mut SyscallFrame) {
+    use crate::level0b1::nt_subsystem::nt_syscalls::{NT_TERMINATE_PROCESS, NT_WRITE_CONSOLE};
+
+    const STATUS_SUCCESS: u32 = 0x0000_0000;
+    const STATUS_NOT_IMPLEMENTED: u32 = 0xC000_0002;
+    const STATUS_ACCESS_VIOLATION: u32 = 0xC000_0005;
+
+    let number = frame.number();
+    let [_, arg2, arg3, _, _] = frame.args();
+
+    let status = match number {
+        NT_WRITE_CONSOLE => {
+            let buf = arg2 as *const u8;
+            if buf.is_null() {
+                STATUS_ACCESS_VIOLATION
+            } else {
+                let bytes = unsafe { core::slice::from_raw_parts(buf, arg3 as usize) };
+                crate::print!("[co-service/nt] ");
+                for &byte in bytes {
+                    crate::print!("{}", byte as char);
+                }
+                STATUS_SUCCESS
+            }
+        }
+        NT_TERMINATE_PROCESS => {
+            emergency(&["NtTerminateProcess fallback modunda yok sayildi."]);
+            STATUS_SUCCESS
+        }
+        _ => {
+            emergency(&["Fallback modunda desteklenmeyen NT servisi."]);
+            STATUS_NOT_IMPLEMENTED
+        }
+    };
+
+    frame.set_return(status);
+}
+
 /// State Monitor, heartbeat kayboldugunu tespit ettiginde cagirir.
 ///
 /// Faz 1'de burasi dogrudan `hlt` dongusune giriyordu. Faz 2'den itibaren

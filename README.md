@@ -24,8 +24,10 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 2 | Level-0a cekirdek temeli (kmalloc/paging/scheduler/syscall zinciri) | ✅ |
 | 3 | Level-0b1 ELF32 yukleyici + Ring 3 userland (TSS/iret) | ✅ |
 | 5 | POSIX dosya cagrilari + VFS/RAMFS + FD tablosu + brk | ✅ |
+| 7 | **Windows NT/PE**: PE32 yukleyici + reloc + `int 0x2E` | ✅ |
 | 4 | x86_64 portu (Long Mode, ELF64, `syscall`) | ⏳ yapilmadi |
-| 6+ | AArch64, NT/PE, process/sinyal, ekosistem | ⏳ yapilmadi |
+| 6 | AArch64 portu (EL1/EL0, GIC, `svc #0`) | ⏳ yapilmadi |
+| 8+ | fork/execve + sinyaller, ekosistem | ⏳ yapilmadi |
 
 > **Not:** Faz 4 (x86_64) ve Faz 6 (AArch64) bilincli olarak atlandi.
 > Bunlar ayri ve buyuk mimari portlaridir (Long Mode boot, 4 seviyeli
@@ -155,10 +157,50 @@ portlarinda benzer tuzaklara dikkat:
 - Tum `println!` ciktisi VGA'nin yaninda COM1 (0x3F8) seri porta da
   yansitilir, boylece `-serial stdio` ile GUI olmadan da dogrulanabilir.
 
-## Userland ikilisini yeniden uretme
+## Cift Uyumluluk (projenin cekirdek vaadi)
+
+Ayni cekirdek, ayni Ring 3 ortami, iki farkli isletim sistemi ikilisi.
+`make run` ciktisindan:
 
 ```
-python3 tools/gen_hello_elf.py userland/hello.elf && make iso
+[LEVEL-0b1] VFS'ten yukleniyor: /bin/hello
+[LEVEL-0b1] format: ELF32 (Linux POSIX alt sistemi)
+Hello from Ring 3 userland!
+/boot/msg.txt: VFS uzerinden okundu (RAMFS).
+
+[LEVEL-0b1] VFS'ten yukleniyor: /bin/hello.exe
+[LEVEL-0b1] format: PE32 (Windows NT alt sistemi)
+Hello from Ring 3 PE (Windows NT uyumluluk katmani)!
+/boot/msg.txt: VFS uzerinden okundu (RAMFS).
+```
+
+Iki program da **ayni dosyayi ayni VFS uzerinden** okur; tek fark
+Level-0b1'deki cevirmendir:
+
+| | Linux ikilisi | Windows ikilisi |
+|---|---|---|
+| Format | ELF32 | PE32 (`.reloc` ile) |
+| Kesme | `int 0x80` (vektor 128) | `int 0x2E` (vektor 46) |
+| ABI | EAX=numara, EBX/ECX/EDX=arg | EAX=servis, EBX/ECX/EDX=arg |
+| Cevirmen | `linux_subsystem::posix_syscalls` | `nt_subsystem::nt_syscalls` |
+| Hata kodu | negatif errno (`-EBADF`) | NTSTATUS (`0xC0000008`) |
+| Ortak hedef | `level0a::kernel_api` | `level0a::kernel_api` |
+
+`qemu -d int` ile dogrulanmis Ring 3 kaniti:
+
+```
+v=80 cpl=3 IP=001b:00300068  EAX=00000004   (POSIX sys_write)
+v=2e cpl=3 IP=001b:00301014  EAX=00001001   (NT NtWriteConsole)
+```
+
+PE ikilisinin `ImageBase`'i 0x00400000, cekirdek onu 0x00300000'e
+yukluyor; IP'nin 0x00301014 olmasi taban yeniden yerlesiminin (`.reloc`)
+gercekten uygulandigini gosterir.
+
+## Userland ikililerini yeniden uretme
+
+```
+make userland && make iso
 ```
 
 ## Kapsam Disi (sonraki fazlar)

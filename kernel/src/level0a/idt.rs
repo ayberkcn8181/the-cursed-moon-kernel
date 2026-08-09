@@ -75,6 +75,12 @@ pub fn init() {
             KERNEL_CODE_SELECTOR,
             GATE_PRESENT_RING3_INT32,
         );
+        // Vektor 46 = int 0x2E: Windows NT uyumlu sistem cagrisi (doc S.4).
+        IDT[46].set(
+            nt_syscall_entry as *const () as u32,
+            KERNEL_CODE_SELECTOR,
+            GATE_PRESENT_RING3_INT32,
+        );
 
         let ptr = IdtPointer {
             limit: (size_of::<[IdtEntry; 256]>() - 1) as u16,
@@ -112,6 +118,7 @@ extern "x86-interrupt" fn keyboard_handler(_frame: InterruptStackFrame) {
 global_asm!(
     r#"
 .section .text
+
 .global syscall_entry
 .type syscall_entry, @function
 syscall_entry:
@@ -121,11 +128,22 @@ syscall_entry:
     add esp, 4
     popa
     iretd
+
+.global nt_syscall_entry
+.type nt_syscall_entry, @function
+nt_syscall_entry:
+    pusha
+    push esp                /* &SyscallFrame */
+    call nt_syscall_dispatch_rust
+    add esp, 4
+    popa
+    iretd
 "#
 );
 
 extern "C" {
     fn syscall_entry();
+    fn nt_syscall_entry();
 }
 
 #[no_mangle]
@@ -133,5 +151,12 @@ extern "C" fn syscall_dispatch_rust(frame: *mut SyscallFrame) {
     // Doc S.3: cagri once Level-0b2'ye duser, oradan Level-0b1'e dagitilir.
     unsafe {
         crate::level0b2::dispatcher::handle_syscall(&mut *frame);
+    }
+}
+
+#[no_mangle]
+extern "C" fn nt_syscall_dispatch_rust(frame: *mut SyscallFrame) {
+    unsafe {
+        crate::level0b2::dispatcher::handle_nt_syscall(&mut *frame);
     }
 }

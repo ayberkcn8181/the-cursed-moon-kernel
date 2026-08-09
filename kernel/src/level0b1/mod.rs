@@ -12,4 +12,5 @@
 
 pub mod binary_loader;
 pub mod linux_subsystem;
+pub mod nt_subsystem;
 pub mod process;

@@ -2,3 +2,4 @@
 //! bellege haritalar.
 
 pub mod elf32;
+pub mod pe32;

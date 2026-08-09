@@ -15,7 +15,12 @@ endif
 
 KERNEL_ELF := $(TARGET_DIR)/i686-tcmk/$(CARGO_OUT_DIR)/tcmk-kernel
 
-.PHONY: all iso run info clean
+.PHONY: all iso run info clean userland
+
+# Ring 3 test ikilileri (ELF32 + PE32). Cekirdege include_bytes! ile gomulur.
+userland:
+	python3 $(ROOT_DIR)/tools/gen_hello_elf.py $(ROOT_DIR)/userland/hello.elf
+	python3 $(ROOT_DIR)/tools/gen_pe_hello.py $(ROOT_DIR)/userland/hello.exe
 
 all:
 ifneq ($(ARCH),i386)

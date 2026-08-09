@@ -22,15 +22,21 @@ use core::panic::PanicInfo;
 use level0a::core::scheduler;
 use level0b1::linux_subsystem::posix_syscalls::{SYS_EXIT, SYS_WRITE};
 
-/// Faz 3/5 kullanici programi. `tools/gen_hello_elf.py` ile uretilir ve
-/// RAMFS'e `/bin/hello` olarak baglanir.
+/// Linux (ELF32) kullanici programi -- `tools/gen_hello_elf.py`.
 static HELLO_ELF: &[u8] = include_bytes!("../../userland/hello.elf");
 
-/// Kullanici programinin VFS uzerinden okuyacagi test dosyasi.
+/// Windows (PE32) kullanici programi -- `tools/gen_pe_hello.py`.
+static HELLO_EXE: &[u8] = include_bytes!("../../userland/hello.exe");
+
+/// Her iki programin da VFS uzerinden okudugu test dosyasi.
 static BOOT_MSG: &[u8] = b"/boot/msg.txt: VFS uzerinden okundu (RAMFS).\n";
 
 /// Acilista RAMFS'e baglanan gomulu dosyalar.
-static RAMFS_FILES: &[(&str, &[u8])] = &[("/bin/hello", HELLO_ELF), ("/boot/msg.txt", BOOT_MSG)];
+static RAMFS_FILES: &[(&str, &[u8])] = &[
+    ("/bin/hello", HELLO_ELF),
+    ("/bin/hello.exe", HELLO_EXE),
+    ("/boot/msg.txt", BOOT_MSG),
+];
 
 #[no_mangle]
 pub extern "C" fn kernel_main(multiboot_magic: u32, _multiboot_info_addr: u32) -> ! {
@@ -134,18 +140,24 @@ extern "C" fn worker_task() -> ! {
             .expect("TSS icin cekirdek yigini ayrilamadi");
         level0a::gdt::install_tss(kstack.add(16 * 1024) as u32);
 
-        // Faz 5: ikili artik VFS'ten okunur; gomulu imaj yedek yoldur.
-        let result = match level0b1::process::run_elf_from_vfs("/bin/hello") {
-            Err(level0b1::process::SpawnError::NotFound) => {
-                crate::println!("[worker] /bin/hello VFS'te yok, gomulu imaja donuluyor.");
-                level0b1::process::run_elf("hello.elf", HELLO_ELF)
+        // --- Faz 3/5/7: CIFT UYUMLULUK GOSTERIMI ---
+        // Ayni cekirdek, ayni Ring 3 ortami, iki farkli isletim sistemi
+        // ikilisi. Fark yalnizca Level-0b1'deki cevirmendedir (doc S.1).
+        for path in ["/bin/hello", "/bin/hello.exe"] {
+            crate::println!();
+            let result = match level0b1::process::run_from_vfs(path) {
+                Err(level0b1::process::SpawnError::NotFound) => {
+                    crate::println!("[worker] {} VFS'te yok, gomulu imaja donuluyor.", path);
+                    level0b1::process::run_image("hello.elf", HELLO_ELF)
+                }
+                other => other,
+            };
+            match result {
+                Ok(()) => crate::println!("[worker] {} -> Ring 3 testi basarili.", path),
+                Err(e) => crate::println!("[worker] {} -> Ring 3 testi BASARISIZ: {:?}", path, e),
             }
-            other => other,
-        };
-        match result {
-            Ok(()) => crate::println!("[worker] Ring 3 testi basarili."),
-            Err(e) => crate::println!("[worker] Ring 3 testi BASARISIZ: {:?}", e),
         }
+        crate::println!();
 
         // Izolasyon dogrulamasi: cekirdek sayfalari Ring 3'e kapali kalmali.
         crate::println!(
