@@ -301,13 +301,6 @@ pub fn set_current_address_space(cr3: usize) {
     }
 }
 
-pub fn current_address_space() -> usize {
-    unsafe {
-        let tasks = core::ptr::addr_of!(TASKS) as *const Task;
-        (*tasks.add(CURRENT.load(Ordering::Relaxed))).address_space
-    }
-}
-
 /// Gorevin adres uzayi (kabuk raporu icin).
 pub fn address_space_of(index: usize) -> usize {
     if index >= MAX_TASKS {
