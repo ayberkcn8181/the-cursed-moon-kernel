@@ -58,6 +58,9 @@ APPS = {
     # ad: (baslik, x, y, w, h, desen, slot)
     "paint":  ("TCMK Paint",   30,  60, 320, 200, 0, 1),
     "plasma": ("TCMK Plasma", 700, 300, 300, 200, 1, 2),
+    # Kasten cokerek hata izolasyonunu kanitlar: pencere acar, birkac kare
+    # cizer, sonra cekirdek adresine yazmaya calisir -> page fault.
+    "crash":  ("TCMK Crash Test", 380, 300, 300, 120, 2, 3),
 }
 
 
@@ -117,6 +120,9 @@ def build_code(app, title_va, win_geom, win_size):
         emit(b"\x81\xe2\xff\x00\x00\x00")  # and edx, 0xFF
         emit(b"\xc1\xe2\x08")            # shl edx, 8
         emit(b"\x81\xca\x40\x00\x00\x40")  # or edx, 0x40000040
+    elif pattern == 2:
+        # Duz kirmizi (crash testi icin yeterli)
+        emit(mov_imm("edx", 0x00C03030))
     else:
         # XOR deseni: renk = ((ecx ^ (ecx>>7) ^ ebp) & 0xFF) * 0x010101
         emit(mov_reg("edx", "ecx"))
@@ -153,6 +159,17 @@ def build_code(app, title_va, win_geom, win_size):
 
     # ebp += 3 (animasyon hizi)
     emit(b"\x83\xc5\x03")                # add ebp, 3
+
+    if pattern == 2:
+        # --- HATA IZOLASYONU TESTI ---
+        # 40 kareden sonra CEKIRDEK adresine yazmaya calis. Ring 3'ten
+        # cekirdek sayfasina yazma -> page fault. Beklenen davranis:
+        # yalnizca bu surec olur, sistem calismaya devam eder.
+        emit(b"\x83\xfd\x78")            # cmp ebp, 120
+        # Atlanacak dizi: mov eax,imm32 (5) + mov [eax],imm32 (6) = 11 bayt.
+        emit(b"\x7c\x0b")                # jl +11 (henuz degil)
+        emit(mov_imm("eax", 0x00100000))  # cekirdek kod adresi (5)
+        emit(b"\xc7\x00\x00\x00\x00\x00")  # mov dword [eax], 0  (6)
 
     rel = loop_start - (sum(len(p) for p in parts) + 5)
     emit(b"\xe9" + struct.pack("<i", rel))  # jmp loop_start

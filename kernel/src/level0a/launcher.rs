@@ -19,29 +19,30 @@ static PENDING_TAIL: AtomicUsize = AtomicUsize::new(0);
 /// Kabuktan gelen yol, sabit bir listeyle eslestirilir. Dinamik dize
 /// sahipligi (heap'te string) yerine bu yontem secildi: cekirdekte
 /// ayirmali dize yonetimi Faz 9+ konusudur.
-static KNOWN_APPS: &[(&str, &str)] = &[
-    ("/bin/paint", "paint"),
-    ("/bin/plasma", "plasma"),
-    ("paint", "paint"),
-    ("plasma", "plasma"),
+static KNOWN_APPS: &[(&str, &str, &str)] = &[
+    // (kisa ad, tam yol, gorev adi)
+    ("paint", "/bin/paint", "paint"),
+    ("plasma", "/bin/plasma", "plasma"),
+    ("crash", "/bin/crash", "crash"),
 ];
 
-fn resolve(path: &str) -> Option<&'static str> {
-    for (name, _) in KNOWN_APPS {
-        if *name == path {
-            // Tam yol biciminde dondur.
-            return match *name {
-                "paint" | "/bin/paint" => Some("/bin/paint"),
-                _ => Some("/bin/plasma"),
-            };
+fn resolve(path: &str) -> Option<(&'static str, &'static str)> {
+    for (short, full, task) in KNOWN_APPS {
+        if *short == path || *full == path {
+            return Some((full, task));
         }
     }
     None
 }
 
+/// Kabugun `apps` komutu icin kullanilabilir uygulama listesi.
+pub fn available() -> &'static [(&'static str, &'static str, &'static str)] {
+    KNOWN_APPS
+}
+
 /// Bir uygulamayi yeni bir gorevde Ring 3'te baslatir.
 pub fn spawn_user_app(path: &str) -> Result<(), &'static str> {
-    let resolved = resolve(path).ok_or("bilinmeyen uygulama (paint | plasma)")?;
+    let (resolved, task_name) = resolve(path).ok_or("bilinmeyen uygulama ('apps' ile listeleyin)")?;
 
     crate::arch::cpu::without_interrupts(|| unsafe {
         let head = PENDING_HEAD.load(Ordering::Relaxed);
@@ -55,8 +56,7 @@ pub fn spawn_user_app(path: &str) -> Result<(), &'static str> {
         Ok(())
     })?;
 
-    let name = if resolved.contains("paint") { "paint" } else { "plasma" };
-    scheduler::spawn(name, app_task).ok_or("gorev olusturulamadi")?;
+    scheduler::spawn(task_name, app_task).ok_or("gorev olusturulamadi")?;
     Ok(())
 }
 

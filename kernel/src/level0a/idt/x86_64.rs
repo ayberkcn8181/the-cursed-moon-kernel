@@ -65,11 +65,7 @@ static mut IDT: [IdtEntry; 256] = [IdtEntry::missing(); 256];
 
 pub fn init() {
     unsafe {
-        IDT[0].set(
-            divide_by_zero_handler as *const () as u64,
-            KERNEL_CODE_SELECTOR,
-            GATE_PRESENT_RING0_INT,
-        );
+        install_exception_handlers();
         IDT[32].set(
             pit_handler as *const () as u64,
             KERNEL_CODE_SELECTOR,
@@ -105,10 +101,99 @@ pub fn init() {
     }
 }
 
-extern "x86-interrupt" fn divide_by_zero_handler(_frame: InterruptStackFrame) -> ! {
-    crate::level0b2::fallback::emergency(&["CPU istisnasi: divide-by-zero (vektor 0)."]);
-    loop {
-        crate::arch::cpu::halt();
+fn read_cr2() -> usize {
+    let value: u64;
+    unsafe { asm!("mov {0}, cr2", out(reg) value, options(nomem, nostack, preserves_flags)) };
+    value as usize
+}
+
+macro_rules! exception_no_code {
+    ($name:ident, $vector:expr) => {
+        extern "x86-interrupt" fn $name(frame: InterruptStackFrame) -> ! {
+            let from_user = frame.code_segment & 3 == 3;
+            crate::level0a::exceptions::handle(
+                $vector,
+                0,
+                frame.instruction_pointer as usize,
+                from_user,
+                0,
+            )
+        }
+    };
+}
+
+macro_rules! exception_with_code {
+    ($name:ident, $vector:expr) => {
+        extern "x86-interrupt" fn $name(frame: InterruptStackFrame, error_code: u64) -> ! {
+            let from_user = frame.code_segment & 3 == 3;
+            let fault_addr = if $vector == 14 { read_cr2() } else { 0 };
+            crate::level0a::exceptions::handle(
+                $vector,
+                error_code as usize,
+                frame.instruction_pointer as usize,
+                from_user,
+                fault_addr,
+            )
+        }
+    };
+}
+
+exception_no_code!(ex0, 0);
+exception_no_code!(ex1, 1);
+exception_no_code!(ex2, 2);
+exception_no_code!(ex3, 3);
+exception_no_code!(ex4, 4);
+exception_no_code!(ex5, 5);
+exception_no_code!(ex6, 6);
+exception_no_code!(ex7, 7);
+exception_with_code!(ex8, 8);
+exception_no_code!(ex9, 9);
+exception_with_code!(ex10, 10);
+exception_with_code!(ex11, 11);
+exception_with_code!(ex12, 12);
+exception_with_code!(ex13, 13);
+exception_with_code!(ex14, 14);
+exception_no_code!(ex16, 16);
+exception_with_code!(ex17, 17);
+exception_no_code!(ex18, 18);
+exception_no_code!(ex19, 19);
+exception_no_code!(ex20, 20);
+exception_with_code!(ex21, 21);
+
+unsafe fn install_exception_handlers() {
+    let no_code: [(usize, *const ()); 15] = [
+        (0, ex0 as *const ()),
+        (1, ex1 as *const ()),
+        (2, ex2 as *const ()),
+        (3, ex3 as *const ()),
+        (4, ex4 as *const ()),
+        (5, ex5 as *const ()),
+        (6, ex6 as *const ()),
+        (7, ex7 as *const ()),
+        (9, ex9 as *const ()),
+        (16, ex16 as *const ()),
+        (18, ex18 as *const ()),
+        (19, ex19 as *const ()),
+        (20, ex20 as *const ()),
+        (15, ex0 as *const ()),
+        (31, ex0 as *const ()),
+    ];
+    for (vector, handler) in no_code {
+        IDT[vector].set(handler as u64, KERNEL_CODE_SELECTOR, GATE_PRESENT_RING0_INT);
+    }
+
+    let with_code: [(usize, *const ()); 8] = [
+        (8, ex8 as *const ()),
+        (21, ex21 as *const ()),
+        (10, ex10 as *const ()),
+        (11, ex11 as *const ()),
+        (12, ex12 as *const ()),
+        (13, ex13 as *const ()),
+        (14, ex14 as *const ()),
+        (17, ex17 as *const ()),
+    ];
+    for (vector, handler) in with_code {
+        IDT[vector].set(handler as u64, KERNEL_CODE_SELECTOR, GATE_PRESENT_RING0_INT);
     }
 }
 

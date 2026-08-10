@@ -4,6 +4,7 @@
 
 pub mod core;
 pub mod drivers;
+pub mod exceptions;
 pub mod gdt;
 pub mod idt;
 pub mod gui_api;

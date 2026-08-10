@@ -47,6 +47,8 @@ static HELLO_EXE: &[u8] = include_bytes!("../../userland/hello.exe");
 static PAINT_ELF: &[u8] = include_bytes!("../../userland/paint.elf");
 #[cfg(target_arch = "x86")]
 static PLASMA_ELF: &[u8] = include_bytes!("../../userland/plasma.elf");
+#[cfg(target_arch = "x86")]
+static CRASH_ELF: &[u8] = include_bytes!("../../userland/crash.elf");
 
 /// Linux (ELF64, x86_64) kullanici programi -- `tools/gen_hello_elf64.py`.
 #[cfg(target_arch = "x86_64")]
@@ -62,6 +64,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/hello.exe", HELLO_EXE),
     ("/bin/paint", PAINT_ELF),
     ("/bin/plasma", PLASMA_ELF),
+    ("/bin/crash", CRASH_ELF),
     ("/boot/msg.txt", BOOT_MSG),
 ];
 

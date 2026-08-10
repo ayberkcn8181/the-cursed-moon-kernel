@@ -10,7 +10,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::level0a::core::{fd, kmalloc, scheduler, vfs};
 use crate::level0a::drivers::gfx;
-use crate::level0a::{pit, wm};
+use crate::level0a::{exceptions, launcher, pit, wm};
 
 const MAX_ROWS: usize = 24;
 const MAX_COLS: usize = 78;
@@ -178,6 +178,8 @@ fn execute(line: &str) {
             write_line("  cat <yol>     dosya icerigini goster");
             write_line("  run <yol>     Ring 3 uygulamasi baslat");
             write_line("  win           pencere listesi");
+            write_line("  apps          calistirilabilir uygulamalar");
+            write_line("  faults        istisna/hata istatistikleri");
             write_line("  uptime        calisma suresi");
             write_line("  clear         ekrani temizle");
         }
@@ -237,6 +239,33 @@ fn execute(line: &str) {
                     }
                     Err(msg) => write_line(msg),
                 }
+            }
+        }
+        "apps" => {
+            write_line("calistirilabilir uygulamalar ('run <ad>'):");
+            for (short, full, _) in launcher::available() {
+                write_str("  ");
+                write_str(short);
+                write_str("  ->  ");
+                write_line(full);
+            }
+        }
+        "faults" => {
+            write_str("yakalanan istisna: ");
+            write_num(exceptions::total());
+            newline();
+            write_str("sonlandirilan surec: ");
+            write_num(exceptions::killed_processes());
+            newline();
+            write_str("son istisna: ");
+            match exceptions::last_vector() {
+                Some(v) => {
+                    write_str("#");
+                    write_num(v);
+                    write_str(" ");
+                    write_line(exceptions::NAMES.get(v).copied().unwrap_or("?"));
+                }
+                None => write_line("yok"),
             }
         }
         "win" => {

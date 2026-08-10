@@ -277,6 +277,32 @@ python3 tools/gen_hello_elf64.py userland/hello64.elf   # x86_64
 python3 tools/gen_font.py           # 8x16 bitmap fontu yeniden uret
 ```
 
+## Hata izolasyonu (kararlilik)
+
+Tum 32 CPU istisna vektoru baglidir. Bir Ring 3 uygulamasi hata uretirse
+**yalnizca o surec sonlandirilir**, sistem calismaya devam eder:
+
+![Hata izolasyonu](docs/screenshot-fault-isolation.png)
+
+`run crash` ile baslatilan test uygulamasi kasten cekirdek adresine yazar:
+
+```
+[LEVEL-0b2] ISTISNA #14 (page-fault) -- Ring 3 kaynakli
+            IP=0x00cc00d5  hata_kodu=0x7
+            adres=0x00100000  koruma-ihlali / yazma / Ring 3
+[LEVEL-0b2] Surec sonlandirildi; sistem calismaya devam ediyor.
+```
+
+Ekran goruntusunde goruldugu gibi Paint ve Plasma animasyonlarina devam
+eder, kabuk yanit verir. **Bu degisiklikten once ayni hata triple fault
+uretip tum makineyi yeniden baslatiyordu** -- cunku yalnizca vektor 0
+bagliydi ve baglanmamis bir istisnanin gidecek yeri yoktu.
+
+Hata Ring 0'dan gelirse bu bir cekirdek hatasidir; Level-0b2 Fallback
+Interface devreye girip sistemi guvenli duruma alir.
+
+Kabuktan `faults` komutu istatistikleri gosterir.
+
 ## Alfa'nin bilinen sinirlari
 
 Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
