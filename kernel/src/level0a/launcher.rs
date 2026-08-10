@@ -33,6 +33,7 @@ static KNOWN_APPS: &[(&str, &str, &str)] = &[
     ("plasma", "/bin/plasma", "plasma"),
     ("crash", "/bin/crash", "crash"),
     ("hog", "/bin/hog", "hog"),
+    ("spin", "/bin/spin", "spin"),
 ];
 
 /// Kabuktan gelen adi tam yola ve gorev adina cevirir.

@@ -52,6 +52,9 @@ static CRASH_ELF: &[u8] = include_bytes!("../../userland/crash.elf");
 /// Yuk dengeleyici testi: CPU birakmadan syscall yagmuru yapar.
 #[cfg(target_arch = "x86")]
 static HOG_ELF: &[u8] = include_bytes!("../../userland/hog.elf");
+/// Preemption testi: hic syscall yapmayan saf hesap dongusu.
+#[cfg(target_arch = "x86")]
+static SPIN_ELF: &[u8] = include_bytes!("../../userland/spin.elf");
 
 /// Linux (ELF64, x86_64) kullanici programi -- `tools/gen_hello_elf64.py`.
 #[cfg(target_arch = "x86_64")]
@@ -69,6 +72,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/plasma", PLASMA_ELF),
     ("/bin/crash", CRASH_ELF),
     ("/bin/hog", HOG_ELF),
+    ("/bin/spin", SPIN_ELF),
     ("/boot/msg.txt", BOOT_MSG),
 ];
 

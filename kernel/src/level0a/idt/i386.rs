@@ -198,7 +198,16 @@ unsafe fn install_exception_handlers() {
 
 extern "x86-interrupt" fn pit_handler(_frame: InterruptStackFrame) {
     crate::level0a::pit::on_tick();
+    // EOI baglam degisiminden ONCE: gorevi burada birakirsak PIC hala
+    // hizmet bekliyor olur ve bir daha IRQ0 gelmez.
     crate::level0a::pic::send_eoi(0);
+
+    // --- PREEMPTION ---
+    // Zaman dilimi dolduysa gorev kendi istegi olmadan birakilir. Baglam
+    // degisimi bu kesme yigininda yapilir (Ring 3 icin TSS.esp0); donuste
+    // ayni noktaya donulup `iret` calisir -- syscall yolundaki desenin
+    // aynisi.
+    crate::level0a::core::scheduler::preempt_from_timer();
 }
 
 extern "x86-interrupt" fn keyboard_handler(_frame: InterruptStackFrame) {

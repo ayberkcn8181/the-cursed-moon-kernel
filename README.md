@@ -30,6 +30,7 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 14 | **Pencere yoneticisi**: kompozitor, fare, surukleme, GUI syscall'lari | ✅ (i386) |
 | 6 | AArch64 portu (EL1/EL0, GIC, `svc #0`) | ⏳ yapilmadi |
 | 8 | **Surec basina adres uzayi** (cerceve ayirici + CR3 degisimi) | ✅ (i386) |
+| 8 | **Preemptive zamanlama** (zamanlayici kesmesinden baglam degisimi) | ✅ |
 | 9 | **Kalici depolama**: ATA PIO, MBR, TCMKFS (yazilabilir) | ✅ (i386) |
 | — | **Kendi onyukleyicisi** + diske kurulum (`install`) | ✅ (i386) |
 | 8+ | fork/execve + sinyaller, musl/busybox | ⏳ yapilmadi |
@@ -365,11 +366,11 @@ tcmk> load
 toplam cagri: 61315  kisitlama: 897
 ```
 
-**Neden gerekli:** zamanlama isbirlikci (doc Faz 2 notu). Sistem cagrisi
-yapan ama `yield` cagirmayan bir Ring 3 uygulamasi normalde masaustunu,
-kabugu ve diger uygulamalari aclia surukler -- PIT "zaman dilimi doldu"
-der ama kimse dinlemez. Preemption gelene kadar (Faz 8) tek savunma
-cagri yolunun kendisidir.
+**Neden hala gerekli:** preemption CPU'yu adil bolusturur ama **cagri
+hacmini** sinirlamaz. Saniyede on binlerce syscall yapan bir uygulama,
+zaman dilimini asmasa bile VFS'i, kompozitoru ve disk yolunu bogar.
+Yuk Dengeleyici darbogazi kanal bazinda gorunur kilar ve kotayi asan
+gorevi geri baskiya alir.
 
 Bir gorev pencere kotasini (`4000 cagri/sn`) asarsa Dispatcher cagriyi
 **islemeden once** o goreve `yield` ettirir. Cagri kaybolmaz, sirasini
@@ -536,6 +537,55 @@ tcmk> run /home/plasma
 Launcher artik sabit bir uygulama listesine bagli degil: VFS'te var olan
 her yol calistirilabilir. Yani diske kopyalanan uygulamalar cekirdegi
 yeniden derlemeden calisir.
+
+## Preemptive zamanlama
+
+Zamanlayici kesmesi artik gorevi **kendi istegi olmadan** birakiyor.
+
+![Preemption](docs/screenshot-preemption.png)
+
+`run spin` -- hicbir sistem cagrisi yapmayan saf hesap dongusu
+(`userland-rs/src/bin/spin.rs`). Ekran goruntusunde spin kosarken:
+
+```
+tcmk> ps
+   id durum      ad            cagri  adres-uzayi
+ *  0 calisiyor  idle              0     cekirdek
+    2 hazir      paint          7356  0x01000000 (128 sayfa)
+    3 hazir      plasma         4905  0x01082000 (187 sayfa)
+    4 hazir      spin             59  0x01104000 (164 sayfa)
+baglam degisimi: 7769  (zorla: 2835)
+```
+
+spin yalnizca **59** cagri yapmis (plasma 4905) -- yani neredeyse tum
+zamanini cekirdegi hic cagirmadan geciriyor. Buna ragmen kabuk `ps`'e
+yanit verdi ve Plasma cizmeye devam etti. Isbirlikci modelde masaustu bu
+dongu boyunca donardi; Yuk Dengeleyici de caresizdi, cunku kisitlayacak
+bir cagri yoktu.
+
+### Nasil calisiyor
+
+Yapisal olarak syscall yolundan farki yok: orada da baglam degisimi kesme
+yigininda (Ring 3 icin `TSS.esp0`) yapiliyor ve donuste ayni noktaya
+donulup `iret` calisiyor. Zamanlayici kesmesi de aynisini yapiyor --
+`pit_handler` once EOI gonderiyor (baglam degisiminden **once**, yoksa PIC
+hala hizmet bekler ve bir daha IRQ0 gelmez), sonra
+`scheduler::preempt_from_timer()`.
+
+Kesme kapisi IF=0 ile girildigi icin ic ice preemption olmaz;
+`without_interrupts` bolgeleri de dogal olarak korunur.
+
+### Bolunemez isler: `preempt_disable`
+
+Kesmeleri kapatmak yerine yalnizca **baglam degisimini** erteleyen bir
+sayac var. Su an tek kullanicisi disk: bir ATA komutu (surucu secimi ->
+LBA -> komut -> veri) bir butundur; ortasinda baska bir gorev ikinci bir
+komut baslatirsa denetleyicinin durumu bozulur. Kesmeleri kapatmak da ise
+yarardi ama 2 MiB'lik bir okuma boyunca kesmesiz kalmak saati ve girdiyi
+dondururdu.
+
+`PreemptGuard` `Drop` ile birakilir; boylece `?` ile erken donen her hata
+yolu da kilidi geri verir.
 
 ## Surec basina adres uzayi
 
@@ -725,11 +775,8 @@ Kabuktan `faults` komutu istatistikleri gosterir.
 
 Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
 
-- **Zamanlama isbirlikcidir.** Uygulama `win_flush` cagirmazsa CPU'yu
-  birakmaz. Yuk Dengeleyici bunu **hafifletir** (kota asan gorevi zorla
-  yield ettirir) ama cozmez: hic syscall yapmadan donen bir dongu hala
-  sistemi kilitler. Gercek preemption, kesme icinden baglam degistirmeyi
-  gerektirir (Faz 8).
+- **Zamanlama round-robin ve onceliksiz.** Preemption var ama gorevler
+  esit; oncelik, gercek zamanli sinif ve `nice` yok.
 - **GUI yalnizca i386'da.** x86_64 cekirdegi calisir ve framebuffer'i
   eslerse de GUI uygulamalari su an yalnizca ELF32 olarak uretiliyor.
 - **`fork`/`execve` yok.** Her surec bos bir adres uzayinda dogar; sureci

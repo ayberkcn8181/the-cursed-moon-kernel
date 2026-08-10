@@ -261,7 +261,9 @@ fn execute(line: &str) {
             }
             write_str("baglam degisimi: ");
             write_num(scheduler::switch_count());
-            newline();
+            write_str("  (zorla: ");
+            write_num(scheduler::preemptions());
+            write_line(")");
         }
         "top" => {
             write_str("son saniye -- kota ");

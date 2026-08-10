@@ -65,6 +65,10 @@ static CURRENT: AtomicUsize = AtomicUsize::new(0);
 static TASK_COUNT: AtomicUsize = AtomicUsize::new(0);
 static NEED_RESCHED: AtomicBool = AtomicBool::new(false);
 static SWITCHES: AtomicUsize = AtomicUsize::new(0);
+/// Zorla baglam degisimi (preemption) sayaci.
+static PREEMPTIONS: AtomicUsize = AtomicUsize::new(0);
+/// Sifirdan buyukse zamanlayici kesmesi baglam degistirmez.
+static PREEMPT_LOCK: AtomicUsize = AtomicUsize::new(0);
 
 /// Halihazirda calisan cekirdek akisini 0 numarali gorev ("idle") olarak
 /// kaydeder. Bu gorevin yigini zaten `_start` tarafindan kurulmustur, bu
@@ -113,6 +117,53 @@ pub fn spawn(name: &'static str, entry: extern "C" fn() -> !) -> Option<usize> {
 /// PIT kesmesinden cagrilir: zaman dilimi doldu bayragini kaldirir.
 pub fn on_timer_tick() {
     NEED_RESCHED.store(true, Ordering::Relaxed);
+}
+
+/// Bolunemez bir is boyunca zorla baglam degisimini kapatir.
+///
+/// Gerekli oldugu tek yer su an disk: ATA komutlari (surucu secimi ->
+/// LBA -> komut -> veri) bir butundur; ortasinda baska bir gorev ikinci
+/// bir komut baslatirsa denetleyicinin durumu bozulur. Kesmeleri
+/// kapatmak da ise yarardi ama 2 MiB'lik bir okuma boyunca kesmesiz
+/// kalmak saati ve girdiyi dondururdu; burada yalnizca **baglam degisimi**
+/// ertelenir, kesmeler islenmeye devam eder.
+pub fn preempt_disable() {
+    PREEMPT_LOCK.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn preempt_enable() {
+    PREEMPT_LOCK.fetch_sub(1, Ordering::Relaxed);
+}
+
+/// Zamanlayici kesmesinden cagrilir: zaman dilimi dolduysa gorevi
+/// **kendi istegi olmadan** birakir.
+///
+/// Isbirlikci modelde `yield` cagirmayan bir dongu tum sistemi
+/// kilitliyordu; Yuk Dengeleyici yalnizca syscall yagmurunu
+/// hafifletebiliyordu, saf bir hesap dongusune caresizdi.
+///
+/// Yapisal olarak syscall yolundan farki yok: orada da baglam degisimi
+/// kesme yigininda (Ring 3 icin TSS.esp0) yapiliyor ve donuste ayni
+/// noktaya donuluyor. Kesme kapisi IF=0 ile girildigi icin ic ice
+/// preemption olmaz; `without_interrupts` bolgeleri de dogal olarak
+/// korunur.
+pub fn preempt_from_timer() {
+    // Scheduler daha ayaga kalkmadiysa gorev tablosu bostur.
+    if TASK_COUNT.load(Ordering::Relaxed) < 2 {
+        return;
+    }
+    if PREEMPT_LOCK.load(Ordering::Relaxed) != 0 {
+        return;
+    }
+    if !NEED_RESCHED.load(Ordering::Relaxed) {
+        return;
+    }
+    PREEMPTIONS.fetch_add(1, Ordering::Relaxed);
+    yield_now();
+}
+
+pub fn preemptions() -> usize {
+    PREEMPTIONS.load(Ordering::Relaxed)
 }
 
 pub fn needs_resched() -> bool {

@@ -56,6 +56,25 @@ static ERRORS: AtomicU32 = AtomicU32::new(0);
 /// Model dizesi (IDENTIFY'dan, 40 karakter).
 static mut MODEL: [u8; 40] = [b' '; 40];
 
+/// Kapsam boyunca zorla baglam degisimini kapatir.
+///
+/// `Drop` ile birakilmasi sart: `?` ile erken donen her hata yolu da
+/// kilidi birakmis olur.
+struct PreemptGuard;
+
+impl PreemptGuard {
+    fn new() -> Self {
+        crate::level0a::core::scheduler::preempt_disable();
+        PreemptGuard
+    }
+}
+
+impl Drop for PreemptGuard {
+    fn drop(&mut self) {
+        crate::level0a::core::scheduler::preempt_enable();
+    }
+}
+
 /// Surucu/kanal secildikten sonra gereken ~400 ns bekleme: alternatif durum
 /// dort kez okunur (her okuma bir ATA saat cevrimi surer).
 fn io_delay() {
@@ -181,6 +200,9 @@ pub fn read(lba: u32, count: u8, buf: &mut [u8]) -> Result<(), BlockError> {
         return Err(BlockError::BufferTooSmall);
     }
 
+    // Komut bolunemez: ortasinda baska bir gorev ikinci bir ATA komutu
+    // baslatirsa denetleyicinin durumu bozulur.
+    let _guard = PreemptGuard::new();
     setup_lba(lba, count)?;
     unsafe { outb(COMMAND, CMD_READ_SECTORS) };
 
@@ -207,6 +229,7 @@ pub fn write(lba: u32, count: u8, buf: &[u8]) -> Result<(), BlockError> {
         return Err(BlockError::BufferTooSmall);
     }
 
+    let _guard = PreemptGuard::new();
     setup_lba(lba, count)?;
     unsafe { outb(COMMAND, CMD_WRITE_SECTORS) };
 
