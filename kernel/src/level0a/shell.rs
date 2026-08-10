@@ -8,9 +8,10 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::level0a::core::{fd, kmalloc, scheduler, vfs};
+use crate::level0a::core::{fd, init, kmalloc, mmu, scheduler, vfs};
 use crate::level0a::drivers::gfx;
-use crate::level0a::{exceptions, launcher, pit, wm};
+use crate::level0a::{exceptions, input, launcher, pit, wm};
+use crate::level0b2::{ipc, load_balancer, state_monitor};
 
 const MAX_ROWS: usize = 24;
 const MAX_COLS: usize = 78;
@@ -156,6 +157,51 @@ fn write_num(mut n: usize) {
     }
 }
 
+/// Onaltilik yazdirma (sabit genislik, `0x` onekli).
+fn write_hex(value: usize, digits: usize) {
+    write_str("0x");
+    let mut i = digits;
+    while i > 0 {
+        i -= 1;
+        let nibble = ((value >> (i * 4)) & 0xF) as u8;
+        put(if nibble < 10 {
+            b'0' + nibble
+        } else {
+            b'a' + nibble - 10
+        });
+    }
+}
+
+/// Sayiyi sagdan hizali yazar (tablolar icin).
+fn write_num_right(n: usize, width: usize) {
+    let mut digits = 1;
+    let mut probe = n;
+    while probe >= 10 {
+        probe /= 10;
+        digits += 1;
+    }
+    for _ in digits..width {
+        put(b' ');
+    }
+    write_num(n);
+}
+
+fn write_padded(s: &str, width: usize) {
+    write_str(s);
+    for _ in s.len()..width {
+        put(b' ');
+    }
+}
+
+fn state_name(state: scheduler::TaskState) -> &'static str {
+    match state {
+        scheduler::TaskState::Unused => "bos",
+        scheduler::TaskState::Ready => "hazir",
+        scheduler::TaskState::Running => "calisiyor",
+        scheduler::TaskState::Terminated => "bitti",
+    }
+}
+
 fn execute(line: &str) {
     let line = line.trim();
     if line.is_empty() {
@@ -170,28 +216,249 @@ fn execute(line: &str) {
 
     match cmd {
         "help" => {
-            write_line("komutlar:");
-            write_line("  help          bu yardim");
-            write_line("  ps            gorev listesi");
-            write_line("  mem           bellek kullanimi");
-            write_line("  ls            VFS icerigi");
-            write_line("  cat <yol>     dosya icerigini goster");
-            write_line("  run <yol>     Ring 3 uygulamasi baslat");
-            write_line("  win           pencere listesi");
-            write_line("  apps          calistirilabilir uygulamalar");
+            write_line("sistem:");
+            write_line("  ps  top  kill <id>  svc  health  uptime  ver");
+            write_line("level-0b2 (merkezi denetleyici):");
+            write_line("  load          yuk dengeleyici istatistikleri");
+            write_line("  ipc           mesaj kuyrugu + paylasimli bolge");
             write_line("  faults        istisna/hata istatistikleri");
-            write_line("  uptime        calisma suresi");
-            write_line("  clear         ekrani temizle");
+            write_line("  stall <sn>    nabzi bastir (fallback testi)");
+            write_line("bellek / dosya:");
+            write_line("  mem  ls  cat <yol>");
+            write_line("uygulama / pencere:");
+            write_line("  apps  run <ad>  win  mouse");
+            write_line("diger:");
+            write_line("  echo <metin>  clear  help");
         }
         "ps" => {
-            write_str("gorev sayisi: ");
-            write_num(scheduler::task_count());
-            newline();
+            write_line("  id durum      ad          cagri");
+            for i in 0..scheduler::task_count() {
+                let state = scheduler::state_of(i);
+                write_str(if i == scheduler::current_id() {
+                    "  *"
+                } else {
+                    "   "
+                });
+                write_num_right(i, 2);
+                put(b' ');
+                write_padded(state_name(state), 10);
+                put(b' ');
+                write_padded(scheduler::name_of(i), 11);
+                write_num_right(load_balancer::task_total(i) as usize, 7);
+                newline();
+            }
             write_str("baglam degisimi: ");
             write_num(scheduler::switch_count());
             newline();
-            write_str("calisan: ");
-            write_line(scheduler::current_name());
+        }
+        "top" => {
+            write_str("son saniye -- kota ");
+            write_num(load_balancer::quota() as usize);
+            write_line(" cagri/gorev");
+            write_line("  id ad            cagri/sn   kisitlama");
+            for i in 0..scheduler::task_count() {
+                write_str("  ");
+                write_num_right(i, 2);
+                put(b' ');
+                write_padded(scheduler::name_of(i), 13);
+                write_num_right(load_balancer::task_rate(i) as usize, 9);
+                write_num_right(load_balancer::task_throttles(i) as usize, 12);
+                newline();
+            }
+            write_str("en yogun gorev: #");
+            write_num(load_balancer::busiest_task());
+            write_str(" ");
+            write_line(scheduler::name_of(load_balancer::busiest_task()));
+        }
+        "load" => {
+            write_line("  kanal          toplam    /sn     tepe  durum");
+            for i in 0..load_balancer::CHANNELS {
+                write_str("  ");
+                write_padded(load_balancer::CHANNEL_NAMES[i], 13);
+                write_num_right(load_balancer::total(i) as usize, 8);
+                write_num_right(load_balancer::rate(i) as usize, 7);
+                write_num_right(load_balancer::peak(i) as usize, 9);
+                write_str(if load_balancer::is_saturated(i) {
+                    "  DOYGUN"
+                } else {
+                    "  normal"
+                });
+                newline();
+            }
+            write_str("toplam cagri: ");
+            write_num(load_balancer::call_count() as usize);
+            write_str("  kisitlama: ");
+            write_num(load_balancer::throttles() as usize);
+            newline();
+            write_str("olcum penceresi: ");
+            write_num(load_balancer::windows_rolled() as usize);
+            write_str(" saniye  darbogaz: ");
+            write_line(if load_balancer::any_saturated() {
+                "VAR"
+            } else {
+                "yok"
+            });
+        }
+        "ipc" => {
+            write_str("paylasimli bolge: ");
+            write_hex(ipc::shared_addr(), 8);
+            write_str(if ipc::shared_is_valid() {
+                "  (gecerli)"
+            } else {
+                "  (BOZUK)"
+            });
+            newline();
+            write_str("kuyruk: ");
+            write_num(ipc::depth());
+            write_str("/");
+            write_num(ipc::capacity());
+            write_str("  tepe: ");
+            write_num(ipc::high_water());
+            newline();
+            write_str("gonderilen: ");
+            write_num(ipc::posted() as usize);
+            write_str("  tuketilen: ");
+            write_num(ipc::consumed() as usize);
+            write_str("  dusen: ");
+            write_num(ipc::dropped() as usize);
+            newline();
+            write_line("son olaylar:");
+            for i in 0..ipc::history_len() {
+                if let Some(m) = ipc::history(i) {
+                    write_str("  t=");
+                    write_num_right(m.tick as usize, 6);
+                    put(b' ');
+                    write_padded(ipc::kind_name(m.kind), 17);
+                    write_line(m.text);
+                }
+            }
+        }
+        "svc" => {
+            for i in 0..init::service_count() {
+                if let Some(s) = init::service(i) {
+                    write_str("  ");
+                    write_padded(s.name, 14);
+                    write_line(match s.state {
+                        init::ServiceState::Active => "[ACTIVE]",
+                        init::ServiceState::Failed => "[FAILED]",
+                        init::ServiceState::Inactive => "[INACTIVE]",
+                    });
+                }
+            }
+            write_str("hepsi aktif: ");
+            write_line(if init::all_services_active() {
+                "evet"
+            } else {
+                "HAYIR"
+            });
+        }
+        "health" => {
+            write_str("Level-0a durumu: ");
+            write_line(match state_monitor::health() {
+                crate::level0b2::state_monitor::Level0aHealth::Healthy => "Saglikli",
+                crate::level0b2::state_monitor::Level0aHealth::Busy => "Mesgul",
+                crate::level0b2::state_monitor::Level0aHealth::Dead => "OLU",
+            });
+            write_str("nabiz: ");
+            write_num(pit::heartbeat() as usize);
+            write_str("  tick: ");
+            write_num(pit::ticks() as usize);
+            newline();
+            write_str("paylasimli nabiz: ");
+            write_num(
+                ipc::SHARED
+                    .heartbeat
+                    .load(core::sync::atomic::Ordering::Relaxed) as usize,
+            );
+            newline();
+            if pit::heartbeat_suppressed() {
+                write_line("nabiz SIMULASYON GEREGI bastirilmis durumda ('stall').");
+            }
+            write_str("nabiz sessizligi: ");
+            write_num(state_monitor::stalled_ticks() as usize);
+            write_str(" tick (olu esigi ");
+            write_num(state_monitor::dead_threshold_ticks() as usize);
+            write_line(")");
+            write_str("co-service: ");
+            write_line(if state_monitor::level0a_is_dead() {
+                "DEVREDE (Level-0a olu)"
+            } else {
+                "beklemede"
+            });
+            write_str("olu olayi: ");
+            write_num(state_monitor::dead_events() as usize);
+            write_str("  toparlanma: ");
+            write_num(state_monitor::recoveries() as usize);
+            newline();
+            write_str("minimal modda reddedilen cagri: ");
+            write_num(crate::level0b2::fallback::unsupported_calls() as usize);
+            newline();
+        }
+        "stall" => {
+            // Doc S.12 test maddesi: "Heartbeat timeout simulasyonunda
+            // fallback devreye girer". Nabiz bastirilir; Level-0a aslinda
+            // calismaya devam eder ama disaridan kilitlenmis gorunur.
+            let seconds = arg
+                .bytes()
+                .fold(None::<usize>, |acc, b| {
+                    if b.is_ascii_digit() {
+                        Some(acc.unwrap_or(0) * 10 + (b - b'0') as usize)
+                    } else {
+                        acc
+                    }
+                })
+                .unwrap_or(5)
+                .clamp(1, 30);
+            pit::suppress_heartbeat(seconds as u32 * 100);
+            write_str("nabiz ");
+            write_num(seconds);
+            write_line(" saniye bastiriliyor -- Fallback devreye girmeli.");
+            write_line("('health' ve 'ipc' ile izleyin)");
+        }
+        "ver" => {
+            write_line("The Cursed Moon Kernel (TCMK) -- Rust portu");
+            write_str("mimari: ");
+            write_line(if cfg!(target_arch = "x86_64") {
+                "x86_64 (Long Mode, syscall)"
+            } else {
+                "i386 (korumali mod, int 0x80)"
+            });
+            write_line("katmanlar: Level-0b2 / Level-0b1 / Level-0a / Level-1");
+            write_line("ikili formatlar: ELF32 + PE32 (ayni cekirdek, iki dunya)");
+        }
+        "kill" => {
+            let id = arg.bytes().fold(None::<usize>, |acc, b| {
+                if b.is_ascii_digit() {
+                    Some(acc.unwrap_or(0) * 10 + (b - b'0') as usize)
+                } else {
+                    acc
+                }
+            });
+            match id {
+                Some(i) => match scheduler::terminate(i) {
+                    Ok(()) => {
+                        write_str("sonlandirildi: gorev #");
+                        write_num(i);
+                        newline();
+                    }
+                    Err(e) => write_line(e),
+                },
+                None => write_line("kullanim: kill <gorev-no>  ('ps' ile listeleyin)"),
+            }
+        }
+        "echo" => write_line(arg),
+        "mouse" => {
+            write_str("fare: x=");
+            write_num(input::mouse_x());
+            write_str(" y=");
+            write_num(input::mouse_y());
+            write_str(" sol=");
+            write_line(if input::mouse_left() { "basili" } else { "serbest" });
+            write_str("ekran: ");
+            write_num(gfx::width());
+            write_str("x");
+            write_num(gfx::height());
+            newline();
         }
         "mem" => {
             write_str("heap kullanilan: ");
@@ -200,6 +467,14 @@ fn execute(line: &str) {
             write_str("heap bos: ");
             write_num(kmalloc::free_bytes() / 1024);
             write_line(" KiB");
+            write_str("kullanici bolgesi: ");
+            write_hex(mmu::USER_MEM_START, 8);
+            write_str(" + ");
+            write_num(mmu::USER_MEM_SIZE / 1024);
+            write_line(" KiB");
+            write_str("identity esleme: ");
+            write_num(mmu::identity_mapped_bytes() / (1024 * 1024));
+            write_line(" MiB");
             write_str("acik dosya: ");
             write_num(fd::open_count());
             newline();

@@ -95,6 +95,21 @@ pub fn handle(vector: usize, error_code: usize, instruction_ptr: usize, from_use
     LAST_VECTOR.store(vector, Ordering::Relaxed);
 
     let name = NAMES.get(vector).copied().unwrap_or("bilinmeyen");
+    let task = crate::level0a::core::scheduler::current_id();
+
+    // Istisnalar da bir yuk kalemidir: surekli hata ureten bir surec
+    // kanalda gorunur (doc S.2.2.A "darbogaz").
+    let _ = crate::level0b2::load_balancer::note_call(
+        crate::level0b2::load_balancer::Channel::Exception,
+        task,
+    );
+    crate::level0b2::ipc::post(
+        crate::level0b2::ipc::Kind::Fault,
+        task,
+        vector,
+        if vector == 14 { fault_addr } else { instruction_ptr },
+        name,
+    );
 
     crate::println!();
     crate::println!(

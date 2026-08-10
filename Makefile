@@ -60,7 +60,7 @@ USER_REGION := 0x00C00000
 SLOT_SIZE   := 0x40000
 
 # ad:slot
-USER_APPS := hello:0 paint:1 plasma:2 crash:3
+USER_APPS := hello:0 paint:1 plasma:2 crash:3 hog:4
 
 userland: userland-rust userland-legacy
 

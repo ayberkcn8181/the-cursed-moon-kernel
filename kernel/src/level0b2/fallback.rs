@@ -9,13 +9,28 @@
 //! ana katman olse bile sistem konusmaya devam edebilir.
 
 use core::panic::PanicInfo;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::arch::cpu::regs::SyscallFrame;
 
-/// Fallback modunda desteklenen minimal syscall kumesi.
+/// Fallback modunda desteklenen minimal syscall kumesi (Co-Service).
+///
+/// Kume bilincli olarak kucuktur: amac tam bir isletim ortami sunmak degil,
+/// **sistemi uyanik ve etkilesime acik tutmaktir** (doc S.11). Konsola
+/// yazma, CPU birakma ve kareyi bitirme -- masaustunun donmamasi ve
+/// kullanicinin sisteme hala komut verebilmesi icin gereken asgari kume.
 const SYS_EXIT: u32 = 1;
 const SYS_WRITE: u32 = 4;
+const SYS_WIN_SIZE: u32 = 0x502;
+const SYS_WIN_FLUSH: u32 = 0x503;
+const SYS_WIN_POLL_KEY: u32 = 0x504;
+const SYS_MOUSE_STATE: u32 = 0x505;
+const SYS_YIELD: u32 = 0x506;
+const SYS_WIN_POS: u32 = 0x507;
 const ENOSYS: i32 = 38;
+
+/// Minimal modda reddedilen cagri sayaci.
+static UNSUPPORTED: AtomicU32 = AtomicU32::new(0);
 
 pub fn emergency(lines: &[&str]) {
     for line in lines {
@@ -48,13 +63,45 @@ pub fn emulate_syscall(frame: &mut SyscallFrame) {
             let _ = arg1;
             0
         }
+        // Co-Service'in "sistemi ayakta tut" ayagi: CPU'yu birakma yolu
+        // acik kalmalidir, aksi halde Ring 3'teki uygulamalar minimal
+        // modda birbirini aclia surukler.
+        SYS_YIELD | SYS_WIN_FLUSH => {
+            crate::level0a::core::scheduler::yield_now();
+            0
+        }
+        // Olay/durum sorgulari: Level-0a'ya hic dokunmadan "olay yok"
+        // cevabi verilir. Amac uygulamalari canli tutmaktir -- bir GUI
+        // dongusu tus sorgusuna cevap alamazsa takilir.
+        SYS_WIN_POLL_KEY | SYS_MOUSE_STATE | SYS_WIN_SIZE | SYS_WIN_POS => 0,
+
         _ => {
-            emergency(&["Fallback modunda desteklenmeyen syscall (-ENOSYS)."]);
+            note_unsupported(number);
             -ENOSYS
         }
     };
 
     frame.set_return(result as isize as usize);
+}
+
+/// Desteklenmeyen cagrilar sayilir, her biri ayri ayri yazdirilmaz.
+///
+/// Minimal modda saniyede binlerce cagri gelebilir; her birini gunluge
+/// yazmak konsolu bogar ve asil olayi (Co-Service'e dusus) gorunmez kilar.
+fn note_unsupported(number: u32) {
+    let count = UNSUPPORTED.fetch_add(1, Ordering::Relaxed) + 1;
+    if count == 1 || count % 512 == 0 {
+        crate::println!(
+            "[LEVEL-0b2][FALLBACK] minimal modda desteklenmeyen syscall {} (-ENOSYS) -- toplam {}",
+            number,
+            count
+        );
+    }
+}
+
+/// Co-Service modunda reddedilen cagri sayisi (kabuk `health` komutu).
+pub fn unsupported_calls() -> u32 {
+    UNSUPPORTED.load(Ordering::Relaxed)
 }
 
 /// NT tarafinin Co-Service karsiligi: Level-0a olu iken `int 0x2E`
@@ -109,6 +156,37 @@ pub fn level0a_dead() {
         "Level-0a YANIT VERMIYOR (heartbeat kayboldu).",
         "Fallback Interface devrede - Co-Service'ler ile minimal mod.",
     ]);
+    crate::level0b2::ipc::post(
+        crate::level0b2::ipc::Kind::HealthChange,
+        0,
+        2,
+        0,
+        "Level-0a olu -- Co-Service devraldi",
+    );
+}
+
+/// Nabiz geri geldiginde State Monitor cagirir (doc S.11: "Level-0a
+/// yeniden baslatma / soft reboot").
+///
+/// TCMK'de Level-0a ayri bir adres uzayinda degildir; "yeniden baslatma"
+/// pratikte **denetimi geri devretmektir**: Co-Service modundan cikilir,
+/// cagrilar yeniden Level-0b1 cevirmenlerine yonlendirilir ve olcum
+/// pencereleri sifirlanir. Gercek bir yeniden yukleme (servislerin
+/// yeniden ayaga kaldirilmasi) surec basina adres uzayi geldiginde
+/// anlamli olacaktir (doc Faz 8).
+pub fn level0a_recovered(stalled_ticks: u32) {
+    crate::println!();
+    emergency(&[
+        "Level-0a nabzi geri geldi -- denetim ana katmana devrediliyor.",
+        "Co-Service modu kapandi.",
+    ]);
+    crate::level0b2::ipc::post(
+        crate::level0b2::ipc::Kind::HealthChange,
+        0,
+        0,
+        stalled_ticks as usize,
+        "Level-0a toparlandi -- normal moda donuldu",
+    );
 }
 
 pub fn panic_screen(info: &PanicInfo) -> ! {

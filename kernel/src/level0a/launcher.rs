@@ -24,6 +24,7 @@ static KNOWN_APPS: &[(&str, &str, &str)] = &[
     ("paint", "/bin/paint", "paint"),
     ("plasma", "/bin/plasma", "plasma"),
     ("crash", "/bin/crash", "crash"),
+    ("hog", "/bin/hog", "hog"),
 ];
 
 fn resolve(path: &str) -> Option<(&'static str, &'static str)> {
@@ -56,7 +57,14 @@ pub fn spawn_user_app(path: &str) -> Result<(), &'static str> {
         Ok(())
     })?;
 
-    scheduler::spawn(task_name, app_task).ok_or("gorev olusturulamadi")?;
+    let id = scheduler::spawn(task_name, app_task).ok_or("gorev olusturulamadi")?;
+    crate::level0b2::ipc::post(
+        crate::level0b2::ipc::Kind::AppStart,
+        id,
+        0,
+        0,
+        task_name,
+    );
     Ok(())
 }
 

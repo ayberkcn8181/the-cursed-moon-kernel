@@ -5,5 +5,6 @@
 
 pub mod dispatcher;
 pub mod fallback;
+pub mod ipc;
 pub mod load_balancer;
 pub mod state_monitor;

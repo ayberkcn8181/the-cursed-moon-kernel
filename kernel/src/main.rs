@@ -49,6 +49,9 @@ static PAINT_ELF: &[u8] = include_bytes!("../../userland/paint.elf");
 static PLASMA_ELF: &[u8] = include_bytes!("../../userland/plasma.elf");
 #[cfg(target_arch = "x86")]
 static CRASH_ELF: &[u8] = include_bytes!("../../userland/crash.elf");
+/// Yuk dengeleyici testi: CPU birakmadan syscall yagmuru yapar.
+#[cfg(target_arch = "x86")]
+static HOG_ELF: &[u8] = include_bytes!("../../userland/hog.elf");
 
 /// Linux (ELF64, x86_64) kullanici programi -- `tools/gen_hello_elf64.py`.
 #[cfg(target_arch = "x86_64")]
@@ -65,6 +68,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/paint", PAINT_ELF),
     ("/bin/plasma", PLASMA_ELF),
     ("/bin/crash", CRASH_ELF),
+    ("/bin/hog", HOG_ELF),
     ("/boot/msg.txt", BOOT_MSG),
 ];
 
@@ -131,6 +135,9 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info_addr: usize) 
 
     loop {
         level0b2::state_monitor::tick();
+
+        // Level-0b2 -> Level-0a mesaj kuyrugu (doc S.10 Faz 4+).
+        level0a::messages::drain();
 
         if level0a::wm::active() {
             level0a::wm::handle_input();

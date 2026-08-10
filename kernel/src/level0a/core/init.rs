@@ -128,6 +128,32 @@ pub unsafe fn bring_up(ramfs_files: &[(&'static str, &'static [u8])]) {
         service_count(),
         if all_services_active() { "evet" } else { "HAYIR" }
     );
+
+    // Level-0b2'ye acilisi bildir (doc S.10): durum paylasimli bolgeye
+    // yazilir, olay mesaj kuyruguna birakilir.
+    let shared = &crate::level0b2::ipc::SHARED;
+    shared.level0a_status.store(
+        if all_services_active() { 1 } else { 2 },
+        Ordering::Relaxed,
+    );
+    crate::level0b2::ipc::post(
+        crate::level0b2::ipc::Kind::BootComplete,
+        0,
+        service_count(),
+        0,
+        "Level-0a hazir",
+    );
+}
+
+/// Kayitli servisin adi ve durumu (kabuk `svc` komutu).
+pub fn service(index: usize) -> Option<Service> {
+    if index >= SERVICE_COUNT.load(Ordering::Relaxed) {
+        return None;
+    }
+    unsafe {
+        let services = core::ptr::addr_of!(SERVICES) as *const Service;
+        Some(*services.add(index))
+    }
 }
 
 pub fn service_count() -> usize {

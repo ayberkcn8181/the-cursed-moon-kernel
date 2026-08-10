@@ -188,6 +188,62 @@ fn pick_next(current: usize) -> usize {
     current
 }
 
+/// Calisan gorevin numarasi. Level-0b2'nin Yuk Dengeleyicisi cagrilari
+/// goreve yazabilmek icin buna ihtiyac duyar.
+pub fn current_id() -> usize {
+    CURRENT.load(Ordering::Relaxed)
+}
+
+/// Verilen gorevin adi (gorev yoksa bos dize).
+pub fn name_of(index: usize) -> &'static str {
+    if index >= MAX_TASKS {
+        return "";
+    }
+    unsafe {
+        let tasks = core::ptr::addr_of!(TASKS) as *const Task;
+        (*tasks.add(index)).name
+    }
+}
+
+/// Verilen gorevin durumu.
+pub fn state_of(index: usize) -> TaskState {
+    if index >= MAX_TASKS {
+        return TaskState::Unused;
+    }
+    unsafe {
+        let tasks = core::ptr::addr_of!(TASKS) as *const Task;
+        (*tasks.add(index)).state
+    }
+}
+
+/// Bir gorevi disaridan sonlandirir (kabuk `kill` komutu).
+///
+/// Gorev **calisirken** oldurulemez: kendi yiginindaki cagri zinciri
+/// yarim kalirdi. `Terminated` isaretlenen gorev bir sonraki secimde
+/// atlanir; Ring 3'te ise ilk sistem cagrisinda cikisa yonlendirilir.
+pub fn terminate(index: usize) -> Result<(), &'static str> {
+    if index == 0 {
+        return Err("idle gorevi sonlandirilamaz");
+    }
+    if index >= MAX_TASKS {
+        return Err("gecersiz gorev numarasi");
+    }
+    if index == current_id() {
+        return Err("calisan gorev bu yoldan sonlandirilamaz");
+    }
+    crate::arch::cpu::without_interrupts(|| unsafe {
+        let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+        match (*tasks.add(index)).state {
+            TaskState::Unused => Err("gorev yok"),
+            TaskState::Terminated => Err("gorev zaten sonlandirilmis"),
+            _ => {
+                (*tasks.add(index)).state = TaskState::Terminated;
+                Ok(())
+            }
+        }
+    })
+}
+
 pub fn current_name() -> &'static str {
     unsafe {
         let tasks = core::ptr::addr_of!(TASKS) as *const Task;

@@ -12,6 +12,7 @@ pub mod input;
 pub mod launcher;
 pub mod kernel_api;
 pub mod keyboard;
+pub mod messages;
 pub mod pic;
 pub mod pit;
 pub mod shell;

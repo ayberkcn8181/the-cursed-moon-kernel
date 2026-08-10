@@ -46,8 +46,15 @@ Ekranda gorunenler:
   Paint fareyle gercekten cizim yapar:
 
   ![TCMK Paint](docs/screenshot-paint.png)
-- **TCMK Shell** -- etkilesimli kabuk: `help`, `ps`, `mem`, `ls`, `cat`,
-  `run`, `win`, `uptime`, `clear`.
+- **TCMK Shell** -- etkilesimli kabuk. Komutlar:
+
+  | Grup | Komutlar |
+  |---|---|
+  | sistem | `ps` `top` `kill <id>` `svc` `health` `uptime` `ver` |
+  | Level-0b2 | `load` `ipc` `faults` `stall <sn>` |
+  | bellek/dosya | `mem` `ls` `cat <yol>` |
+  | uygulama/pencere | `apps` `run <ad>` `win` `mouse` |
+  | diger | `echo <metin>` `clear` `help` |
 - **Sistem Gunlugu** -- cekirdek kaydinin canli goruntusu (konsol halka
   tamponu her karede pencereye cizilir).
 - Ust cubukta canli gorev/pencere/tick/nabiz sayaclari, altta fare imleci.
@@ -315,6 +322,7 @@ ikili hedefe** verilir; kutuphane ve `core` bir kez derlenir:
 | `paint` | 1 | `0x00C4_0000` |
 | `plasma` | 2 | `0x00C8_0000` |
 | `crash` | 3 | `0x00CC_0000` |
+| `hog` | 4 | `0x00D0_0000` |
 
 `rust-lld` `ET_EXEC`/`EM_386` uretir; Level-0b1'in ELF32 yukleyicisi bu
 ikilileri hicbir degisiklik olmadan yukler.
@@ -325,6 +333,116 @@ ikilileri hicbir degisiklik olmadan yukler.
 make userland          # Rust uygulamalari + PE32/ELF64 (elle uretilenler)
 make userland-rust     # yalnizca Rust uygulamalari
 python3 tools/gen_font.py   # 8x16 bitmap fontu yeniden uret
+```
+
+## Level-0b2: Merkezi Denetleyici (ayirt edici ozellikler)
+
+TCMK'yi siradan bir cekirdekten ayiran sey, **her cagrinin tek bir
+denetim noktasindan gecmesidir** (doc S.2.2.A "Trafik Polisi"). Bu tek
+nokta uc gercek islev sagliyor:
+
+### 1. Yuk Dengeleyici -- olcum + geri baski
+
+Her sistem cagrisi bir **kanala** ve bir **goreve** yazilir; pencere
+saniyede bir devrilir ve hizlar hesaplanir.
+
+![Yuk dengeleyici](docs/screenshot-load-balancer.png)
+
+```
+tcmk> load
+  kanal          toplam    /sn     tepe  durum
+  posix-dosya        33      0       33  normal
+  posix-bellek        3      0        3  normal
+  gui             61273   4486     4498  normal
+  nt                  6      0        6  normal
+  istisna             0      0        0  normal
+toplam cagri: 61315  kisitlama: 897
+```
+
+**Neden gerekli:** zamanlama isbirlikci (doc Faz 2 notu). Sistem cagrisi
+yapan ama `yield` cagirmayan bir Ring 3 uygulamasi normalde masaustunu,
+kabugu ve diger uygulamalari aclia surukler -- PIT "zaman dilimi doldu"
+der ama kimse dinlemez. Preemption gelene kadar (Faz 8) tek savunma
+cagri yolunun kendisidir.
+
+Bir gorev pencere kotasini (`4000 cagri/sn`) asarsa Dispatcher cagriyi
+**islemeden once** o goreve `yield` ettirir. Cagri kaybolmaz, sirasini
+bekler.
+
+Kanit: `run hog` -- kasten acgozlu bir test uygulamasi
+(`userland-rs/src/bin/hog.rs`). Ekran goruntusunde hog 4486 cagri/sn ile
+kosarken kabuk yanit veriyor, Plasma animasyonu suruyor:
+
+```
+tcmk> top
+  id ad            cagri/sn   kisitlama
+   2 paint              243           0
+   3 plasma             162           0
+   4 hog               4081        1121
+```
+
+Normal uygulamalar kotanin cok altinda kalir; yalnizca gercekten donen
+bir dongu kisitlanir.
+
+### 2. IPC -- mesaj kuyrugu + paylasimli bolge
+
+Doc S.10 Faz 4+: "Mesaj kuyrugu (ring buffer) ile Level-0b2 <-> Level-0a
+iletisimi; heartbeat sayaci paylasimli bellek bolgesinde tutulur."
+
+![IPC](docs/screenshot-ipc.png)
+
+Nabzin paylasimli bolgeden okunmasi mimari bir zorunluluk: State Monitor
+Level-0a'nin bir **fonksiyonunu cagirsaydi**, Level-0a kilitlendiginde
+izleyici de kilitlenirdi. Izleyicinin izlenene bagimli olmamasi hata
+tolerans motorunun onkosuludur.
+
+Olaylar (istisna, kisitlama, saglik degisimi, uygulama yasam dongusu)
+uretildikleri yerde -- bazen kesme baglaminda -- kuyruga birakilir ve
+masaustu dongusunde, kesmeler acikken tuketilir. Uretici asla beklemez:
+kuyruk doluysa mesaj dusurulur ve sayilir.
+
+```
+tcmk> ipc
+paylasimli bolge: 0x001fb100  (gecerli)
+kuyruk: 0/31   tepe: 5
+gonderilen: 9  tuketilen: 9  dusen: 0
+```
+
+### 3. Co-Service ve toparlanma
+
+Nabiz 300 tick (3 sn) sessiz kalirsa Level-0a "Olu" sayilir ve Fallback
+Interface devralir. Minimal kume bilincli olarak kucuktur; amac tam bir
+isletim ortami degil, **sistemi uyanik ve etkilesime acik tutmaktir**:
+konsola yazma, CPU birakma, kareyi bitirme, olay sorgularina "olay yok"
+cevabi.
+
+![Co-Service](docs/screenshot-co-service.png)
+
+Test etmek icin (doc S.12: "Heartbeat timeout simulasyonunda fallback
+devreye girer"):
+
+```
+tcmk> stall 6        # nabzi 6 saniye bastir
+tcmk> health
+Level-0a durumu: OLU
+nabiz sessizligi: 565 tick (olu esigi 300)
+co-service: DEVREDE (Level-0a olu)
+olu olayi: 1  toparlanma: 0
+```
+
+Ekran goruntusunde goruldugu gibi masaustu donmaz, kabuk yanit verir,
+Plasma cizmeye devam eder -- **Level-0a olu sayilirken bile**.
+
+Nabiz geri geldiginde denetim ana katmana devredilir (doc S.11
+"Level-0a yeniden baslatma"): TCMK'de Level-0a ayri bir adres uzayinda
+olmadigi icin bu, servislerin yeniden yuklenmesi degil **denetimin geri
+verilmesidir** -- Co-Service modundan cikilir, cagrilar yeniden
+Level-0b1 cevirmenlerine yonlendirilir.
+
+```
+[LEVEL-0b2][FALLBACK] Level-0a nabzi geri geldi -- denetim ana katmana devrediliyor.
+[LEVEL-0b2][FALLBACK] Co-Service modu kapandi.
+[IPC] saglik: Level-0a toparlandi -- normal moda donuldu
 ```
 
 ## Hata izolasyonu (kararlilik)
@@ -362,7 +480,10 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
   yuklenir (256 KiB). Bu, uygulamalarin birbirinin bellegini okuyabilmesi
   demektir. Cozum `mmu_as_create_clone` (doc Faz 8).
 - **Zamanlama isbirlikcidir.** Uygulama `win_flush` cagirmazsa CPU'yu
-  birakmaz. Gercek preemption, kesme icinden baglam degistirmeyi gerektirir.
+  birakmaz. Yuk Dengeleyici bunu **hafifletir** (kota asan gorevi zorla
+  yield ettirir) ama cozmez: hic syscall yapmadan donen bir dongu hala
+  sistemi kilitler. Gercek preemption, kesme icinden baglam degistirmeyi
+  gerektirir (Faz 8).
 - **GUI yalnizca i386'da.** x86_64 cekirdegi calisir ve framebuffer'i
   eslerse de GUI uygulamalari su an yalnizca ELF32 olarak uretiliyor.
 - **Uygulamalar sabit slotlara linklenir.** Rust ile yaziliyorlar

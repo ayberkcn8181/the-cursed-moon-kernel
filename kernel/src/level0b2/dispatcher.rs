@@ -4,36 +4,73 @@
 //! Doc S.3'teki yonlendirme zinciri:
 //!   Level-1 (int 0x80) -> [BURASI] -> Level-0b1 (POSIX) -> Level-0a (VFS/surucu)
 //!
-//! Dagitim oncesi State Monitor'a Level-0a'nin sagligi sorulur; Level-0a
-//! olu ise cagri Level-0b1'e hic verilmez, Fallback Interface'in sinirli
-//! emulasyonuna dusulur (doc S.11).
+//! Dagitim oncesi iki denetim yapilir:
+//!
+//!   1. **Yuk Dengeleyici** cagriyi kanalina ve gorevine yazar. Gorev
+//!      pencere kotasini asmissa cagri islenmeden once CPU birakilir --
+//!      isbirlikci zamanlamada donen bir uygulamanin sistemi aclia
+//!      surukleme yolu budur ve tek savunma noktasi burasidir.
+//!   2. **State Monitor**'a Level-0a'nin sagligi sorulur; Level-0a olu ise
+//!      cagri Level-0b1'e hic verilmez, Fallback Interface'in sinirli
+//!      emulasyonuna dusulur (doc S.11).
 
 use crate::arch::cpu::regs::SyscallFrame;
+use crate::level0a::core::scheduler;
+use crate::level0b1::linux_subsystem::posix_syscalls as posix;
+use crate::level0b2::load_balancer::{Channel, Verdict};
 use crate::level0b2::{fallback, load_balancer, state_monitor};
 
 pub fn print_banner() {
     crate::println!("[LEVEL-0b2] Central Controller: Active");
 }
 
+/// Bir POSIX cagrisini olcum kanalina yerlestirir.
+///
+/// Ayrim, cagrinin sistemin hangi kaynagini zorladigina gore yapilir:
+/// dosya cagrilari VFS'i, GUI cagrilari kompozitoru, bellek cagrilari
+/// ayiriciyi meshgul eder. Doygunlugun hangi kanalda oldugunu bilmek,
+/// darbogazin nerede oldugunu bilmek demektir.
+fn classify(number: u32) -> Channel {
+    match number {
+        posix::SYS_READ | posix::SYS_WRITE | posix::SYS_OPEN | posix::SYS_CLOSE => {
+            Channel::PosixFile
+        }
+        posix::SYS_BRK => Channel::PosixMem,
+        0x500..=0x5FF => Channel::Gui,
+        _ => Channel::PosixFile,
+    }
+}
+
 /// IDT vektor 128'den (int 0x80) gelen Linux uyumlu sistem cagrisi.
 pub fn handle_syscall(frame: &mut SyscallFrame) {
-    load_balancer::note_call(0x80);
+    let task = scheduler::current_id();
+
+    if load_balancer::note_call(classify(frame.number()), task) == Verdict::Throttle {
+        // Kuyruga alma yerine geri baski: cagri kaybolmaz, gorev sirasini
+        // bekler. Ring 3'ten gelen cagrilarda bu guvenlidir -- `win_flush`
+        // zaten ayni yoldan CPU birakiyor.
+        scheduler::yield_now();
+    }
 
     if state_monitor::level0a_is_dead() {
         fallback::emulate_syscall(frame);
         return;
     }
 
-    crate::level0b1::linux_subsystem::posix_syscalls::dispatch(frame);
+    posix::dispatch(frame);
 }
 
 /// IDT vektor 46'dan (int 0x2E) gelen Windows NT uyumlu sistem cagrisi.
 ///
 /// Dagitici acisindan POSIX ile NT arasindaki tek fark hangi cevirmene
-/// verildigidir; durum kontrolu, yuk sayaci ve fallback yolu ortaktir.
+/// verildigidir; durum kontrolu, yuk olcumu ve fallback yolu ortaktir.
 /// Doc S.1'in "cift uyumluluk" vaadi tam olarak burada somutlasir.
 pub fn handle_nt_syscall(frame: &mut SyscallFrame) {
-    load_balancer::note_call(0x2E);
+    let task = scheduler::current_id();
+
+    if load_balancer::note_call(Channel::Nt, task) == Verdict::Throttle {
+        scheduler::yield_now();
+    }
 
     if state_monitor::level0a_is_dead() {
         fallback::emulate_nt_syscall(frame);

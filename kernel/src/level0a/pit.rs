@@ -30,13 +30,58 @@ pub fn init(hz: u32) {
 
 /// IRQ0 handler'i tarafindan her tick'te cagrilir.
 pub fn on_tick() {
-    TICKS.fetch_add(1, Ordering::Relaxed);
+    let ticks = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
     crate::level0a::core::scheduler::on_timer_tick();
+
+    // Paylasimli bolgeyi tazele (doc S.10): Level-0b2 durum bilgisini
+    // Level-0a'nin fonksiyonlarini cagirarak degil, buradan okur.
+    let shared = &crate::level0b2::ipc::SHARED;
+    shared.ticks.store(ticks, Ordering::Relaxed);
+    shared.tasks.store(
+        crate::level0a::core::scheduler::task_count() as u32,
+        Ordering::Relaxed,
+    );
+    shared.switches.store(
+        crate::level0a::core::scheduler::switch_count() as u32,
+        Ordering::Relaxed,
+    );
+
+    // Yuk penceresi zamanlayiciya baglidir: olculen isin (scheduler
+    // dongusu) ilerlemesine bagli olsaydi, donen bir gorev olcumun
+    // kendisini de dondururdu.
+    crate::level0b2::load_balancer::on_tick(ticks);
 }
+
+/// Nabzin bastirilacagi son tick (0 = bastirma yok).
+static HEARTBEAT_SUPPRESSED_UNTIL: AtomicU32 = AtomicU32::new(0);
 
 /// Scheduler dongusunun "nabiz" atisi (doc S.11).
 pub fn beat() {
-    HEARTBEAT.fetch_add(1, Ordering::Relaxed);
+    // Hata tolerans motorunun testi (doc S.12): nabiz gecici olarak
+    // bastirilabilir. Level-0a normal calismaya devam eder ama disaridan
+    // **kilitlenmis gibi gorunur**; State Monitor'un ve Co-Service'in
+    // dogru davranip davranmadigi ancak boyle gozlenebilir.
+    let until = HEARTBEAT_SUPPRESSED_UNTIL.load(Ordering::Relaxed);
+    if until != 0 {
+        if TICKS.load(Ordering::Relaxed) < until {
+            return;
+        }
+        HEARTBEAT_SUPPRESSED_UNTIL.store(0, Ordering::Relaxed);
+    }
+
+    let beat = HEARTBEAT.fetch_add(1, Ordering::Relaxed) + 1;
+    crate::level0b2::ipc::SHARED
+        .heartbeat
+        .store(beat, Ordering::Relaxed);
+}
+
+/// Nabzi `ticks` kadar bastirir (kabuk `stall` komutu).
+pub fn suppress_heartbeat(ticks: u32) {
+    HEARTBEAT_SUPPRESSED_UNTIL.store(TICKS.load(Ordering::Relaxed) + ticks, Ordering::Relaxed);
+}
+
+pub fn heartbeat_suppressed() -> bool {
+    HEARTBEAT_SUPPRESSED_UNTIL.load(Ordering::Relaxed) != 0
 }
 
 pub fn heartbeat() -> u32 {

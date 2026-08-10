@@ -122,6 +122,14 @@ pub fn close(fd_num: u32) -> Result<(), KernelError> {
 ///     geri yuklenerek `run_user_program`'in cagrildigi yere donulur.
 ///   - **Ring 0 cekirdek gorevi**: normal scheduler sonlandirmasi.
 pub fn exit_current_task(code: u32) -> ! {
+    crate::level0b2::ipc::post(
+        crate::level0b2::ipc::Kind::AppExit,
+        crate::level0a::core::scheduler::current_id(),
+        code as usize,
+        0,
+        crate::level0a::core::scheduler::current_name(),
+    );
+
     if crate::arch::cpu::usermode::in_user_mode() {
         crate::println!("[LEVEL-0a] Ring 3 sureci cikis kodu {} ile sonlandi.", code);
         unsafe { crate::arch::cpu::usermode::leave_user_mode() }
