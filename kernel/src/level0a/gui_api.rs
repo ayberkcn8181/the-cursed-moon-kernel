@@ -69,6 +69,18 @@ pub fn window_size(id: usize) -> Result<usize, GuiError> {
         .ok_or(GuiError::BadWindow)
 }
 
+/// Pencerenin ekrandaki sol ust kosesi -- tek kelimede paketli.
+///
+/// Kullanici uygulamalari fare koordinatlarini kendi ic koordinatlarina
+/// cevirebilsin diye gerekir: pencere baslik cubugundan suruklendiginde
+/// olusturma anindaki konum artik gecerli degildir.
+pub fn window_pos(id: usize) -> Result<usize, GuiError> {
+    wm::get(id)
+        .filter(|w| w.used)
+        .map(|w| (w.x << 16) | (w.y & 0xFFFF))
+        .ok_or(GuiError::BadWindow)
+}
+
 /// Pencereye bir tus olayi teslim eder (WM cagirir).
 pub fn deliver_key(id: usize, ascii: u8) {
     if id >= wm::MAX_WINDOWS {

@@ -40,9 +40,12 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 Ekranda gorunenler:
 
 - **TCMK Paint** ve **TCMK Plasma** -- Ring 3'te calisan iki ayri **kullanici
-  uygulamasi**. Her biri kendi scheduler gorevinde kosar, kendi piksel
-  tamponuna **dogrudan yazar** (cizim cekirdekten gecmez) ve `win_poll_key`
-  ile klavye olayi okur.
+  uygulamasi** (Rust ile yazildi, bkz. `userland-rs/`). Her biri kendi
+  scheduler gorevinde kosar, kendi piksel tamponuna **dogrudan yazar**
+  (cizim cekirdekten gecmez) ve `win_poll_key`/`mouse_state` ile olay okur.
+  Paint fareyle gercekten cizim yapar:
+
+  ![TCMK Paint](docs/screenshot-paint.png)
 - **TCMK Shell** -- etkilesimli kabuk: `help`, `ps`, `mem`, `ls`, `cat`,
   `run`, `win`, `uptime`, `clear`.
 - **Sistem Gunlugu** -- cekirdek kaydinin canli goruntusu (konsol halka
@@ -64,6 +67,8 @@ POSIX/NT'de karsiligi olmayan islevler icin `0x500+` araligi ayrildi:
 | 0x503 | `win_flush(id)` | kareyi bitir, CPU'yu birak |
 | 0x504 | `win_poll_key(id)` | bekleyen tus (0 = yok) |
 | 0x505 | `mouse_state()` | fare konumu + tus durumu |
+| 0x506 | `yield()` | CPU'yu birak (pencere gerektirmez) |
+| 0x507 | `win_pos(id)` | (x<<16)\|y -- pencere suruklendiginde tazelenir |
 
 Pencere tamponu `mmu::protect_user_range` ile Ring 3'e acilir; uygulama
 piksellerini kendisi yazar, cekirdek yalnizca kompozisyon yapar.
@@ -269,12 +274,57 @@ PE ikilisinin `ImageBase`'i 0x00400000, cekirdek onu 0x00300000'e
 yukluyor; IP'nin 0x00301014 olmasi taban yeniden yerlesiminin (`.reloc`)
 gercekten uygulandigini gosterir.
 
-## Userland ikililerini yeniden uretme
+## Level-1: Rust userland (`userland-rs/`)
+
+Ring 3 uygulamalari artik **Rust ile yaziliyor**. `userland-rs` ayri bir
+`no_std` crate'tir ve `tcmk` adinda kucuk bir TCMK libc'si sunar
+(doc S.2.3'teki "libc / win32_api" ayagi):
+
+| Modul | Icerik |
+|---|---|
+| `tcmk::sys` | ham `int 0x80` sarmalayicilari + syscall numaralari |
+| `tcmk::io` | `print!`/`println!`, `File` (RAII: `Drop` ile `close`) |
+| `tcmk::gui` | `Window` (piksel tamponu, `fill`/`disc`/`put`), `mouse()` |
+| `tcmk::entry!` | `_start` uretir, `main` dondugunde `exit(0)` cagirir |
+
+Bir uygulama artik siradan Rust'tir:
+
+```rust
+#![no_std]
+#![no_main]
+tcmk::entry!(main);
+
+fn main() {
+    let mut win = tcmk::gui::Window::open("Ornek", 30, 60, 320, 200).unwrap();
+    loop {
+        win.clear(0x0010_2030);
+        if win.poll_key() == b'q' { break; }
+        win.flush();
+    }
+}
+```
+
+**Slot modeli.** Surec basina adres uzayi olmadigi icin (doc Faz 8) her
+uygulama kullanici bolgesindeki kendi 256 KiB'lik slotuna linklenir. Taban
+adres `cargo rustc ... -- -C link-arg=--image-base=<taban>` ile **yalnizca
+ikili hedefe** verilir; kutuphane ve `core` bir kez derlenir:
+
+| Uygulama | Slot | Taban |
+|---|---|---|
+| `hello` | 0 | `0x00C0_0000` |
+| `paint` | 1 | `0x00C4_0000` |
+| `plasma` | 2 | `0x00C8_0000` |
+| `crash` | 3 | `0x00CC_0000` |
+
+`rust-lld` `ET_EXEC`/`EM_386` uretir; Level-0b1'in ELF32 yukleyicisi bu
+ikilileri hicbir degisiklik olmadan yukler.
+
+### Userland ikililerini yeniden uretme
 
 ```
-make userland                       # tum i386 ikilileri (hello/exe/paint/plasma)
-python3 tools/gen_hello_elf64.py userland/hello64.elf   # x86_64
-python3 tools/gen_font.py           # 8x16 bitmap fontu yeniden uret
+make userland          # Rust uygulamalari + PE32/ELF64 (elle uretilenler)
+make userland-rust     # yalnizca Rust uygulamalari
+python3 tools/gen_font.py   # 8x16 bitmap fontu yeniden uret
 ```
 
 ## Hata izolasyonu (kararlilik)
@@ -315,8 +365,9 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
   birakmaz. Gercek preemption, kesme icinden baglam degistirmeyi gerektirir.
 - **GUI yalnizca i386'da.** x86_64 cekirdegi calisir ve framebuffer'i
   eslerse de GUI uygulamalari su an yalnizca ELF32 olarak uretiliyor.
-- **Uygulamalar elle yazilmis makine kodudur** (`tools/gen_gui_app.py`).
-  Gercek bir derleyici zinciri (musl/newlib) Faz 11-12 konusudur.
+- **Uygulamalar sabit slotlara linklenir.** Rust ile yaziliyorlar
+  (`userland-rs/`) ama surec basina adres uzayi olmadigi icin taban adres
+  derleme aninda sabitlenmek zorunda. Gercek `fork/execve` Faz 8 konusudur.
 - Dosya sistemi salt okunur RAMFS; kalici depolama (ext2) yok.
 
 ## Kapsam Disi (sonraki fazlar)

@@ -31,7 +31,7 @@ TARGET_JSON := $(ROOT_DIR)/targets/$(RUST_TARGET).json
 KERNEL_ELF := $(TARGET_DIR)/$(RUST_TARGET)/$(CARGO_OUT_DIR)/tcmk-kernel
 
 .DEFAULT_GOAL := all
-.PHONY: all iso run info clean userland
+.PHONY: all iso run info clean userland userland-rust userland-pe
 
 all:
 	cd $(KERNEL_DIR) && cargo build $(CARGO_FLAGS) \
@@ -47,10 +47,46 @@ iso: all
 run: iso
 	$(QEMU) -cdrom $(ISO) -serial stdio
 
-# Ring 3 test ikilileri (ELF32 + PE32). Cekirdege include_bytes! ile gomulur.
-userland:
-	python3 $(ROOT_DIR)/tools/gen_hello_elf.py $(ROOT_DIR)/userland/hello.elf
+# --- Ring 3 uygulamalari ------------------------------------------------
+#
+# Cekirdekte henuz surec basina adres uzayi yok (doc Faz 9+): tum Ring 3
+# uygulamalari ayni 2 MiB'lik kullanici bolgesini paylasir. Bu yuzden her
+# uygulama kendi 256 KiB'lik "slotuna" linklenir. Slot tabani `cargo rustc`
+# ile YALNIZCA ikili hedefe verilir; boylece kutuphane ve `core` bir kez
+# derlenir, uygulama basina yalnizca baglama tekrarlanir.
+USERLAND_DIR := $(ROOT_DIR)/userland-rs
+USERLAND_TARGET_DIR := $(TARGET_DIR)/userland
+USER_REGION := 0x00C00000
+SLOT_SIZE   := 0x40000
+
+# ad:slot
+USER_APPS := hello:0 paint:1 plasma:2 crash:3
+
+userland: userland-rust userland-legacy
+
+userland-rust:
+	@mkdir -p $(ROOT_DIR)/userland
+	@set -e; for entry in $(USER_APPS); do \
+		app=$${entry%%:*}; slot=$${entry##*:}; \
+		base=$$(printf '0x%08x' $$(( $(USER_REGION) + slot * $(SLOT_SIZE) ))); \
+		echo "  [userland] $$app -> slot $$slot (taban $$base)"; \
+		( cd $(USERLAND_DIR) && cargo rustc --release --bin $$app \
+			--target $(ROOT_DIR)/targets/i686-tcmk.json \
+			--target-dir $(USERLAND_TARGET_DIR) \
+			-- -C link-arg=--image-base=$$base ); \
+		cp $(USERLAND_TARGET_DIR)/i686-tcmk/release/$$app $(ROOT_DIR)/userland/$$app.elf; \
+	done
+
+# Elle uretilen ikililer:
+#   * PE32  -- Rust'in i686-pc-windows hedefi bir Windows toolchain'i
+#              gerektirir; TCMK'nin arac zinciri bilerek Rust + GRUB + QEMU
+#              ile sinirli tutulmustur (bkz. README).
+#   * ELF64 -- Rust userland'i su an yalnizca i386 slot modelini destekler;
+#              x86_64 tarafinda cekirdek ELF64 yukleyicisi bu ikiliyle
+#              dogrulanir.
+userland-legacy:
 	python3 $(ROOT_DIR)/tools/gen_pe_hello.py $(ROOT_DIR)/userland/hello.exe
+	python3 $(ROOT_DIR)/tools/gen_hello_elf64.py $(ROOT_DIR)/userland/hello64.elf
 
 info:
 	@echo "ARCH        = $(ARCH)"

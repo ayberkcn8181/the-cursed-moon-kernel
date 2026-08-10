@@ -29,6 +29,7 @@ pub const SYS_WIN_FLUSH: u32 = 0x503;
 pub const SYS_WIN_POLL_KEY: u32 = 0x504;
 pub const SYS_MOUSE_STATE: u32 = 0x505;
 pub const SYS_YIELD: u32 = 0x506;
+pub const SYS_WIN_POS: u32 = 0x507;
 
 // Linux syscall numaralari MIMARIYE GORE DEGISIR -- ayni isim, farkli sayi.
 // Bunu tek bir kumeyle gecistirmek Faz 4'te gercek bir hataya yol acti:
@@ -145,6 +146,10 @@ pub fn dispatch(frame: &mut SyscallFrame) {
         }
         SYS_WIN_SIZE => {
             frame.set_return(gui_api::window_size(arg1).unwrap_or(0));
+            return;
+        }
+        SYS_WIN_POS => {
+            frame.set_return(gui_api::window_pos(arg1).unwrap_or(usize::MAX));
             return;
         }
         SYS_WIN_FLUSH => {

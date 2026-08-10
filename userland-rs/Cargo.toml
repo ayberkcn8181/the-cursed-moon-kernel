@@ -1,0 +1,18 @@
+[package]
+name = "tcmk-userland"
+version = "0.1.0"
+edition = "2021"
+
+# Her uygulama ayri bir ikili; ortak kod `tcmk` kutuphanesinde.
+[lib]
+name = "tcmk"
+path = "src/lib.rs"
+
+[profile.dev]
+panic = "abort"
+opt-level = 1
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = true
