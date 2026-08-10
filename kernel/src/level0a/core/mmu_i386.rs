@@ -1,22 +1,45 @@
-//! i386 Sanal Bellek Yonetimi -- Faz 2: 0-4 MiB identity map (doc S.7).
+//! i386 Sanal Bellek Yonetimi -- identity map + **surec basina adres uzayi**.
 //!
-//! Tek bir sayfa dizini (PD) + tek bir sayfa tablosu (PT) ile ilk 4 MiB
-//! 4 KiB'lik sayfalar halinde birebir eslenir. Bu araliga doc S.5'teki tum
+//! ## Yerlesim
+//!
+//! Ilk 32 MiB 4 KiB'lik sayfalarla birebir eslenir; buraya doc S.5'teki tum
 //! kritik bolgeler girer:
 //!   0x000B8000  VGA metin buffer
-//!   0x00100000  cekirdek imaji (linker.ld: . = 1M)
-//!   0x00200000  kmalloc heap (1 MiB)
-//! Cekirdek yigini da .bss icinde oldugundan bu araliktadir.
+//!   0x00100000  cekirdek imaji (linker: . = 1M)
+//!   0x00800000  kmalloc heap
+//!   0x00C00000  kullanici bolgesinin SANAL adresi
+//!   0x01000000  fiziksel cerceve havuzu (bkz. `core::frames`)
 //!
-//! Faz 4'te 16 MiB'e ve LAPIC bolgesine genisletilecek; kullanici sayfa
-//! korumasi (User biti) Faz 3'te eklenecek.
+//! ## Surec basina adres uzayi
+//!
+//! Kullanici bolgesi (0x00C00000, 2 MiB) tam olarak **tek bir PDE'nin**
+//! (indeks 3) icine duser. Bu, izolasyonu ucuz kilar: her surec yalnizca
+//! kendi PDE 3 sayfa tablosunu alir, geri kalan her sey (cekirdek, heap,
+//! MMIO) tum adres uzaylarinda **paylasilir**.
+//!
+//! Onceki model "slot"lardi: her uygulama derleme aninda farkli bir taban
+//! adrese linkleniyordu, cunku hepsi ayni adres uzayini paylasiyordu. Bunun
+//! iki bedeli vardi -- ayni ikilinin iki kopyasi birbirinin kodunu eziyordu
+//! ve her uygulama digerinin bellegini okuyabiliyordu. Ikisi de bitti.
+//!
+//! ## PDE'lerde User biti neden acilista aciliyor
+//!
+//! Erisim denetimi PDE **ve** PTE'nin birlikte User olmasini gerektirir.
+//! Identity PDE'lerine User bitini acilista koymak izolasyonu bozmaz
+//! (cekirdek PTE'lerinde User kapali kalir) ama onemli bir sorunu cozer:
+//! surec sayfa dizinleri PDE'lerin **kopyasini** tasir, oysa sayfa
+//! tablolari paylasilir. PDE bayraklari sonradan degistirilseydi, o
+//! degisiklik mevcut sureclere ulasmazdi.
 
-use crate::arch::cpu::{read_cr0, write_cr0, write_cr3};
+use crate::arch::cpu::{read_cr0, read_cr3, write_cr0, write_cr3};
+use crate::level0a::core::frames;
 
 const PAGE_SIZE: usize = 4096;
 const ENTRIES: usize = 1024;
-/// Bir PT = 1024 sayfa x 4 KiB = 4 MiB; dort tablo ile 16 MiB.
-const IDENTITY_TABLES: usize = 4;
+/// Bir PT = 1024 sayfa x 4 KiB = 4 MiB; sekiz tablo ile 32 MiB.
+/// Cerceve havuzu (16-32 MiB) da bu araligin icindedir; cekirdek
+/// cercevelere fiziksel adreslerinden dogrudan yazabilsin diye.
+const IDENTITY_TABLES: usize = 8;
 const IDENTITY_MAPPED_BYTES: usize = IDENTITY_TABLES * ENTRIES * PAGE_SIZE;
 
 const PTE_PRESENT: u32 = 1 << 0;
@@ -28,6 +51,14 @@ const CR0_PG: u32 = 1 << 31;
 /// `TCMK_USER_MEM_START` ile ayni deger.
 pub const USER_MEM_START: usize = 0x00C0_0000; // 12 MiB
 pub const USER_MEM_SIZE: usize = 0x0020_0000; // 2 MiB
+
+/// Kullanici bolgesinin dustugu sayfa dizini girdisi.
+const USER_PDE: usize = USER_MEM_START >> 22;
+
+/// Surec basina gercekten eslenen alan. Tum bolgeyi (2 MiB = 512 cerceve)
+/// pesin eslemek havuzu bosuna tuketirdi; talep uzerine sayfalama (demand
+/// paging) gelene kadar sabit ve comert bir pencere yeterli.
+pub const USER_MAP_SIZE: usize = 512 * 1024;
 
 /// Alanlara yalnizca ham isaretci uzerinden erisilir (asagida
 /// `addr_of_mut!`), bu yuzden derleyici "hic okunmadi" sanir.
@@ -64,7 +95,10 @@ pub unsafe fn init() {
             let phys = ((t * ENTRIES + i) * PAGE_SIZE) as u32;
             pt.add(i).write(phys | PTE_PRESENT | PTE_WRITABLE);
         }
-        pd.add(t).write(pt as u32 | PTE_PRESENT | PTE_WRITABLE);
+        // PDE'de User acik, PTE'lerde kapali: cekirdek sayfalari Ring 3'e
+        // kapali kalir ama PTE bayraklari sonradan degistirilebilir hale
+        // gelir (bkz. modul basligi).
+        pd.add(t).write(pt as u32 | PTE_PRESENT | PTE_WRITABLE | PTE_USER);
     }
 
     write_cr3(pd as u32);
@@ -117,18 +151,169 @@ pub unsafe fn protect_user_range(start: usize, len: usize) {
 }
 
 /// CR3'u yeniden yukleyerek TLB'yi bosaltir.
+///
+/// **Mevcut** CR3 geri yazilir, cekirdek dizini degil: bir surec adres
+/// uzayindayken cekirdek dizinine gecmek kullanici eslemesini bir anda
+/// yok ederdi.
 unsafe fn flush_tlb() {
-    let pd = core::ptr::addr_of!(PAGE_DIRECTORY) as u32;
-    write_cr3(pd);
+    write_cr3(read_cr3());
 }
 
-/// Bir adresin Ring 3'e acik olup olmadigini bildirir (dogrulama amacli).
+/// Bir adresin Ring 3'e acik olup olmadigini bildirir.
+///
+/// Kullanici bolgesi surec basina degistigi icin sorgu **mevcut CR3**
+/// uzerinden yapilir; identity bolgesi ise tum adres uzaylarinda ortaktir.
+/// POSIX cevirmeni kullanici isaretcilerini bununla dogrular, dolayisiyla
+/// yanlis adres uzayina bakmak gercek bir guvenlik acigi olurdu.
 pub fn is_user_accessible(addr: usize) -> bool {
     unsafe {
+        if addr >> 22 == USER_PDE {
+            return user_pte(read_cr3() as usize, addr).map_or(false, |e| {
+                let value = e.read();
+                value & PTE_PRESENT != 0 && value & PTE_USER != 0
+            });
+        }
         match identity_pte(addr / PAGE_SIZE) {
             Some(entry) => entry.read() & PTE_USER != 0,
             None => false,
         }
+    }
+}
+
+// --- Surec basina adres uzayi ---------------------------------------------
+
+/// Cekirdegin (ve kullanici uzayi olmayan gorevlerin) CR3 degeri.
+pub fn kernel_cr3() -> usize {
+    core::ptr::addr_of!(PAGE_DIRECTORY) as usize
+}
+
+/// Verilen adres uzayinda kullanici bolgesine ait PTE isaretcisi.
+unsafe fn user_pte(cr3: usize, addr: usize) -> Option<*mut u32> {
+    if addr >> 22 != USER_PDE {
+        return None;
+    }
+    let pd = cr3 as *const u32;
+    let pde = pd.add(USER_PDE).read();
+    if pde & PTE_PRESENT == 0 {
+        return None;
+    }
+    let pt = (pde & !0xFFF) as *mut u32;
+    Some(pt.add((addr >> 12) & (ENTRIES - 1)))
+}
+
+/// Yeni bir kullanici adres uzayi olusturur; CR3 degerini doner.
+///
+/// Cekirdek PDE'leri **kopyalanir** (sayfa tablolarinin kendisi paylasilir),
+/// yalnizca kullanici PDE'si sifirdan olusturulur. Boylece cekirdek her
+/// adres uzayinda ayni yerdedir -- kesme ve syscall yollari surec
+/// degistiginde kirilmaz.
+///
+/// # Safety
+/// Sayfalama acik olmalidir.
+pub unsafe fn create_user_space() -> Option<usize> {
+    let pd_phys = frames::alloc()?;
+    let pd = pd_phys as *mut u32;
+    let kernel_pd = core::ptr::addr_of!(PAGE_DIRECTORY) as *const u32;
+    for i in 0..ENTRIES {
+        pd.add(i).write(kernel_pd.add(i).read());
+    }
+
+    let pt_phys = match frames::alloc() {
+        Some(p) => p,
+        None => {
+            frames::free(pd_phys);
+            return None;
+        }
+    };
+    // frames::alloc sifirlanmis cerceve verir; PTE'ler bos baslar.
+    pd.add(USER_PDE)
+        .write(pt_phys as u32 | PTE_PRESENT | PTE_WRITABLE | PTE_USER);
+
+    Some(pd_phys)
+}
+
+/// Adres uzayini ve tum kullanici cercevelerini havuza geri verir.
+///
+/// # Safety
+/// `cr3` bu modulun urettigi bir adres uzayi olmali ve **su an yuklu
+/// olmamalidir**.
+pub unsafe fn destroy_user_space(cr3: usize) {
+    if cr3 == 0 || cr3 == kernel_cr3() {
+        return;
+    }
+    let pd = cr3 as *mut u32;
+    let pde = pd.add(USER_PDE).read();
+    if pde & PTE_PRESENT != 0 {
+        let pt = (pde & !0xFFF) as *mut u32;
+        for i in 0..ENTRIES {
+            let entry = pt.add(i).read();
+            if entry & PTE_PRESENT != 0 {
+                frames::free((entry & !0xFFF) as usize);
+            }
+        }
+        frames::free((pde & !0xFFF) as usize);
+    }
+    frames::free(cr3);
+}
+
+/// Verilen adres uzayini yukler.
+///
+/// # Safety
+/// `cr3` gecerli bir sayfa dizini olmalidir.
+pub unsafe fn switch_to(cr3: usize) {
+    if cr3 != 0 && read_cr3() as usize != cr3 {
+        write_cr3(cr3 as u32);
+    }
+}
+
+/// Kullanici bolgesinde `[start, start+len)` icin cerceve tahsis edip esler.
+///
+/// Zaten eslenmis sayfalar atlanir; bu sayede cagri yinelenebilir.
+///
+/// # Safety
+/// `cr3` bu modulun urettigi bir adres uzayi olmalidir.
+pub unsafe fn map_user_range(cr3: usize, start: usize, len: usize) -> bool {
+    if len == 0 {
+        return true;
+    }
+    let first = start / PAGE_SIZE;
+    let last = (start + len - 1) / PAGE_SIZE;
+
+    for page in first..=last {
+        let addr = page * PAGE_SIZE;
+        let entry = match user_pte(cr3, addr) {
+            Some(e) => e,
+            None => return false, // kullanici bolgesi disinda
+        };
+        if entry.read() & PTE_PRESENT != 0 {
+            continue;
+        }
+        let frame = match frames::alloc() {
+            Some(f) => f,
+            None => return false,
+        };
+        entry.write(frame as u32 | PTE_PRESENT | PTE_WRITABLE | PTE_USER);
+    }
+
+    flush_tlb();
+    true
+}
+
+/// Bir surecin kullandigi kullanici sayfasi sayisi (kabuk raporu icin).
+pub fn user_pages(cr3: usize) -> usize {
+    if cr3 == 0 || cr3 == kernel_cr3() {
+        return 0;
+    }
+    unsafe {
+        let pd = cr3 as *const u32;
+        let pde = pd.add(USER_PDE).read();
+        if pde & PTE_PRESENT == 0 {
+            return 0;
+        }
+        let pt = (pde & !0xFFF) as *const u32;
+        (0..ENTRIES)
+            .filter(|i| pt.add(*i).read() & PTE_PRESENT != 0)
+            .count()
     }
 }
 

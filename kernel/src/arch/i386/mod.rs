@@ -90,6 +90,14 @@ pub unsafe fn syscall3(number: u32, arg1: u32, arg2: u32, arg3: u32) -> u32 {
 ///
 /// # Safety
 /// `pd_phys` gecerli, 4 KiB hizali bir sayfa dizinini gostermelidir.
+pub fn read_cr3() -> u32 {
+    let value: u32;
+    unsafe { asm!("mov {0}, cr3", out(reg) value, options(nomem, nostack, preserves_flags)) };
+    value
+}
+
+/// # Safety
+/// Yeni sayfa dizini gecerli olmalidir; yanlis deger aninda triple fault.
 pub unsafe fn write_cr3(pd_phys: u32) {
     asm!("mov cr3, {0}", in(reg) pd_phys, options(nostack, preserves_flags));
 }

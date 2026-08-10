@@ -8,7 +8,7 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::level0a::core::{fd, init, kmalloc, mmu, scheduler, tcmkfs, vfs};
+use crate::level0a::core::{fd, frames, init, kmalloc, mmu, scheduler, tcmkfs, vfs};
 use crate::level0a::drivers::{ata, block, gfx, partition};
 use crate::level0a::{exceptions, input, launcher, pit, wm};
 use crate::level0b2::{ipc, load_balancer, state_monitor};
@@ -233,7 +233,7 @@ fn execute(line: &str) {
             write_line("  echo <metin>  clear  help");
         }
         "ps" => {
-            write_line("  id durum      ad          cagri");
+            write_line("  id durum      ad            cagri  adres-uzayi");
             for i in 0..scheduler::task_count() {
                 let state = scheduler::state_of(i);
                 write_str(if i == scheduler::current_id() {
@@ -247,6 +247,16 @@ fn execute(line: &str) {
                 put(b' ');
                 write_padded(scheduler::name_of(i), 11);
                 write_num_right(load_balancer::task_total(i) as usize, 7);
+                let space = scheduler::address_space_of(i);
+                if space == 0 {
+                    write_str("     cekirdek");
+                } else {
+                    write_str("  ");
+                    write_hex(space, 8);
+                    write_str(" (");
+                    write_num(mmu::user_pages(space));
+                    write_str(" sayfa)");
+                }
                 newline();
             }
             write_str("baglam degisimi: ");
@@ -472,8 +482,17 @@ fn execute(line: &str) {
             write_str("kullanici bolgesi: ");
             write_hex(mmu::USER_MEM_START, 8);
             write_str(" + ");
-            write_num(mmu::USER_MEM_SIZE / 1024);
-            write_line(" KiB");
+            write_num(mmu::USER_MAP_SIZE / 1024);
+            write_line(" KiB / surec");
+            write_str("cerceve havuzu: ");
+            write_num(frames::used());
+            write_str(" / ");
+            write_num(frames::total());
+            write_str(" kullanimda (tepe ");
+            write_num(frames::peak());
+            write_str(", bos ");
+            write_num(frames::free_count() * 4 / 1024);
+            write_line(" MiB)");
             write_str("identity esleme: ");
             write_num(mmu::identity_mapped_bytes() / (1024 * 1024));
             write_line(" MiB");

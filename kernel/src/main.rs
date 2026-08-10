@@ -232,6 +232,10 @@ extern "C" fn worker_task() -> ! {
         // Izolasyon dogrulamasi: cekirdek sayfalari Ring 3'e kapali kalmali.
         // Adresler sabit yazilmaz: bellek haritasi degistiginde test de
         // kendiliginden dogru yeri kontrol etsin.
+        //
+        // Surec basina adres uzayindan sonra kullanici bolgesi de `false`
+        // dondurur: bolge yalnizca bir surecin adres uzayinda VARDIR,
+        // cekirdek uzayinda hic eslenmez.
         crate::println!(
             "[worker] izolasyon: user@{:#x}={} kernel@{:#x}={} heap@{:#x}={}",
             level0a::core::mmu::USER_MEM_START,

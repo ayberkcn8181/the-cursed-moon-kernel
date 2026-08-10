@@ -88,31 +88,25 @@ run-disk: disk
 
 # --- Ring 3 uygulamalari ------------------------------------------------
 #
-# Cekirdekte henuz surec basina adres uzayi yok (doc Faz 9+): tum Ring 3
-# uygulamalari ayni 2 MiB'lik kullanici bolgesini paylasir. Bu yuzden her
-# uygulama kendi 256 KiB'lik "slotuna" linklenir. Slot tabani `cargo rustc`
-# ile YALNIZCA ikili hedefe verilir; boylece kutuphane ve `core` bir kez
-# derlenir, uygulama basina yalnizca baglama tekrarlanir.
+# Her surec kendi adres uzayini aldigi icin (bkz. core/mmu_i386.rs) TUM
+# uygulamalar ayni tabana linklenir. Onceki "slot" modeli -- her uygulamaya
+# derleme aninda farkli bir taban -- artik gereksiz.
 USERLAND_DIR := $(ROOT_DIR)/userland-rs
 USERLAND_TARGET_DIR := $(TARGET_DIR)/userland
-USER_REGION := 0x00C00000
-SLOT_SIZE   := 0x40000
+USER_BASE := 0x00C00000
 
-# ad:slot
-USER_APPS := hello:0 paint:1 plasma:2 crash:3 hog:4
+USER_APPS := hello paint plasma crash hog
 
 userland: userland-rust userland-legacy
 
 userland-rust:
 	@mkdir -p $(ROOT_DIR)/userland
-	@set -e; for entry in $(USER_APPS); do \
-		app=$${entry%%:*}; slot=$${entry##*:}; \
-		base=$$(printf '0x%08x' $$(( $(USER_REGION) + slot * $(SLOT_SIZE) ))); \
-		echo "  [userland] $$app -> slot $$slot (taban $$base)"; \
+	@set -e; for app in $(USER_APPS); do \
+		echo "  [userland] $$app (taban $(USER_BASE))"; \
 		( cd $(USERLAND_DIR) && cargo rustc --release --bin $$app \
 			--target $(ROOT_DIR)/targets/i686-tcmk.json \
 			--target-dir $(USERLAND_TARGET_DIR) \
-			-- -C link-arg=--image-base=$$base ); \
+			-- -C link-arg=--image-base=$(USER_BASE) ); \
 		cp $(USERLAND_TARGET_DIR)/i686-tcmk/release/$$app $(ROOT_DIR)/userland/$$app.elf; \
 	done
 

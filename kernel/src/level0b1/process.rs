@@ -9,7 +9,7 @@
 //! ikisi de ayni Ring 3 ortamina, ayni kullanici bellek tabanina yuklenir.
 
 use crate::arch::cpu::usermode;
-use crate::level0a::core::{kmalloc, mmu, vfs};
+use crate::level0a::core::{kmalloc, mmu, scheduler, vfs};
 use crate::level0a::gdt;
 use crate::level0a::kernel_api;
 #[cfg(target_arch = "x86")]
@@ -83,8 +83,35 @@ pub unsafe fn run_image(name: &str, image: &[u8]) -> Result<(), SpawnError> {
         image.len()
     );
 
-    let prepared = detect_and_load(image)?;
-    enter_ring3(prepared)
+    // --- Adres uzayi ---
+    // Once bos bir kullanici adres uzayi kurulur ve YUKLEMEDEN ONCE gecilir:
+    // yukleyici imaji 0x00C00000'e kopyalarken artik bu surecin kendi
+    // cerceveleri eslenmis olur. Onceki modelde tum surecler ayni bolgeyi
+    // paylastigi icin her uygulama farkli bir "slot"a linklenmek zorundaydi.
+    let space = mmu::create_user_space();
+    if let Some(cr3) = space {
+        mmu::switch_to(cr3);
+        scheduler::set_current_address_space(cr3);
+        if !mmu::map_user_range(cr3, mmu::USER_MEM_START, mmu::USER_MAP_SIZE) {
+            release_space(space);
+            return Err(SpawnError::OutOfMemory);
+        }
+    }
+
+    let result = detect_and_load(image).and_then(|prepared| enter_ring3(prepared, space));
+
+    // Surec bitti (ya da yuklenemedi): cerceveleri havuza geri ver.
+    release_space(space);
+    result
+}
+
+/// Surecin adres uzayini birakir ve gorevi cekirdek uzayina dondurur.
+unsafe fn release_space(space: Option<usize>) {
+    if let Some(cr3) = space {
+        scheduler::set_current_address_space(0);
+        mmu::switch_to(mmu::kernel_cr3());
+        mmu::destroy_user_space(cr3);
+    }
 }
 
 /// Format secimi ve yukleme -- mimariye gore hangi yukleyicilerin mevcut
@@ -142,16 +169,22 @@ unsafe fn detect_and_load(image: &[u8]) -> Result<Prepared, SpawnError> {
 
 /// Formattan bagimsiz ortak bolum: yigin yerlesimi, sayfa izinleri,
 /// TSS ve Ring 3 gecisi.
-unsafe fn enter_ring3(prepared: Prepared) -> Result<(), SpawnError> {
+unsafe fn enter_ring3(prepared: Prepared, space: Option<usize>) -> Result<(), SpawnError> {
     // Kullanici yigini: imajin bittigi yerden sonra, sayfa hizali.
     let stack_bottom = (prepared.end + 0xFFF) & !0xFFF;
     let stack_top = stack_bottom + USER_STACK_SIZE;
-    if stack_top > mmu::USER_MEM_START + mmu::USER_MEM_SIZE {
+    // Sinir, gercekten eslenmis pencere: kendi adres uzayinda 512 KiB,
+    // paylasimli modelde (x86_64) tum bolge.
+    if stack_top > mmu::USER_MEM_START + mmu::USER_MAP_SIZE {
         return Err(SpawnError::NoRoomForStack);
     }
 
-    // Tum kullanici bolgesini (kod + veri + yigin) Ring 3'e ac.
-    mmu::protect_user_range(mmu::USER_MEM_START, stack_top - mmu::USER_MEM_START);
+    match space {
+        // Kendi adres uzayi: sayfalar zaten tahsis edildi ve Ring 3'e acik.
+        Some(_) => {}
+        // Paylasimli model: bolgeyi Ring 3'e ac (eski davranis).
+        None => mmu::protect_user_range(mmu::USER_MEM_START, stack_top - mmu::USER_MEM_START),
+    }
 
     // Program break: imajin bittigi yerden yigin tabanina kadar buyuyebilir.
     kernel_api::set_program_break(prepared.end, stack_bottom);

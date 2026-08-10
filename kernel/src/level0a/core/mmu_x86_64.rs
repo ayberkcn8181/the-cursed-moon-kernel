@@ -158,3 +158,47 @@ pub fn is_user_accessible(addr: usize) -> bool {
         pt_e & PTE_PRESENT != 0 && pt_e & PTE_USER != 0
     }
 }
+
+// --- Surec basina adres uzayi (x86_64: henuz yok) --------------------------
+//
+// i386 tarafinda her surec kendi PDE'sini alir (bkz. `mmu_i386`). x86_64'te
+// dort seviyeli tablo ve 2 MiB huge page bolunmesi ayni isi daha fazla
+// muhasebe ile yapmayi gerektiriyor; bu port su an **tek adres uzayi**
+// modelinde kaliyor. Ust katmanlar farki gormesin diye ayni API burada da
+// var: `create_user_space` `None` doner ve cagiran paylasimli yola duser.
+
+/// x86_64'te surec basina adres uzayi henuz yok.
+///
+/// # Safety
+/// Cagri guvenlidir; imza i386 ile ayni kalsin diye `unsafe`.
+pub unsafe fn create_user_space() -> Option<usize> {
+    None
+}
+
+/// # Safety
+/// Bkz. `create_user_space`.
+pub unsafe fn destroy_user_space(_cr3: usize) {}
+
+/// # Safety
+/// Bkz. `create_user_space`.
+pub unsafe fn switch_to(_cr3: usize) {}
+
+pub fn kernel_cr3() -> usize {
+    0
+}
+
+/// Paylasimli modelde esleme zaten hazir; yalnizca Ring 3'e acilir.
+///
+/// # Safety
+/// `protect_user_range` ile ayni onkosullar.
+pub unsafe fn map_user_range(_cr3: usize, start: usize, len: usize) -> bool {
+    protect_user_range(start, len);
+    true
+}
+
+pub fn user_pages(_cr3: usize) -> usize {
+    0
+}
+
+/// Paylasimli modelde tum kullanici bolgesi tek surece aittir.
+pub const USER_MAP_SIZE: usize = USER_MEM_SIZE;

@@ -39,6 +39,11 @@ pub struct Task {
     pub user_resume: usize,
     /// Gorev su an Ring 3'te mi calisiyor?
     pub in_user_mode: bool,
+    /// Gorevin adres uzayi (CR3). 0 = cekirdek uzayi.
+    ///
+    /// Baglam degisiminde yuklenir; boylece her Ring 3 sureci kendi
+    /// kullanici bellegini gorur (bkz. `core::mmu`).
+    pub address_space: usize,
 }
 
 impl Task {
@@ -50,6 +55,7 @@ impl Task {
             kernel_stack_top: 0,
             user_resume: 0,
             in_user_mode: false,
+            address_space: 0,
         }
     }
 }
@@ -97,6 +103,7 @@ pub fn spawn(name: &'static str, entry: extern "C" fn() -> !) -> Option<usize> {
         (*tasks.add(index)).kernel_stack_top = kstack_top;
         (*tasks.add(index)).user_resume = 0;
         (*tasks.add(index)).in_user_mode = false;
+        (*tasks.add(index)).address_space = 0;
 
         TASK_COUNT.store(index + 1, Ordering::Relaxed);
         Some(index)
@@ -151,6 +158,16 @@ pub fn yield_now() {
             #[cfg(target_arch = "x86_64")]
             crate::level0a::syscall_msr::set_kernel_stack(incoming_kstack);
         }
+
+        // Adres uzayini degistir. Cekirdek ve yiginlar tum uzaylarda ayni
+        // yerde eslendigi icin bu satirdan sonraki kod ve `arch_context_switch`
+        // guvenle calisir; degisen tek sey kullanici bolgesidir.
+        let incoming_space = (*tasks.add(next_index)).address_space;
+        crate::level0a::core::mmu::switch_to(if incoming_space != 0 {
+            incoming_space
+        } else {
+            crate::level0a::core::mmu::kernel_cr3()
+        });
 
         let old_sp_slot = core::ptr::addr_of_mut!((*tasks.add(current_index)).stack_pointer);
         let new_sp = (*tasks.add(next_index)).stack_pointer;
@@ -273,6 +290,32 @@ pub fn set_current_in_user_mode(flag: bool) {
     unsafe {
         let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
         (*tasks.add(CURRENT.load(Ordering::Relaxed))).in_user_mode = flag;
+    }
+}
+
+/// Calisan gorevin adres uzayini kaydeder (surec baslatilirken).
+pub fn set_current_address_space(cr3: usize) {
+    unsafe {
+        let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+        (*tasks.add(CURRENT.load(Ordering::Relaxed))).address_space = cr3;
+    }
+}
+
+pub fn current_address_space() -> usize {
+    unsafe {
+        let tasks = core::ptr::addr_of!(TASKS) as *const Task;
+        (*tasks.add(CURRENT.load(Ordering::Relaxed))).address_space
+    }
+}
+
+/// Gorevin adres uzayi (kabuk raporu icin).
+pub fn address_space_of(index: usize) -> usize {
+    if index >= MAX_TASKS {
+        return 0;
+    }
+    unsafe {
+        let tasks = core::ptr::addr_of!(TASKS) as *const Task;
+        (*tasks.add(index)).address_space
     }
 }
 

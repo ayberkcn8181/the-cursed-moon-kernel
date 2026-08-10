@@ -29,7 +29,10 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 13 | **Framebuffer/grafik**: 1024x768x32, bitmap font, cift tampon | ✅ (i386) |
 | 14 | **Pencere yoneticisi**: kompozitor, fare, surukleme, GUI syscall'lari | ✅ (i386) |
 | 6 | AArch64 portu (EL1/EL0, GIC, `svc #0`) | ⏳ yapilmadi |
-| 8+ | fork/execve + sinyaller, ext2, musl/busybox | ⏳ yapilmadi |
+| 8 | **Surec basina adres uzayi** (cerceve ayirici + CR3 degisimi) | ✅ (i386) |
+| 9 | **Kalici depolama**: ATA PIO, MBR, TCMKFS (yazilabilir) | ✅ (i386) |
+| — | **Kendi onyukleyicisi** + diske kurulum (`install`) | ✅ (i386) |
+| 8+ | fork/execve + sinyaller, musl/busybox | ⏳ yapilmadi |
 
 ## Grafiksel Alfa
 
@@ -315,18 +318,16 @@ fn main() {
 }
 ```
 
-**Slot modeli.** Surec basina adres uzayi olmadigi icin (doc Faz 8) her
-uygulama kullanici bolgesindeki kendi 256 KiB'lik slotuna linklenir. Taban
-adres `cargo rustc ... -- -C link-arg=--image-base=<taban>` ile **yalnizca
-ikili hedefe** verilir; kutuphane ve `core` bir kez derlenir:
+**Baglama.** Taban adres `cargo rustc ... -- -C link-arg=--image-base=`
+ile **yalnizca ikili hedefe** verilir; kutuphane ve `core` bir kez
+derlenir.
 
-| Uygulama | Slot | Taban |
-|---|---|---|
-| `hello` | 0 | `0x00C0_0000` |
-| `paint` | 1 | `0x00C4_0000` |
-| `plasma` | 2 | `0x00C8_0000` |
-| `crash` | 3 | `0x00CC_0000` |
-| `hog` | 4 | `0x00D0_0000` |
+**Slot modeli kaldirildi.** Surec basina adres uzayindan sonra tum
+uygulamalar ayni tabana (`0x00C00000`) linkleniyor:
+
+```
+cargo rustc --release --bin paint -- -C link-arg=--image-base=0x00C00000
+```
 
 `rust-lld` `ET_EXEC`/`EM_386` uretir; Level-0b1'in ELF32 yukleyicisi bu
 ikilileri hicbir degisiklik olmadan yukler.
@@ -535,6 +536,76 @@ Launcher artik sabit bir uygulama listesine bagli degil: VFS'te var olan
 her yol calistirilabilir. Yani diske kopyalanan uygulamalar cekirdegi
 yeniden derlemeden calisir.
 
+## Surec basina adres uzayi
+
+Her Ring 3 sureci artik **kendi sayfa tablosunu** alir. Ayni ikilinin uc
+kopyasi ayni anda, hepsi `0x00C00000`'de, birbirine dokunmadan calisiyor:
+
+![Adres uzaylari](docs/screenshot-address-spaces.png)
+
+```
+tcmk> ps
+  id durum      ad            cagri  adres-uzayi
+ * 0 calisiyor  idle              0     cekirdek
+   1 bitti      worker           42     cekirdek
+   2 hazir      paint          9126  0x01000000 (128 sayfa)
+   3 hazir      plasma         6085  0x01082000 (128 sayfa)
+   4 hazir      plasma         1723  0x01104000 (128 sayfa)
+   5 hazir      plasma          907  0x01186000 (128 sayfa)
+```
+
+### Neden ucuz
+
+Kullanici bolgesi (`0x00C00000`, 2 MiB) tam olarak **tek bir PDE'nin**
+(indeks 3) icine duser. Her surec yalnizca kendi PDE 3 sayfa tablosunu
+alir; cekirdek, heap ve MBR/MMIO eslemeleri tum adres uzaylarinda
+**paylasilir**. Baglam degisiminde tek yapilan CR3'u degistirmek.
+
+| Katman | Dosya | Islev |
+|---|---|---|
+| Cerceve ayirici | `core/frames.rs` | 4 KiB'lik cerceveler uzerinde bit haritasi, 16 MiB havuz |
+| Adres uzayi | `core/mmu_i386.rs` | `create_user_space` / `map_user_range` / `switch_to` / `destroy_user_space` |
+| Zamanlayici | `core/scheduler.rs` | `Task.address_space`, baglam degisiminde CR3 |
+| Surec | `level0b1/process.rs` | yuklemeden **once** uzay kurar, cikista cerceveleri havuza verir |
+
+### Ne degisti
+
+**Slot modeli bitti.** Onceden her uygulama derleme aninda farkli bir
+taban adrese linkleniyordu (`--image-base=0x00C40000` gibi), cunku hepsi
+ayni adres uzayini paylasiyordu. Iki bedeli vardi: ayni ikilinin iki
+kopyasi birbirinin **kodunu eziyordu** ve her uygulama digerinin
+bellegini **okuyabiliyordu**. Artik hepsi `0x00C00000`'e linkleniyor.
+
+**Kullanici bolgesi cekirdek uzayinda hic yok.** Acilis testi bunu
+gosteriyor:
+
+```
+[worker] izolasyon: user@0xc00000=false kernel@0x100000=false heap@0x800000=false
+```
+
+Uc deger de `false`: kullanici bolgesi yalnizca bir surecin adres
+uzayinda **vardir**. Onceki modelde ilk deger `true` idi -- bolge tum
+sistemde acikti.
+
+**Cerceveler geri veriliyor.** `kmalloc` bir bump ayiricidir (serbest
+birakma yok) ve cekirdek yapilari icin dogru secim. Surecler ise gelip
+gidiyor; bu yuzden ayri bir cerceve ayiricisi eklendi. `mem` sayaci
+tutuyor: dort surec = 520 cerceve (surec basina 128 veri + 1 sayfa dizini
++ 1 sayfa tablosu).
+
+### Sinirlar
+
+- Surec basina **512 KiB** eslenir (`USER_MAP_SIZE`), tum 2 MiB degil.
+  Talep uzerine sayfalama (demand paging) olmadigi icin pesin esleme
+  havuzu bosuna tuketirdi.
+- **Pencere tamponlari hala paylasilir**: WM onlari cekirdek heap'inden
+  ayirip Ring 3'e aciyor, yani bir uygulama digerinin pencere pikselini
+  okuyabilir. Tamponu surecin kendi bolgesine tasimak ayri bir adim.
+- x86_64 portu **tek adres uzayinda** kaldi; dort seviyeli tablo + 2 MiB
+  huge page bolunmesi ayni isi daha fazla muhasebeyle gerektiriyor.
+  Ust katmanlar farki gormuyor: `create_user_space()` orada `None` doner
+  ve cagiran paylasimli yola duser.
+
 ## Kendi onyukleyicisi: TCMK kendi kendini aciyor
 
 Buraya kadar acilisi hep GRUB yapiyordu. Artik TCMK'nin **kendi iki asamali
@@ -639,10 +710,6 @@ Kabuktan `faults` komutu istatistikleri gosterir.
 
 Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
 
-- **Surec basina adres uzayi yok.** Tum Ring 3 uygulamalari ayni sayfa
-  tablosunu paylasir; her biri kullanici bolgesinde ayri bir "slot"a
-  yuklenir (256 KiB). Bu, uygulamalarin birbirinin bellegini okuyabilmesi
-  demektir. Cozum `mmu_as_create_clone` (doc Faz 8).
 - **Zamanlama isbirlikcidir.** Uygulama `win_flush` cagirmazsa CPU'yu
   birakmaz. Yuk Dengeleyici bunu **hafifletir** (kota asan gorevi zorla
   yield ettirir) ama cozmez: hic syscall yapmadan donen bir dongu hala
@@ -650,12 +717,11 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
   gerektirir (Faz 8).
 - **GUI yalnizca i386'da.** x86_64 cekirdegi calisir ve framebuffer'i
   eslerse de GUI uygulamalari su an yalnizca ELF32 olarak uretiliyor.
-- **Uygulamalar sabit slotlara linklenir.** Rust ile yaziliyorlar
-  (`userland-rs/`) ama surec basina adres uzayi olmadigi icin taban adres
-  derleme aninda sabitlenmek zorunda. Gercek `fork/execve` Faz 8 konusudur.
-- **Diskteki uygulamalar da slot paylasir.** `/bin/plasma`'yi diske
-  kopyalayip calistirmak isler, ama ayni ikilinin iki kopyasi ayni taban
-  adrese yuklenir; ikisini ayni anda calistirmak birbirinin kodunu ezer.
+- **`fork`/`execve` yok.** Her surec bos bir adres uzayinda dogar; sureci
+  kopyalamak (fork) ve calisan surecin uzerine yeni imaj yuklemek (execve)
+  Faz 8'in kalan yarisi.
+- **Surec basina 512 KiB eslenir**, talep uzerine sayfalama yok.
+- **Pencere tamponlari paylasilir** (cekirdek heap'inde, Ring 3'e acik).
 - **TCMKFS duz bir isim uzayidir**, gercek dizin agaci degil: `/home/x`
   bir yol degil, dosyanin **adidir**. Azami 64 dosya, dosya basina 160 KiB
   (yalnizca dogrudan blok isaretcileri).
