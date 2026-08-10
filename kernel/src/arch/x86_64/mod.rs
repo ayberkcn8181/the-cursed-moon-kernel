@@ -18,6 +18,19 @@ pub unsafe fn inb(port: u16) -> u8 {
     val
 }
 
+/// 16-bit port okuma/yazma -- ATA PIO veri portu (0x1F0) 16 bitliktir.
+#[inline(always)]
+pub unsafe fn outw(port: u16, val: u16) {
+    asm!("out dx, ax", in("dx") port, in("ax") val, options(nomem, nostack, preserves_flags));
+}
+
+#[inline(always)]
+pub unsafe fn inw(port: u16) -> u16 {
+    let val: u16;
+    asm!("in ax, dx", out("ax") val, in("dx") port, options(nomem, nostack, preserves_flags));
+    val
+}
+
 #[inline(always)]
 pub fn enable_interrupts() {
     unsafe { asm!("sti", options(nomem, nostack)) };

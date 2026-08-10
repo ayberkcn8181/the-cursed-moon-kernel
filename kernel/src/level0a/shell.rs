@@ -8,8 +8,8 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::level0a::core::{fd, init, kmalloc, mmu, scheduler, vfs};
-use crate::level0a::drivers::gfx;
+use crate::level0a::core::{fd, init, kmalloc, mmu, scheduler, tcmkfs, vfs};
+use crate::level0a::drivers::{ata, block, gfx, partition};
 use crate::level0a::{exceptions, input, launcher, pit, wm};
 use crate::level0b2::{ipc, load_balancer, state_monitor};
 
@@ -223,8 +223,10 @@ fn execute(line: &str) {
             write_line("  ipc           mesaj kuyrugu + paylasimli bolge");
             write_line("  faults        istisna/hata istatistikleri");
             write_line("  stall <sn>    nabzi bastir (fallback testi)");
-            write_line("bellek / dosya:");
-            write_line("  mem  ls  cat <yol>");
+            write_line("bellek / disk:");
+            write_line("  mem  disk  df  format onayla  sync");
+            write_line("dosya:");
+            write_line("  ls  cat <yol>  save <yol> <metin>  cp <kaynak> <hedef>  rm <yol>");
             write_line("uygulama / pencere:");
             write_line("  apps  run <ad>  win  mouse");
             write_line("diger:");
@@ -483,13 +485,173 @@ fn execute(line: &str) {
             for i in 0..vfs::node_count() {
                 if let Some(path) = vfs::path_of(i) {
                     write_str("  ");
-                    write_str(path);
-                    write_str("  ");
-                    write_num(vfs::size(i).unwrap_or(0));
+                    write_padded(
+                        match vfs::source(i) {
+                            Some(vfs::Source::Disk) => "disk",
+                            _ => "ram",
+                        },
+                        6,
+                    );
+                    write_padded(path, 22);
+                    write_num_right(vfs::size(i).unwrap_or(0), 7);
                     write_line(" bayt");
                 }
             }
+            write_str(" toplam ");
+            write_num(vfs::file_count());
+            write_line(" dosya");
         }
+        "disk" => {
+            if !block::available() {
+                write_line("blok aygiti yok (ISO'dan disksiz acildi).");
+            } else {
+                write_str("aygit: ");
+                write_str(block::name());
+                write_str("  model: ");
+                write_line(ata::model());
+                write_str("kapasite: ");
+                write_num(block::sector_count() as usize);
+                write_str(" sektor (");
+                write_num(block::capacity_mib() as usize);
+                write_line(" MiB)");
+                let (r, w) = block::stats();
+                write_str("okunan: ");
+                write_num(r);
+                write_str(" sektor  yazilan: ");
+                write_num(w);
+                newline();
+                let (_, _, errors) = ata::stats();
+                write_str("hata: ");
+                write_num(errors as usize);
+                write_str("  surucu hazir: ");
+                write_line(if ata::drive_ready() { "evet" } else { "hayir" });
+                write_line("bolumler:");
+                for i in 0..partition::count() {
+                    if let Some(p) = partition::get(i) {
+                        write_str("  ");
+                        write_num(p.index + 1);
+                        write_str("  tur ");
+                        write_hex(p.kind as usize, 2);
+                        write_str(" ");
+                        write_padded(partition::type_name(p.kind), 12);
+                        write_str("lba ");
+                        write_num_right(p.start_lba as usize, 8);
+                        write_num_right(p.sectors as usize / 2048, 6);
+                        write_str(" MiB");
+                        if p.bootable {
+                            write_str("  [acilis]");
+                        }
+                        newline();
+                    }
+                }
+                if partition::count() == 0 {
+                    write_line("  (bolum tablosu bos veya MBR imzasi yok)");
+                }
+            }
+        }
+        "df" => {
+            if !tcmkfs::mounted() {
+                write_line("kalici dosya sistemi bagli degil.");
+                write_line("('disk' ile bolume, 'format onayla' ile bicimlendirmeye bakin)");
+            } else {
+                write_str("tcmkfs: ");
+                write_num(tcmkfs::used_kib() as usize);
+                write_str(" / ");
+                write_num(tcmkfs::total_kib() as usize);
+                write_line(" KiB kullanimda");
+                write_str("bos blok: ");
+                write_num(tcmkfs::free_blocks() as usize);
+                write_str(" / ");
+                write_num(tcmkfs::total_blocks() as usize);
+                write_str("  (blok ");
+                write_num(tcmkfs::BLOCK_SIZE);
+                write_line(" bayt)");
+                write_str("dosya: ");
+                write_num(tcmkfs::file_count());
+                write_str(" / ");
+                write_num(tcmkfs::MAX_INODES);
+                write_str("  blok yazimi: ");
+                write_num(tcmkfs::block_writes() as usize);
+                newline();
+            }
+        }
+        "format" => {
+            if arg != "onayla" {
+                write_line("DIKKAT: TCMKFS bolumundeki TUM veri silinir.");
+                write_line("onaylamak icin: format onayla");
+            } else {
+                match tcmkfs::format("TCMK") {
+                    Ok(()) => {
+                        write_str("bicimlendirildi: ");
+                        write_num(tcmkfs::total_kib() as usize / 1024);
+                        write_line(" MiB kullanilabilir");
+                    }
+                    Err(e) => write_line(tcmkfs::error_name(e)),
+                }
+            }
+        }
+        "save" => {
+            let (path, text) = match arg.find(' ') {
+                Some(i) => (&arg[..i], arg[i + 1..].trim_start()),
+                None => (arg, ""),
+            };
+            if path.is_empty() {
+                write_line("kullanim: save <yol> <metin>");
+            } else {
+                let mut buf = [0u8; MAX_COLS + 1];
+                let len = text.len().min(MAX_COLS);
+                buf[..len].copy_from_slice(&text.as_bytes()[..len]);
+                buf[len] = b'\n';
+                match vfs::write_file(path, &buf[..len + 1]) {
+                    Ok(n) => {
+                        write_num(n);
+                        write_str(" bayt yazildi: ");
+                        write_line(path);
+                    }
+                    Err(e) => write_line(tcmkfs::error_name(e)),
+                }
+            }
+        }
+        "cp" => {
+            // Bir dosyayi diske kopyalar -- "uygulama kurmanin" en yalin
+            // hali: /bin/paint'i /home/paint'e kopyalayip oradan calistirmak.
+            let (src, dst) = match arg.find(' ') {
+                Some(i) => (&arg[..i], arg[i + 1..].trim()),
+                None => (arg, ""),
+            };
+            if src.is_empty() || dst.is_empty() {
+                write_line("kullanim: cp <kaynak> <hedef>");
+            } else {
+                match vfs::lookup(src).and_then(vfs::load) {
+                    Some(data) => match vfs::write_file(dst, data) {
+                        Ok(n) => {
+                            write_num(n);
+                            write_str(" bayt kopyalandi -> ");
+                            write_line(dst);
+                        }
+                        Err(e) => write_line(tcmkfs::error_name(e)),
+                    },
+                    None => write_line("kaynak dosya okunamadi"),
+                }
+            }
+        }
+        "rm" => {
+            if arg.is_empty() {
+                write_line("kullanim: rm <yol>");
+            } else {
+                match vfs::remove_file(arg) {
+                    Ok(()) => {
+                        write_str("silindi: ");
+                        write_line(arg);
+                    }
+                    Err(e) => write_line(tcmkfs::error_name(e)),
+                }
+            }
+        }
+        "sync" => match tcmkfs::sync() {
+            Ok(()) => write_line("tcmkfs: onbellek diske yazildi."),
+            Err(e) => write_line(tcmkfs::error_name(e)),
+        },
         "cat" => match vfs::lookup(arg) {
             Some(node) => {
                 let mut buf = [0u8; 256];

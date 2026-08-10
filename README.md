@@ -52,7 +52,8 @@ Ekranda gorunenler:
   |---|---|
   | sistem | `ps` `top` `kill <id>` `svc` `health` `uptime` `ver` |
   | Level-0b2 | `load` `ipc` `faults` `stall <sn>` |
-  | bellek/dosya | `mem` `ls` `cat <yol>` |
+  | bellek/disk | `mem` `disk` `df` `format onayla` `sync` |
+  | dosya | `ls` `cat <yol>` `save <yol> <metin>` `cp <kaynak> <hedef>` `rm <yol>` |
   | uygulama/pencere | `apps` `run <ad>` `win` `mouse` |
   | diger | `echo <metin>` `clear` `help` |
 - **Sistem Gunlugu** -- cekirdek kaydinin canli goruntusu (konsol halka
@@ -113,9 +114,11 @@ sudo apt install qemu-system-x86 grub-pc-bin grub-common xorriso mtools
 ## Derleme / ISO / Calistirma
 
 ```
-make ARCH=i386      # cargo build (freestanding, custom i686-tcmk target)
+make ARCH=i386       # cargo build (freestanding, custom i686-tcmk target)
 make iso             # grub-mkrescue ile bootable ISO
-make run             # qemu-system-i386 -cdrom build/tcmk.iso -serial stdio
+make run             # ISO'dan calistir (CD-ROM)
+make disk            # kalici TCMKFS bolumu olan sabit disk imaji
+make run-disk        # DISKTEN acilis (CD yok) -- kalicilik boyle dogrulanir
 make info            # secili ayarlari yazdirir
 ```
 
@@ -445,6 +448,92 @@ Level-0b1 cevirmenlerine yonlendirilir.
 [IPC] saglik: Level-0a toparlandi -- normal moda donuldu
 ```
 
+## Kalici depolama: disk + TCMKFS
+
+TCMK artik **kendi diskinden acilir ve verisini kalici olarak saklar**.
+
+![TCMKFS](docs/screenshot-tcmkfs.png)
+
+```
+tcmk> ls
+   ram   /bin/paint               3316 bayt
+   ram   /bin/plasma              5968 bayt
+   disk  /home/notlar.txt           21 bayt
+   disk  /home/plasma             5968 bayt
+tcmk> cat /home/notlar.txt
+merhaba kalici dunya
+tcmk> df
+tcmkfs: 12 / 65516 KiB kullanimda
+```
+
+Yukaridaki ekran goruntusu **ikinci acilistandir**: QEMU tamamen
+kapatilip yeniden baslatildi, dosyalar yerinde.
+
+### Katman katman
+
+| Katman | Dosya | Islev |
+|---|---|---|
+| Surucu | `drivers/ata.rs` | ATA PIO (LBA28), IDENTIFY, oku/yaz/flush |
+| Blok aygiti | `drivers/block.rs` | "LBA'dan sektor oku/yaz" soyutlamasi |
+| Bolum | `drivers/partition.rs` | MBR ayristirma, TCMKFS bolumunu bulma |
+| Dosya sistemi | `core/tcmkfs.rs` | superblock + inode + blok bitmap, yazma |
+| Isim uzayi | `core/vfs.rs` | RAMFS ve TCMKFS'i tek isim uzayinda birlestirir |
+
+**ATA PIO neden:** port I/O disinda hicbir sey gerektirmez -- PCI taramasi,
+DMA, kesme yonetimi yok. Hem QEMU'da hem gercek (eski) donanimda calisir.
+Blok katmani soyut oldugu icin ileride AHCI/virtio surucusu ayni arayuzun
+altina takilabilir; dosya sistemi degismez.
+
+**Kendi dosya sistemi neden:** doc S.7 Faz 9 ext2 diyordu. ext2'nin
+okunmasi kolaydir ama **yazilmasi** degildir (blok gruplari, dolayli blok
+agaclari, dizin karma indeksleri). Bu asamadaki ihtiyac "Linux diskini
+okumak" degil "kendi verisini saklamak" oldugu icin, ilk gunden yazma
+destegi olan kucuk bir dosya sistemi secildi. ext2 okuyucusu ileride VFS'e
+**ikinci bir arka uc** olarak eklenebilir -- katman tam bunun icin var.
+
+### TCMKFS yerlesimi (bolum baslangicina gore, sektor)
+
+```
+   0        superblock ("TCMK" imzasi, kapasite, etiket)
+   1..32    inode tablosu   (64 inode x 256 bayt)
+  33..36    blok bitmap'i   (16384 bit)
+  40..      veri bloklari   (blok = 4096 bayt = 8 sektor)
+```
+
+Dosya basina 40 **dogrudan** blok isaretcisi -> azami 160 KiB. Inode
+tablosu ve bitmap bellekte onbelleklenir, degisiklikler aninda diske
+yazilir (write-through), her yazmadan sonra ATA cache-flush verilir.
+
+### Disk imaji nasil uretiliyor (root gerekmeden)
+
+`grub-mkrescue` **hibrit** bir imaj uretir: ayni dosya hem CD hem sabit
+disk olarak acilabilir ve gecerli bir MBR tasir. `tools/make_disk.py` bu
+imajin sonuna bos bir bolge ekleyip MBR bolum tablosuna ikinci girdiyi
+yazar:
+
+```
+bolum 1  0xCD  ISO hibrit  -> GRUB + cekirdek (salt okunur)
+bolum 2  0x7F  TCMKFS      -> kalici, yazilabilir veri
+```
+
+Cekirdek yazilabilir bolumu **sabit bir LBA'ya gomerek degil, bolum
+tablosundan bularak** acar; imajin duzeni degistiginde cekirdegi yeniden
+derlemek gerekmez.
+
+### Uygulama "kurmak"
+
+`cp` diskteki bir kopyayi olusturur, `run` onu oradan calistirir:
+
+```
+tcmk> cp /bin/plasma /home/plasma
+5968 bayt kopyalandi -> /home/plasma
+tcmk> run /home/plasma
+```
+
+Launcher artik sabit bir uygulama listesine bagli degil: VFS'te var olan
+her yol calistirilabilir. Yani diske kopyalanan uygulamalar cekirdegi
+yeniden derlemeden calisir.
+
 ## Hata izolasyonu (kararlilik)
 
 Tum 32 CPU istisna vektoru baglidir. Bir Ring 3 uygulamasi hata uretirse
@@ -489,7 +578,14 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
 - **Uygulamalar sabit slotlara linklenir.** Rust ile yaziliyorlar
   (`userland-rs/`) ama surec basina adres uzayi olmadigi icin taban adres
   derleme aninda sabitlenmek zorunda. Gercek `fork/execve` Faz 8 konusudur.
-- Dosya sistemi salt okunur RAMFS; kalici depolama (ext2) yok.
+- **Diskteki uygulamalar da slot paylasir.** `/bin/plasma`'yi diske
+  kopyalayip calistirmak isler, ama ayni ikilinin iki kopyasi ayni taban
+  adrese yuklenir; ikisini ayni anda calistirmak birbirinin kodunu ezer.
+- **TCMKFS duz bir isim uzayidir**, gercek dizin agaci degil: `/home/x`
+  bir yol degil, dosyanin **adidir**. Azami 64 dosya, dosya basina 160 KiB
+  (yalnizca dogrudan blok isaretcileri).
+- **Disk erisimi yoklamalidir** (ATA PIO, IRQ14 baglanmadi): buyuk bir
+  yazma sirasinda sistem o sure boyunca duraklar.
 
 ## Kapsam Disi (sonraki fazlar)
 

@@ -31,7 +31,7 @@ TARGET_JSON := $(ROOT_DIR)/targets/$(RUST_TARGET).json
 KERNEL_ELF := $(TARGET_DIR)/$(RUST_TARGET)/$(CARGO_OUT_DIR)/tcmk-kernel
 
 .DEFAULT_GOAL := all
-.PHONY: all iso run info clean userland userland-rust userland-pe
+.PHONY: all iso run disk run-disk info clean userland userland-rust userland-legacy
 
 all:
 	cd $(KERNEL_DIR) && cargo build $(CARGO_FLAGS) \
@@ -46,6 +46,22 @@ iso: all
 
 run: iso
 	$(QEMU) -cdrom $(ISO) -serial stdio
+
+# --- Disk imaji -----------------------------------------------------------
+#
+# grub-mkrescue hibrit bir imaj uretir (hem CD hem sabit disk olarak
+# acilabilir). tools/make_disk.py bunun sonuna TCMKFS icin kalici bir
+# bolum ekleyip MBR bolum tablosuna isler. Sonuc: root gerektirmeden
+# uretilen, kendi kendine acilan, yazilabilir veri bolumu olan tek dosya.
+DISK := $(ROOT_DIR)/build/tcmk-disk-$(ARCH).img
+DISK_MIB ?= 64
+
+disk: iso
+	python3 $(ROOT_DIR)/tools/make_disk.py $(ISO) $(DISK) $(DISK_MIB)
+
+# Diskten acilis (CD yok): kalicilik ancak boyle dogrulanabilir.
+run-disk: disk
+	$(QEMU) -drive file=$(DISK),format=raw,if=ide -serial stdio
 
 # --- Ring 3 uygulamalari ------------------------------------------------
 #

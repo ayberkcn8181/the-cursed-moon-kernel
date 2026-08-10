@@ -4,6 +4,7 @@ pub mod fd;
 pub mod init;
 pub mod kmalloc;
 pub mod scheduler;
+pub mod tcmkfs;
 pub mod vfs;
 
 #[cfg(target_arch = "x86")]

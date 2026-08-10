@@ -9,8 +9,8 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::level0a::core::{fd, kmalloc, mmu, scheduler, vfs};
-use crate::level0a::drivers::gfx;
+use crate::level0a::core::{fd, kmalloc, mmu, scheduler, tcmkfs, vfs};
+use crate::level0a::drivers::{block, gfx, partition};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ServiceState {
@@ -113,6 +113,58 @@ pub unsafe fn bring_up(ramfs_files: &[(&'static str, &'static [u8])]) {
     fd::init();
     // Acilista stdin/stdout/stderr disinda acik tanimlayici olmamali.
     register("fd-table", fd::open_count() == 0);
+
+    // Disk: aygit + bolum tablosu. Disk yoksa servis kaydedilmez --
+    // TCMK ISO'dan (disksiz) da acilabilmelidir.
+    if block::init() {
+        register("block", true);
+        crate::println!(
+            "[LEVEL-0a] disk: {} '{}' {} sektor ({} MiB)",
+            block::name(),
+            crate::level0a::drivers::ata::model(),
+            block::sector_count(),
+            block::capacity_mib()
+        );
+        let parts = partition::scan();
+        for i in 0..parts {
+            if let Some(p) = partition::get(i) {
+                crate::println!(
+                    "[LEVEL-0a] disk: bolum {} tur=0x{:02x} ({}) lba={} sektor={}{}",
+                    p.index + 1,
+                    p.kind,
+                    partition::type_name(p.kind),
+                    p.start_lba,
+                    p.sectors,
+                    if p.bootable { " [acilis]" } else { "" }
+                );
+            }
+        }
+    } else {
+        crate::println!("[LEVEL-0a] disk: ATA aygiti bulunamadi (salt RAMFS modu).");
+    }
+
+    // Kalici bolumu bagla. Bicimlendirilmemis olmasi bir hata degildir:
+    // TCMK ilk acilista bos bir diskle karsilasabilir, kullanici kabuktan
+    // `format onayla` der. Bu yuzden servis yalnizca gercekten
+    // baglandiginda kaydedilir.
+    if partition::tcmkfs().is_some() {
+        match tcmkfs::mount() {
+            Ok(()) => {
+                let files = vfs::mount_disk_files();
+                register("tcmkfs", true);
+                crate::println!(
+                    "[LEVEL-0a] tcmkfs: baglandi -- {} dosya, {} KiB / {} KiB kullanimda",
+                    files,
+                    tcmkfs::used_kib(),
+                    tcmkfs::total_kib()
+                );
+            }
+            Err(e) => crate::println!(
+                "[LEVEL-0a] tcmkfs: baglanamadi -- {}",
+                tcmkfs::error_name(e)
+            ),
+        }
+    }
 
     vfs::list();
 
