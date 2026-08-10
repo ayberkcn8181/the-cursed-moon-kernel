@@ -224,7 +224,7 @@ fn execute(line: &str) {
             write_line("  faults        istisna/hata istatistikleri");
             write_line("  stall <sn>    nabzi bastir (fallback testi)");
             write_line("bellek / disk:");
-            write_line("  mem  disk  df  format onayla  sync");
+            write_line("  mem  disk  df  format onayla  sync  install");
             write_line("dosya:");
             write_line("  ls  cat <yol>  save <yol> <metin>  cp <kaynak> <hedef>  rm <yol>");
             write_line("uygulama / pencere:");
@@ -647,6 +647,50 @@ fn execute(line: &str) {
                     Err(e) => write_line(tcmkfs::error_name(e)),
                 }
             }
+        }
+        "install" => {
+            // Diskin acilis sektorunu TCMK'nin kendi onyukleyicisiyle
+            // degistirir; bundan sonra GRUB devrede olmaz.
+            #[cfg(target_arch = "x86")]
+            {
+                use crate::level0a::installer;
+                if arg != "onayla" {
+                    write_line("TCMK onyukleyicisi diskin acilis sektorune yazilacak.");
+                    write_line("(bolum tablosu korunur; GRUB devreden cikar)");
+                    write_str("2. asama diskte: ");
+                    write_line(if installer::stage2_present() {
+                        "hazir"
+                    } else {
+                        "YOK -- kurulum reddedilecek"
+                    });
+                    if let Some(lba) = installer::kernel_blob_lba() {
+                        write_str("cekirdek imaji: lba ");
+                        write_num(lba as usize);
+                        newline();
+                    }
+                    write_line("onaylamak icin: install onayla");
+                } else {
+                    match installer::install() {
+                        Ok(r) => {
+                            write_str("1. asama yazildi (");
+                            write_num(r.stage1_bytes);
+                            write_line(" bayt, MBR 0..446).");
+                            write_str("2. asama: lba ");
+                            write_num(r.stage2_lba as usize);
+                            write_str(", ");
+                            write_num(r.stage2_sectors as usize);
+                            write_line(" sektor.");
+                            write_str("cekirdek imaji: lba ");
+                            write_num(r.blob_lba as usize);
+                            newline();
+                            write_line("Kurulum tamam -- makineyi diskten yeniden baslatin.");
+                        }
+                        Err(e) => write_line(installer::error_name(e)),
+                    }
+                }
+            }
+            #[cfg(not(target_arch = "x86"))]
+            write_line("kurulum su an yalnizca i386'da destekleniyor.");
         }
         "sync" => match tcmkfs::sync() {
             Ok(()) => write_line("tcmkfs: onbellek diske yazildi."),

@@ -15,8 +15,16 @@
 //!    0        superblock
 //!    1..32    inode tablosu   (64 inode x 256 bayt)
 //!   33..36    blok bitmap'i   (16384 bit -> 16384 blok -> 64 MiB)
-//!   40..      veri bloklari   (blok = 4096 bayt = 8 sektor)
+//!   40..4095  ONYUKLEYICI ALANI (2 MiB, dosya sistemi disi)
+//!               40..71    2. asama (16 KiB)
+//!               72..4095  cekirdek imaji (ham bellek blogu)
+//! 4096..      veri bloklari   (blok = 4096 bayt = 8 sektor)
 //! ```
+//!
+//! Onyukleyici alani bilerek dosya sisteminin **icinde** ayrildi: boylece
+//! MBR'nin dort bolum yuvasindan biri daha harcanmaz ve "acilabilir TCMK
+//! diski" tek bir bolumden ibaret kalir. Alan bitmap'e hic girmedigi icin
+//! ayirici oraya asla dosya yazamaz.
 //!
 //! Dosya basina yalnizca **dogrudan** blok isaretcisi vardir (40 adet);
 //! azami dosya boyutu 160 KiB. Dolayli bloklar (indirect) bilincli olarak
@@ -52,8 +60,15 @@ const BITMAP_SECTOR: u32 = INODE_TABLE_SECTOR + INODE_TABLE_SECTORS; // 33
 const BITMAP_SECTORS: u32 = 4;
 const MAX_BLOCKS: usize = (BITMAP_SECTORS as usize * SECTOR_SIZE) * 8; // 16384
 
-/// Veri bloklarinin basladigi sektor -- blok sinirina hizali.
-const DATA_START_SECTOR: u32 = 40;
+/// Onyukleyicinin 2. asamasi icin ayrilan ilk sektor ve boyu.
+pub const BOOT_AREA_SECTOR: u32 = 40;
+pub const STAGE2_SECTORS: u32 = 32;
+/// Cekirdek imajinin (ham bellek blogu) basladigi sektor.
+pub const KERNEL_BLOB_SECTOR: u32 = BOOT_AREA_SECTOR + STAGE2_SECTORS;
+
+/// Veri bloklarinin basladigi sektor. Onyukleyici alaninin hemen ardindan,
+/// 2 MiB sinirinda baslar.
+const DATA_START_SECTOR: u32 = 4096;
 
 /// Dosya basina dogrudan blok isaretcisi sayisi.
 pub const DIRECT_BLOCKS: usize = 40;

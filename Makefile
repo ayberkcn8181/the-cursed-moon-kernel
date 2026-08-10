@@ -31,11 +31,33 @@ TARGET_JSON := $(ROOT_DIR)/targets/$(RUST_TARGET).json
 KERNEL_ELF := $(TARGET_DIR)/$(RUST_TARGET)/$(CARGO_OUT_DIR)/tcmk-kernel
 
 .DEFAULT_GOAL := all
-.PHONY: all iso run disk run-disk info clean userland userland-rust userland-legacy
+.PHONY: all iso run disk run-disk info clean bootloader userland userland-rust userland-legacy
 
-all:
+# Cekirdek 1. asamayi include_bytes! ile gomdugu icin onyukleyici
+# cekirdekten ONCE uretilmelidir.
+all: bootloader
 	cd $(KERNEL_DIR) && cargo build $(CARGO_FLAGS) \
 		--target $(TARGET_JSON) --target-dir $(TARGET_DIR)
+
+# --- Onyukleyici ---------------------------------------------------------
+#
+# Iki asama da tamamen assembly'dir; Rust yalnizca derleyici/baglayici
+# zinciri olarak kullanilir (harici assembler eklemeden). Duz ikili uretmek
+# icin `--oformat=binary` verilir.
+BOOT_DIR := $(ROOT_DIR)/boot/tcmkboot
+BOOT_OUT := $(ROOT_DIR)/build/boot
+BOOT_TARGET_DIR := $(TARGET_DIR)/tcmkboot
+
+bootloader:
+	@mkdir -p $(BOOT_OUT)
+	@set -e; for s in stage1 stage2; do \
+		( cd $(BOOT_DIR) && cargo rustc --release --bin $$s \
+			--target $(ROOT_DIR)/targets/i686-tcmk.json \
+			--target-dir $(BOOT_TARGET_DIR) \
+			-- -C link-arg=-T$$s.ld -C link-arg=--oformat=binary ); \
+		cp $(BOOT_TARGET_DIR)/i686-tcmk/release/$$s $(BOOT_OUT)/$$s.bin; \
+		echo "  [boot] $$s.bin $$(stat -c%s $(BOOT_OUT)/$$s.bin) bayt"; \
+	done
 
 iso: all
 	mkdir -p $(ISO_DIR)/boot/grub
@@ -56,8 +78,9 @@ run: iso
 DISK := $(ROOT_DIR)/build/tcmk-disk-$(ARCH).img
 DISK_MIB ?= 64
 
-disk: iso
-	python3 $(ROOT_DIR)/tools/make_disk.py $(ISO) $(DISK) $(DISK_MIB)
+disk: iso bootloader
+	python3 $(ROOT_DIR)/tools/make_disk.py $(ISO) $(DISK) $(DISK_MIB) \
+		$(BOOT_OUT)/stage2.bin $(KERNEL_ELF)
 
 # Diskten acilis (CD yok): kalicilik ancak boyle dogrulanabilir.
 run-disk: disk

@@ -9,6 +9,9 @@ pub mod gdt;
 pub mod idt;
 pub mod gui_api;
 pub mod input;
+// Onyukleyici zinciri (ve dolayisiyla kurulum) su an yalnizca i386'da.
+#[cfg(target_arch = "x86")]
+pub mod installer;
 pub mod launcher;
 pub mod kernel_api;
 pub mod keyboard;

@@ -52,7 +52,7 @@ Ekranda gorunenler:
   |---|---|
   | sistem | `ps` `top` `kill <id>` `svc` `health` `uptime` `ver` |
   | Level-0b2 | `load` `ipc` `faults` `stall <sn>` |
-  | bellek/disk | `mem` `disk` `df` `format onayla` `sync` |
+  | bellek/disk | `mem` `disk` `df` `format onayla` `sync` `install onayla` |
   | dosya | `ls` `cat <yol>` `save <yol> <metin>` `cp <kaynak> <hedef>` `rm <yol>` |
   | uygulama/pencere | `apps` `run <ad>` `win` `mouse` |
   | diger | `echo <metin>` `clear` `help` |
@@ -117,7 +117,8 @@ sudo apt install qemu-system-x86 grub-pc-bin grub-common xorriso mtools
 make ARCH=i386       # cargo build (freestanding, custom i686-tcmk target)
 make iso             # grub-mkrescue ile bootable ISO
 make run             # ISO'dan calistir (CD-ROM)
-make disk            # kalici TCMKFS bolumu olan sabit disk imaji
+make bootloader      # iki asamali TCMK onyukleyicisi (duz ikili)
+make disk            # kalici TCMKFS bolumu + onyukleyici olan disk imaji
 make run-disk        # DISKTEN acilis (CD yok) -- kalicilik boyle dogrulanir
 make info            # secili ayarlari yazdirir
 ```
@@ -533,6 +534,80 @@ tcmk> run /home/plasma
 Launcher artik sabit bir uygulama listesine bagli degil: VFS'te var olan
 her yol calistirilabilir. Yani diske kopyalanan uygulamalar cekirdegi
 yeniden derlemeden calisir.
+
+## Kendi onyukleyicisi: TCMK kendi kendini aciyor
+
+Buraya kadar acilisi hep GRUB yapiyordu. Artik TCMK'nin **kendi iki asamali
+onyukleyicisi** var (`boot/tcmkboot/`) ve `install` komutundan sonra disk
+GRUB'a hic ugramadan aciliyor.
+
+![Kurulum](docs/screenshot-install.png)
+
+```
+tcmk> install onayla
+1. asama yazildi (148 bayt, MBR 0..446).
+2. asama: lba 14376, 32 sektor.
+cekirdek imaji: lba 14408
+Kurulum tamam -- makineyi diskten yeniden baslatin.
+```
+
+Yeniden baslatildiginda ekrandaki her sey TCMK'nin kendi zinciriyle geliyor:
+
+![Kendi onyukleyicisiyle acilis](docs/screenshot-selfboot.png)
+
+### Zincir
+
+| Asama | Nerede | Ne yapiyor |
+|---|---|---|
+| BIOS | — | MBR'nin ilk 446 baytini 0x7C00'e yukler |
+| **1. asama** | MBR (148 bayt) | int 0x13 AH=0x42 ile 2. asamayi 0x8000'e okur |
+| **2. asama** | bolum + 40 (548 bayt) | VBE modu kurar, korumali moda gecer, cekirdegi ATA PIO ile 1 MiB'a okur, `.bss`'i sifirlar, Multiboot1 sozlesmesiyle atlar |
+| Cekirdek | 0x100000 | degismedi -- GRUB'dan gelmis gibi acilir |
+
+**Cekirdek tek satir degismedi.** 2. asama, cekirdegin bekledigi
+Multiboot1 bilgi yapisini (flags bit 12 + framebuffer alanlari) kendisi
+kuruyor; cekirdek acisindan GRUB ile TCMK onyukleyicisi ayirt edilemez.
+
+### Tasarim kararlari
+
+**Cekirdek diske "cozulmus" yaziliyor.** ELF'in PT_LOAD segmentleri
+kurulum ortami uretilirken (`tools/make_disk.py`) bellekteki yerlerine gore
+tek bir ardisik bloga yerlestiriliyor. Boylece 2. asamanin ELF
+ayristirmasina ihtiyaci yok: "su LBA'dan su kadar sektoru 0x100000'e oku"
+yetiyor.
+
+**Diski BIOS yerine ATA PIO ile okuyoruz.** Cekirdek imaji 1 MiB'i asiyor;
+BIOS int 0x13 ise gercek mod segment:ofset ile yalnizca ilk 1 MiB'a
+yazabilir. Klasik cozum "unreal mode"dur; korumali moda bastan gecip diski
+cekirdegin zaten kullandigi port dizisiyle okumak hem daha kisa hem daha
+az kirilgan. Bedeli: 2. asama IDE disk varsayiyor.
+
+**Onyukleyici alani dosya sisteminin icinde.** TCMKFS bolumunun 40..4095
+sektorleri (2 MiB) bitmap'e hic girmez; ayirici oraya asla dosya yazamaz.
+Boylece MBR'nin dort bolum yuvasindan biri daha harcanmiyor.
+
+**Assembler eklenmedi.** Iki asama da `global_asm!` icinde `.code16` /
+`.code32` ile yazildi, `rust-lld --oformat=binary` ile duz ikiliye
+linklendi. Arac zinciri hala Rust + GRUB + QEMU.
+
+### 16-bit assembly tuzaklari (yasananlar)
+
+- LLVM'in Intel sozdiziminde **ciplak sembol bir bellek operandidir**:
+  `mov si, msg` sembolun adresini degil, o adresteki **degeri** yukler.
+  Adres icin `offset` sart. (Cekirdegin `_start`'indaki
+  `mov esp, stack_top` tuzaginin aynisi.)
+- `.code16` icinde `call`/`ret`/`retf` LLVM tarafindan **32-bit** uretilir
+  (0x66 onekiyle) -- gercek mod yigininda 4 baytlik itme/cekme demektir ve
+  donus adresi bozulur. `callw`/`retw` da kabul edilmiyor; cozum
+  altyordamdan tamamen vazgecmek oldu.
+- 16->32 bit uzak atlama ham baytla kodlandi (`66 EA <ofset32> <segment16>`).
+
+### Neden GRUB yerine kendi zinciri
+
+Alternatif FAT bolumu + `grub-install` yoluydu; ama GRUB'un 1. asamasi yine
+**host araclariyla** yazilmak zorunda kalirdi -- yani "kurulum" aslinda
+kurulum olmazdi. Kendi zinciri TCMK'yi gercekten kendi kendini kurar hale
+getiriyor.
 
 ## Hata izolasyonu (kararlilik)
 

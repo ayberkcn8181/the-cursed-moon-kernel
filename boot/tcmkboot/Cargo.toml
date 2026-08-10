@@ -1,0 +1,16 @@
+[package]
+name = "tcmkboot"
+version = "0.1.0"
+edition = "2021"
+
+# Iki asama, iki ayri duz ikili. Ikisi de tamamen assembly'dir; Rust
+# yalnizca derleyici/baglayici zinciri olarak kullanilir (bkz. README:
+# arac zinciri Rust + GRUB + QEMU ile sinirli tutulur).
+
+[profile.dev]
+panic = "abort"
+opt-level = 0
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
