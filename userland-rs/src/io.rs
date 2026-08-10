@@ -43,6 +43,18 @@ impl File {
     /// Yolu acar. Yol cekirdege NUL sonlandirmali gitmek zorunda oldugu
     /// icin once yigin uzerinde bir tampona kopyalanir.
     pub fn open(path: &str) -> Option<File> {
+        Self::open_with(path, 0)
+    }
+
+    /// Dosyayi yazmak icin acar; yoksa olusturur (POSIX `O_CREAT`).
+    ///
+    /// Yalnizca kalici dosya sistemi (TCMKFS) yazilabilir; cekirdek
+    /// imajina gomulu dosyalar salt okunurdur.
+    pub fn create(path: &str) -> Option<File> {
+        Self::open_with(path, sys::O_CREAT)
+    }
+
+    fn open_with(path: &str, flags: usize) -> Option<File> {
         let mut buf = [0u8; 128];
         if path.len() >= buf.len() {
             return None;
@@ -50,7 +62,7 @@ impl File {
         buf[..path.len()].copy_from_slice(path.as_bytes());
         // buf zaten sifir; buf[path.len()] = NUL.
 
-        let fd = unsafe { sys::open_raw(buf.as_ptr()) };
+        let fd = unsafe { sys::open_raw(buf.as_ptr(), flags) };
         if fd < 0 {
             None
         } else {
@@ -60,6 +72,16 @@ impl File {
 
     pub fn read(&mut self, buf: &mut [u8]) -> usize {
         let n = sys::read(self.fd, buf);
+        if n < 0 {
+            0
+        } else {
+            n as usize
+        }
+    }
+
+    /// Dosyanin mevcut konumuna yazar; yazilan bayt sayisini doner.
+    pub fn write(&mut self, data: &[u8]) -> usize {
+        let n = sys::write(self.fd, data);
         if n < 0 {
             0
         } else {

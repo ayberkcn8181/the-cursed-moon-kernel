@@ -102,12 +102,15 @@ pub fn read(fd: usize, buf: &mut [u8]) -> isize {
     unsafe { syscall3(SYS_READ, fd, buf.as_mut_ptr() as usize, buf.len()) as isize }
 }
 
+/// POSIX `O_CREAT`: dosya yoksa olustur.
+pub const O_CREAT: usize = 0o100;
+
 /// VFS'te bir dosya acar. `path` NUL ile sonlanmalidir (bkz. [`crate::io::File`]).
 ///
 /// # Safety
 /// `path` NUL sonlandirmali gecerli bir dizi olmalidir.
-pub unsafe fn open_raw(path: *const u8) -> isize {
-    syscall3(SYS_OPEN, path as usize, 0, 0) as isize
+pub unsafe fn open_raw(path: *const u8, flags: usize) -> isize {
+    syscall3(SYS_OPEN, path as usize, flags, 0) as isize
 }
 
 pub fn close(fd: usize) -> isize {

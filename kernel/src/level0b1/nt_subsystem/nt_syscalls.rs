@@ -85,7 +85,7 @@ pub fn dispatch(frame: &mut SyscallFrame) {
             // gercek NT'nin OBJECT_ATTRIBUTES yapisi Faz 7b+ konusudur.
             let mut storage = [0u8; PATH_MAX];
             match unsafe { copy_user_cstr(arg1, &mut storage) } {
-                Some(path) => match kernel_api::open(path) {
+                Some(path) => match kernel_api::open(path, false) {
                     // Handle'i cagirana EDX uzerinden bildiriyoruz.
                     Ok(handle) => {
                         set_out(frame, handle);

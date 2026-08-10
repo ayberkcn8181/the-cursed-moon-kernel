@@ -58,7 +58,7 @@ Ekranda gorunenler:
   | Level-0b2 | `load` `ipc` `faults` `stall <sn>` |
   | bellek/disk | `mem` `disk` `df` `format onayla` `sync` `install onayla` |
   | dosya | `ls` `cat <yol>` `save <yol> <metin>` `cp <kaynak> <hedef>` `rm <yol>` |
-  | uygulama/pencere | `apps` `run <ad>` `win` `mouse` |
+  | uygulama/pencere | `apps` `run <ad>` `win` `focus <id>` `mouse` |
   | diger | `echo <metin>` `clear` `help` |
 - **Sistem Gunlugu** -- cekirdek kaydinin canli goruntusu (konsol halka
   tamponu her karede pencereye cizilir).
@@ -538,6 +538,37 @@ tcmk> run /home/plasma
 Launcher artik sabit bir uygulama listesine bagli degil: VFS'te var olan
 her yol calistirilabilir. Yani diske kopyalanan uygulamalar cekirdegi
 yeniden derlemeden calisir.
+
+## Notes: yaz, kaydet, kapat, ac
+
+Ring 3 uygulamasi metnini kendi ciziyor, POSIX `open(O_CREAT)`/`write` ile
+kalici dosya sistemine yaziyor ve acilista geri okuyor.
+
+![Notes](docs/screenshot-notes.png)
+
+Ekran goruntusu **ikinci acilistan**: makine tamamen kapatildi, yeniden
+acildiginda Notes dosyayi diskten yukledi ("diskten yuklendi") ve kabuktaki
+`cat /home/notes.txt` ayni metni gosteriyor.
+
+Bu uygulama TCMK'nin parcalarini tek yerde birlestiriyor:
+
+| Parca | Nerede |
+|---|---|
+| Pencere + **kendi cizdigi metin** | `tcmk::gui::Window::text/glyph` |
+| Klavye olaylari | `win_poll_key` (0x504) |
+| Kalici yazma | `File::create` -> `open(O_CREAT)` + `write` |
+| Uyku | `win.frame(30)` -> `sleep` (0x508) |
+
+**Metin cizimi bilerek uygulamada.** Cekirdekte bir "metin ciz" syscall'i
+olsaydi her karakter icin Ring 0'a gecilirdi. Font cekirdekle ayni
+(`tools/sync_font.py` kopyalar), yani kabuktaki yaziyla uygulama yazisi
+ayni gorunur.
+
+**Dosyaya yazma yolu.** `kernel_api::write` artik stdout disindaki
+tanimlayicilar icin VFS'e gidiyor; `open` POSIX `O_CREAT` bayragini
+tanidigi icin uygulama olmayan bir dosyayi kendisi olusturabiliyor.
+Yazma yalnizca TCMKFS dugumlerinde calisir -- RAMFS dosyalarinin icerigi
+cekirdek imajinin `.rodata`'sindadir.
 
 ## Preemptive zamanlama
 

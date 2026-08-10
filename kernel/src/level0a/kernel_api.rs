@@ -74,15 +74,28 @@ pub unsafe fn write(fd_num: u32, buf: *const u8, len: usize) -> Result<usize, Ke
             }
             Ok(len)
         }
-        // RAMFS dosyalarina yazma Faz 9-10 (tmpfs) konusudur.
-        _ if fd::get(fd_num as usize).is_some() => Err(KernelError::NotSupported),
-        _ => Err(KernelError::BadFileDescriptor),
+        _ => {
+            let entry = fd::get(fd_num as usize).ok_or(KernelError::BadFileDescriptor)?;
+            let bytes = core::slice::from_raw_parts(buf, len);
+            let written = vfs::write_at(entry.node, entry.offset, bytes)
+                .map_err(|_| KernelError::NotSupported)?;
+            fd::advance(fd_num as usize, written);
+            Ok(written)
+        }
     }
 }
 
 /// Yola gore dosya acar ve yeni bir tanimlayici dondurur.
-pub fn open(path: &str) -> Result<usize, KernelError> {
-    let node = vfs::lookup(path).ok_or(KernelError::NotFound)?;
+///
+/// `create` verilirse (POSIX `O_CREAT`) dosya yoksa kalici dosya
+/// sisteminde olusturulur. RAMFS'te olusturma yoktur: icerigi cekirdek
+/// imajinin icindedir.
+pub fn open(path: &str, create: bool) -> Result<usize, KernelError> {
+    let node = match vfs::lookup(path) {
+        Some(n) => n,
+        None if create => vfs::create_file(path).map_err(|_| KernelError::NotFound)?,
+        None => return Err(KernelError::NotFound),
+    };
     fd::allocate(node).ok_or(KernelError::TooManyOpenFiles)
 }
 

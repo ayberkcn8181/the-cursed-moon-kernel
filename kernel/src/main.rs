@@ -55,6 +55,9 @@ static HOG_ELF: &[u8] = include_bytes!("../../userland/hog.elf");
 /// Preemption testi: hic syscall yapmayan saf hesap dongusu.
 #[cfg(target_arch = "x86")]
 static SPIN_ELF: &[u8] = include_bytes!("../../userland/spin.elf");
+/// Kalici not defteri: metin cizer, TCMKFS'e yazar, acilista geri okur.
+#[cfg(target_arch = "x86")]
+static NOTES_ELF: &[u8] = include_bytes!("../../userland/notes.elf");
 
 /// Linux (ELF64, x86_64) kullanici programi -- `tools/gen_hello_elf64.py`.
 #[cfg(target_arch = "x86_64")]
@@ -73,6 +76,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/crash", CRASH_ELF),
     ("/bin/hog", HOG_ELF),
     ("/bin/spin", SPIN_ELF),
+    ("/bin/notes", NOTES_ELF),
     ("/boot/msg.txt", BOOT_MSG),
 ];
 

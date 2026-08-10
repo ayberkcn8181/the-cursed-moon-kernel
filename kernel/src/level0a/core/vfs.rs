@@ -248,6 +248,34 @@ pub fn write_file(path: &str, data: &[u8]) -> Result<usize, tcmkfs::FsError> {
     Ok(written)
 }
 
+/// Acik bir dugume `offset`'ten itibaren yazar (POSIX `write` yolu).
+///
+/// RAMFS dugumleri salt okunurdur: icerikleri cekirdek imajinin icinde,
+/// `.rodata` bolumundedir -- uzerine yazmak sayfa hatasi verirdi.
+pub fn write_at(node: usize, offset: usize, data: &[u8]) -> Result<usize, tcmkfs::FsError> {
+    let n = node_at(node).ok_or(tcmkfs::FsError::NotFound)?;
+    if n.source != Source::Disk {
+        return Err(tcmkfs::FsError::NotFound);
+    }
+    let written = tcmkfs::write(n.inode, offset, data)?;
+
+    // Dosya buyumus olabilir; dugum boyutunu tazele.
+    let size = tcmkfs::entry_size(n.inode).unwrap_or(0);
+    crate::arch::cpu::without_interrupts(|| unsafe {
+        (*nodes_mut().add(node)).size = size;
+    });
+    Ok(written)
+}
+
+/// Diskte bos bir dosya olusturur ve dugum numarasini doner.
+pub fn create_file(path: &str) -> Result<usize, tcmkfs::FsError> {
+    if let Some(index) = lookup(path) {
+        return Ok(index);
+    }
+    let inode = tcmkfs::create(path)?;
+    attach_disk_node(path, inode, 0).ok_or(tcmkfs::FsError::TooManyFiles)
+}
+
 /// Diskteki bir dosyayi siler.
 pub fn remove_file(path: &str) -> Result<(), tcmkfs::FsError> {
     let index = lookup(path).ok_or(tcmkfs::FsError::NotFound)?;

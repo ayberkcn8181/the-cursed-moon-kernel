@@ -229,7 +229,7 @@ fn execute(line: &str) {
             write_line("dosya:");
             write_line("  ls  cat <yol>  save <yol> <metin>  cp <kaynak> <hedef>  rm <yol>");
             write_line("uygulama / pencere:");
-            write_line("  apps  run <ad>  win  mouse");
+            write_line("  apps  run <ad>  win  focus <id>  mouse");
             write_line("diger:");
             write_line("  echo <metin>  clear  help");
         }
@@ -798,6 +798,29 @@ fn execute(line: &str) {
                 }
             }
             write_line("(her tampon YALNIZCA sahibinin adres uzayina eslidir)");
+            write_line("odak degistirmek icin: focus <id>");
+        }
+        "focus" => {
+            // Klavye odagini kabuktan baska bir pencereye verir. Fareyle
+            // tiklamak da ayni isi yapar; komut, uzaktan/betikle surulen
+            // oturumlar icin gerekli.
+            let id = arg.bytes().fold(None::<usize>, |acc, b| {
+                if b.is_ascii_digit() {
+                    Some(acc.unwrap_or(0) * 10 + (b - b'0') as usize)
+                } else {
+                    acc
+                }
+            });
+            match id {
+                Some(i) if i < wm::window_count() => {
+                    wm::focus(i);
+                    write_str("odak: pencere #");
+                    write_num(i);
+                    newline();
+                }
+                Some(_) => write_line("boyle bir pencere yok ('win' ile listeleyin)"),
+                None => write_line("kullanim: focus <pencere-no>"),
+            }
         }
         "uptime" => {
             write_str("tick: ");

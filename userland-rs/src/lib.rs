@@ -40,6 +40,7 @@
 
 #![no_std]
 
+pub mod font;
 pub mod gui;
 pub mod io;
 pub mod sys;

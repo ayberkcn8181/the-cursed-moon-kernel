@@ -7,6 +7,7 @@
 //! yapar. Bu, "Ring 3 uygulamasi gercekten calisiyor" iddiasinin somut
 //! kanitidir: ekrandaki her piksel kullanici kodunun urunudur.
 
+use crate::font;
 use crate::sys;
 
 /// WM'nin pencere cercevesi olculeri (`level0a::wm` ile ayni olmalidir).
@@ -159,6 +160,61 @@ impl Window {
             }
             dy += 1;
         }
+    }
+
+    /// Tek karakter cizer (8x16 bitmap font).
+    ///
+    /// Metin cizimi bilerek **uygulamada**: cekirdekte bir "metin ciz"
+    /// syscall'i olsaydi her karakter icin Ring 0'a gecilirdi. Font
+    /// cekirdekle ayni (bkz. `tools/sync_font.py`), yani kabuktaki
+    /// yaziyla uygulama yazisi ayni gorunur.
+    pub fn glyph(&mut self, x: usize, y: usize, ch: u8, color: u32) {
+        if ch < font::FONT_FIRST || ch > font::FONT_LAST {
+            return;
+        }
+        let bitmap = &font::FONT[(ch - font::FONT_FIRST) as usize];
+        for (row, bits) in bitmap.iter().enumerate() {
+            if *bits == 0 {
+                continue;
+            }
+            for col in 0..font::FONT_WIDTH {
+                // MSB soldaki piksel.
+                if bits & (0x80 >> col) != 0 {
+                    self.put(x + col, y + row, color);
+                }
+            }
+        }
+    }
+
+    /// Dizi cizer; pencere kenarina gelince keser.
+    pub fn text(&mut self, x: usize, y: usize, s: &str, color: u32) {
+        let mut cx = x;
+        for ch in s.bytes() {
+            if cx + font::FONT_WIDTH > self.width {
+                break;
+            }
+            self.glyph(cx, y, ch, color);
+            cx += font::FONT_WIDTH;
+        }
+    }
+
+    /// Isaretsiz sayiyi cizer ve kapladigi genisligi doner.
+    pub fn number(&mut self, x: usize, y: usize, mut value: usize, color: u32) -> usize {
+        let mut digits = [0u8; 20];
+        let mut n = 0;
+        if value == 0 {
+            digits[0] = b'0';
+            n = 1;
+        }
+        while value > 0 {
+            digits[n] = b'0' + (value % 10) as u8;
+            value /= 10;
+            n += 1;
+        }
+        for i in 0..n {
+            self.glyph(x + i * font::FONT_WIDTH, y, digits[n - 1 - i], color);
+        }
+        n * font::FONT_WIDTH
     }
 
     /// Bekleyen tus olayi; yoksa 0.

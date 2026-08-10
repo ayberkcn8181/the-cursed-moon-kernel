@@ -107,7 +107,8 @@ pub fn dispatch(frame: &mut SyscallFrame) {
         SYS_OPEN => {
             let mut storage = [0u8; PATH_MAX];
             match unsafe { copy_user_cstr(arg1, &mut storage) } {
-                Some(path) => match kernel_api::open(path) {
+                // arg2 = bayraklar; Linux'ta O_CREAT = 0o100 = 0x40.
+                Some(path) => match kernel_api::open(path, arg2 & 0x40 != 0) {
                     Ok(fd) => fd as i32,
                     Err(e) => errno_of(e),
                 },
