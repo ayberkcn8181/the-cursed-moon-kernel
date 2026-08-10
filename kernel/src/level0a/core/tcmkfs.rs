@@ -60,10 +60,16 @@ const BITMAP_SECTOR: u32 = INODE_TABLE_SECTOR + INODE_TABLE_SECTORS; // 33
 const BITMAP_SECTORS: u32 = 4;
 const MAX_BLOCKS: usize = (BITMAP_SECTORS as usize * SECTOR_SIZE) * 8; // 16384
 
+// Onyukleyici alani sabitleri: yalnizca i386'nin kurulum modulu kullanir
+// (boot zinciri su an i386'ya ozgu). Yerlesimin kendisi mimariden
+// bagimsiz oldugu icin tanimlar burada durur.
 /// Onyukleyicinin 2. asamasi icin ayrilan ilk sektor ve boyu.
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
 pub const BOOT_AREA_SECTOR: u32 = 40;
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
 pub const STAGE2_SECTORS: u32 = 32;
 /// Cekirdek imajinin (ham bellek blogu) basladigi sektor.
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
 pub const KERNEL_BLOB_SECTOR: u32 = BOOT_AREA_SECTOR + STAGE2_SECTORS;
 
 /// Veri bloklarinin basladigi sektor. Onyukleyici alaninin hemen ardindan,

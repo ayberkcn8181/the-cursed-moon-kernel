@@ -30,7 +30,7 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 14 | **Pencere yoneticisi**: kompozitor, fare, surukleme, GUI syscall'lari | ✅ (i386) |
 | 6 | AArch64 portu (EL1/EL0, GIC, `svc #0`) | ⏳ yapilmadi |
 | 8 | **Surec basina adres uzayi** (cerceve ayirici + CR3 degisimi) | ✅ (i386) |
-| 8 | **Preemptive zamanlama** (zamanlayici kesmesinden baglam degisimi) | ✅ |
+| 8 | **Preemptive zamanlama** + uyku durumu (`sleep`) | ✅ |
 | 9 | **Kalici depolama**: ATA PIO, MBR, TCMKFS (yazilabilir) | ✅ (i386) |
 | — | **Kendi onyukleyicisi** + diske kurulum (`install`) | ✅ (i386) |
 | 8+ | fork/execve + sinyaller, musl/busybox | ⏳ yapilmadi |
