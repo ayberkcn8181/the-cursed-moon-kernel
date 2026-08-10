@@ -81,8 +81,9 @@ POSIX/NT'de karsiligi olmayan islevler icin `0x500+` araligi ayrildi:
 | 0x506 | `yield()` | CPU'yu birak (pencere gerektirmez) |
 | 0x507 | `win_pos(id)` | (x<<16)\|y -- pencere suruklendiginde tazelenir |
 
-Pencere tamponu `mmu::protect_user_range` ile Ring 3'e acilir; uygulama
-piksellerini kendisi yazar, cekirdek yalnizca kompozisyon yapar.
+Pencere tamponu **yalnizca sahibinin** adres uzayina eslenir (bkz. "Surec
+basina adres uzayi"); uygulama piksellerini kendisi yazar, cekirdek
+yalnizca kompozisyon yapar.
 
 ## Desteklenen mimariler
 
@@ -598,9 +599,23 @@ tutuyor: dort surec = 520 cerceve (surec basina 128 veri + 1 sayfa dizini
 - Surec basina **512 KiB** eslenir (`USER_MAP_SIZE`), tum 2 MiB degil.
   Talep uzerine sayfalama (demand paging) olmadigi icin pesin esleme
   havuzu bosuna tuketirdi.
-- **Pencere tamponlari hala paylasilir**: WM onlari cekirdek heap'inden
-  ayirip Ring 3'e aciyor, yani bir uygulama digerinin pencere pikselini
-  okuyabilir. Tamponu surecin kendi bolgesine tasimak ayri bir adim.
+- Pencere tamponlari da **surece ozeldir**: WM tamponu cekirdek
+  heap'inden ayirir ama Ring 3'e yalnizca **sahibinin** adres uzayinda,
+  `0x00D00000`'den itibaren eslenir. Cekirdek ayni bellegi identity
+  adresinden gormeye devam eder -- kompozitor oradan okur. Eskiden tampon
+  identity haritasinda aciliyordu, yani her uygulama her pencerenin
+  piksellerini okuyabiliyordu.
+
+  ```
+  tcmk> win
+    id  boyut     sahip     tampon (surecin adresi)
+     0  632x390   cekirdek  (kernel tamponu)
+     2  320x200   paint     0x00d00000
+     3  300x200   plasma    0x00d00000
+  ```
+
+  Ayni adres, farkli adres uzaylari -- yani farkli fiziksel bellek.
+  `win_buffer` cagrisi sahiplik denetimi de yapar.
 - x86_64 portu **tek adres uzayinda** kaldi; dort seviyeli tablo + 2 MiB
   huge page bolunmesi ayni isi daha fazla muhasebeyle gerektiriyor.
   Ust katmanlar farki gormuyor: `create_user_space()` orada `None` doner
@@ -721,7 +736,6 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
   kopyalamak (fork) ve calisan surecin uzerine yeni imaj yuklemek (execve)
   Faz 8'in kalan yarisi.
 - **Surec basina 512 KiB eslenir**, talep uzerine sayfalama yok.
-- **Pencere tamponlari paylasilir** (cekirdek heap'inde, Ring 3'e acik).
 - **TCMKFS duz bir isim uzayidir**, gercek dizin agaci degil: `/home/x`
   bir yol degil, dosyanin **adidir**. Azami 64 dosya, dosya basina 160 KiB
   (yalnizca dogrudan blok isaretcileri).

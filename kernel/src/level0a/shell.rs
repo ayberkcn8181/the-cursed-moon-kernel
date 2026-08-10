@@ -769,20 +769,30 @@ fn execute(line: &str) {
             }
         }
         "win" => {
+            write_line("  id  boyut     sahip     tampon (surecin adresi)");
             for i in 0..wm::window_count() {
                 if let Some(w) = wm::get(i) {
-                    write_str("  #");
-                    write_num(i);
-                    write_str(" ");
-                    let title = core::str::from_utf8(&w.title[..w.title_len]).unwrap_or("?");
-                    write_str(title);
                     write_str("  ");
+                    write_num_right(i, 2);
+                    write_str("  ");
+                    let mut dims = 0;
                     write_num(w.width);
                     write_str("x");
                     write_num(w.height);
-                    newline();
+                    dims += 1;
+                    let _ = dims;
+                    write_str("  ");
+                    if w.system {
+                        write_padded("cekirdek", 10);
+                        write_line("(kernel tamponu)");
+                    } else {
+                        write_padded(scheduler::name_of(w.owner), 10);
+                        write_hex(w.user_addr, 8);
+                        newline();
+                    }
                 }
             }
+            write_line("(her tampon YALNIZCA sahibinin adres uzayina eslidir)");
         }
         "uptime" => {
             write_str("tick: ");

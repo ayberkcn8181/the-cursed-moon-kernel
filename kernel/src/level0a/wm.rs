@@ -11,7 +11,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use crate::level0a::core::{kmalloc, mmu};
+use crate::level0a::core::{kmalloc, mmu, scheduler};
 use crate::level0a::drivers::{console, gfx};
 use crate::level0a::input::{self, Event};
 
@@ -33,6 +33,10 @@ pub struct Window {
     pub title_len: usize,
     /// Cekirdek tarafindan cizilen pencere mi (ornegin sistem gunlugu)?
     pub system: bool,
+    /// Pencereyi acan gorev. Tampon yalnizca ONA eslenir.
+    pub owner: usize,
+    /// Tamponun sahibinin adres uzayindaki adresi (0 = eslenmedi).
+    pub user_addr: usize,
 }
 
 impl Window {
@@ -47,9 +51,22 @@ impl Window {
             title: [0; MAX_TITLE],
             title_len: 0,
             system: false,
+            owner: usize::MAX,
+            user_addr: 0,
         }
     }
 }
+
+/// Kullanici adres uzayinda pencere tamponlarina ayrilan bolge.
+///
+/// Kullanici PDE'si 0x00C00000..0x00FFFFFF'i kapsar; imaj ve yigin
+/// bastaki 512 KiB'de (`USER_MAP_SIZE`) durur, tamponlar 13 MiB'den
+/// itibaren. Her surec kendi adres uzayinda oldugu icin farkli surecler
+/// ayni adresi kullanabilir -- catisma yalnizca **tek** surecin cok
+/// pencere acmasi halinde olurdu, o yuzden surec basina slot verilir.
+const WINDOW_MAP_BASE: usize = 0x00D0_0000;
+const WINDOW_MAP_SLOT: usize = 0x0008_0000; // 512 KiB
+const WINDOW_MAP_SLOTS: usize = 4;
 
 static mut WINDOWS: [Window; MAX_WINDOWS] = [Window::empty(); MAX_WINDOWS];
 /// z-sirasi: en arkadan en one. Deger = pencere indeksi.
@@ -64,6 +81,20 @@ static DRAG_DX: AtomicUsize = AtomicUsize::new(0);
 static DRAG_DY: AtomicUsize = AtomicUsize::new(0);
 /// Kabuk penceresinin kimligi (icerigini kabuk modulu cizer).
 static SHELL_WINDOW: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+/// Bir gorevin halihazirda kac penceresi var (kullanici slot secimi icin).
+fn owned_window_count(owner: usize) -> usize {
+    let count = WINDOW_COUNT.load(Ordering::Relaxed);
+    unsafe {
+        let windows = core::ptr::addr_of!(WINDOWS) as *const Window;
+        (0..count)
+            .filter(|i| {
+                let w = &*windows.add(*i);
+                w.used && !w.system && w.owner == owner
+            })
+            .count()
+    }
+}
 
 pub fn mark_shell(id: usize) {
     SHELL_WINDOW.store(id, Ordering::Relaxed);
@@ -100,8 +131,33 @@ pub fn create(title: &str, x: usize, y: usize, width: usize, height: usize, syst
             pixels.add(i).write(gfx::WINDOW_BG);
         }
 
-        // Kullanici uygulamalari kendi tamponlarina dogrudan yazabilsin.
-        mmu::protect_user_range(buffer as usize, bytes);
+        // --- Tamponu YALNIZCA sahibine ac ---
+        //
+        // Eskiden `protect_user_range` tamponu identity haritasinda Ring 3'e
+        // aciyordu; bu, her uygulamanin her pencerenin piksellerini
+        // okuyabilmesi demekti. Artik tampon sahibinin adres uzayina, onun
+        // kendi sanal adresine eslenir. Cekirdek ayni bellegi identity
+        // adresinden gormeye devam eder (kompozitor oradan okur).
+        let owner = scheduler::current_id();
+        let space = scheduler::address_space_of(owner);
+        let mut user_addr = 0usize;
+
+        if space != 0 && !system {
+            let slot = owned_window_count(owner);
+            if slot >= WINDOW_MAP_SLOTS || bytes > WINDOW_MAP_SLOT {
+                return None;
+            }
+            let vaddr = WINDOW_MAP_BASE + slot * WINDOW_MAP_SLOT;
+            if !mmu::map_user_frames(space, vaddr, buffer as usize, bytes) {
+                return None;
+            }
+            user_addr = vaddr;
+        } else if !system {
+            // Paylasimli model (x86_64) veya adres uzayi olmayan cagiran:
+            // eski davranis.
+            mmu::protect_user_range(buffer as usize, bytes);
+            user_addr = buffer as usize;
+        }
 
         let windows = core::ptr::addr_of_mut!(WINDOWS) as *mut Window;
         let mut win = Window {
@@ -114,6 +170,8 @@ pub fn create(title: &str, x: usize, y: usize, width: usize, height: usize, syst
             title: [0; MAX_TITLE],
             title_len: 0,
             system,
+            owner,
+            user_addr,
         };
         for (i, b) in title.bytes().take(MAX_TITLE).enumerate() {
             win.title[i] = b;

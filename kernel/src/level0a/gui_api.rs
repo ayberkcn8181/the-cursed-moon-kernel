@@ -56,9 +56,18 @@ pub fn create_window(
     wm::create(title, x, y, width, height, false).ok_or(GuiError::TooManyWindows)
 }
 
-/// Pencerenin piksel tamponunun kullanici alanindaki adresi.
+/// Pencerenin piksel tamponunun **cagiran surecin** adres uzayindaki adresi.
+///
+/// Sahiplik denetimi sart: tampon artik yalnizca sahibinin adres uzayina
+/// eslendigi icin baska bir surece adresi vermek zaten ise yaramazdi, ama
+/// acikca reddetmek hatayi sessiz bir page fault yerine anlasilir bir
+/// donus degerine cevirir.
 pub fn window_buffer(id: usize) -> Result<usize, GuiError> {
-    wm::get(id).filter(|w| w.used).map(|w| w.buffer).ok_or(GuiError::BadWindow)
+    let caller = crate::level0a::core::scheduler::current_id();
+    wm::get(id)
+        .filter(|w| w.used && w.owner == caller && w.user_addr != 0)
+        .map(|w| w.user_addr)
+        .ok_or(GuiError::BadWindow)
 }
 
 /// Pencerenin (genislik, yukseklik) bilgisi -- tek bir kelimede paketli.

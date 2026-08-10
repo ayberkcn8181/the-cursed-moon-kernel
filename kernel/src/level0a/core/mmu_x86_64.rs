@@ -200,5 +200,14 @@ pub fn user_pages(_cr3: usize) -> usize {
     0
 }
 
+/// Paylasimli modelde tampon zaten cekirdek haritasinda; yalnizca acilir.
+///
+/// # Safety
+/// `protect_user_range` ile ayni onkosullar.
+pub unsafe fn map_user_frames(_cr3: usize, _vaddr: usize, phys: usize, len: usize) -> bool {
+    protect_user_range(phys, len);
+    true
+}
+
 /// Paylasimli modelde tum kullanici bolgesi tek surece aittir.
 pub const USER_MAP_SIZE: usize = USER_MEM_SIZE;

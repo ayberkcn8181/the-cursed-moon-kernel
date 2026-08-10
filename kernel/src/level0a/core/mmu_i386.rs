@@ -299,6 +299,41 @@ pub unsafe fn map_user_range(cr3: usize, start: usize, len: usize) -> bool {
     true
 }
 
+/// **Var olan** fiziksel sayfalari surecin adres uzayina esler.
+///
+/// `map_user_range`'den farki: cerceve tahsis etmez, verilen fiziksel
+/// bolgeyi (ornegin bir pencere piksel tamponunu) kullanici sanal
+/// adresine baglar. Cekirdek ayni bellegi identity adresinden gormeye
+/// devam eder -- kompozitor tamponu oradan okur.
+///
+/// Bu, paylasimli tamponlarin **tek surece** acilmasini saglar: eskiden
+/// tampon identity haritasinda Ring 3'e aciliyordu, yani her uygulama her
+/// pencerenin piksellerini okuyabiliyordu.
+///
+/// # Safety
+/// `phys` gercekten cekirdege ait, omru pencereden uzun bir bolge
+/// olmalidir; `cr3` bu modulun urettigi bir adres uzayi olmalidir.
+pub unsafe fn map_user_frames(cr3: usize, vaddr: usize, phys: usize, len: usize) -> bool {
+    if len == 0 {
+        return true;
+    }
+    if vaddr % PAGE_SIZE != 0 || phys % PAGE_SIZE != 0 {
+        return false;
+    }
+
+    let pages = (len + PAGE_SIZE - 1) / PAGE_SIZE;
+    for i in 0..pages {
+        let entry = match user_pte(cr3, vaddr + i * PAGE_SIZE) {
+            Some(e) => e,
+            None => return false,
+        };
+        entry.write((phys + i * PAGE_SIZE) as u32 | PTE_PRESENT | PTE_WRITABLE | PTE_USER);
+    }
+
+    flush_tlb();
+    true
+}
+
 /// Bir surecin kullandigi kullanici sayfasi sayisi (kabuk raporu icin).
 pub fn user_pages(cr3: usize) -> usize {
     if cr3 == 0 || cr3 == kernel_cr3() {
