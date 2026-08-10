@@ -167,10 +167,21 @@ impl Window {
     }
 
     /// Kareyi bitirir ve CPU'yu birakir. Kompozitor zaten her karede
-    /// cizdigi icin bu cagri bir "sunum" degil, **zamanlama noktasidir**:
-    /// isbirlikci scheduler'da diger uygulamalarin kosmasini saglar.
+    /// cizdigi icin bu cagri bir "sunum" degil, **zamanlama noktasidir**.
     pub fn flush(&self) {
         unsafe { sys::syscall1(sys::SYS_WIN_FLUSH, self.id) };
+    }
+
+    /// Kareyi bitirir ve bir sonraki kareye kadar **uyur**.
+    ///
+    /// `flush`'tan farki: uyuyan gorev zamanlayici tarafindan hic
+    /// secilmez. Sadece `flush` kullanan bir uygulama, sirasi geldiginde
+    /// hemen bir kare daha cizer -- yani ekranin yenilenme hizindan
+    /// bagimsiz olarak CPU'yu doldurur. `frame(30)` ile 30 ms'lik bir
+    /// kare butcesi verilir.
+    pub fn frame(&self, ms: usize) {
+        unsafe { sys::syscall1(sys::SYS_WIN_FLUSH, self.id) };
+        sys::sleep_ms(ms);
     }
 
     /// Fareyi pencere ic koordinatlarina cevirir; pencere disindaysa None.

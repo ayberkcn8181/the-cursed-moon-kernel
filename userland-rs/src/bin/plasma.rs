@@ -54,6 +54,6 @@ fn main() {
         }
 
         frame = frame.wrapping_add(3);
-        win.flush();
+        win.frame(30);
     }
 }

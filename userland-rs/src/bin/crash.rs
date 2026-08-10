@@ -40,7 +40,7 @@ fn main() {
         if win.poll_key() == b'q' {
             return; // temiz cikis: cokme testinden vazgecildi
         }
-        win.flush();
+        win.frame(30);
     }
 
     // --- Kasitli ihlal ---
@@ -52,6 +52,6 @@ fn main() {
     // Buraya ulasilirsa izolasyon KIRILMIS demektir.
     win.clear(0x00FF_00FF);
     loop {
-        win.flush();
+        win.frame(30);
     }
 }

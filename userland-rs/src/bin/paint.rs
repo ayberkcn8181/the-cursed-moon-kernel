@@ -77,7 +77,7 @@ fn main() {
             }
         }
 
-        win.flush();
+        win.frame(20);
     }
 }
 

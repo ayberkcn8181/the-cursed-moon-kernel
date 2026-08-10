@@ -24,6 +24,7 @@ pub const SYS_WIN_POLL_KEY: usize = 0x504;
 pub const SYS_MOUSE_STATE: usize = 0x505;
 pub const SYS_YIELD: usize = 0x506;
 pub const SYS_WIN_POS: usize = 0x507;
+pub const SYS_SLEEP: usize = 0x508;
 
 pub const STDIN: usize = 0;
 pub const STDOUT: usize = 1;
@@ -118,7 +119,16 @@ pub fn brk(new: usize) -> usize {
     unsafe { syscall1(SYS_BRK, new) }
 }
 
-/// CPU'yu gonullu olarak birakir -- kooperatif scheduler'in dondugu nokta.
+/// CPU'yu gonullu olarak birakir.
 pub fn yield_now() {
     unsafe { syscall0(SYS_YIELD) };
+}
+
+/// Sureci en az `ms` milisaniye uyutur.
+///
+/// `yield`'den farki: uyuyan gorev zamanlayici tarafindan **hic
+/// secilmez**, dolayisiyla CPU'yu gercekten birakir. Cozunurluk PIT
+/// hizina baglidir (100 Hz -> 10 ms).
+pub fn sleep_ms(ms: usize) {
+    unsafe { syscall1(SYS_SLEEP, ms) };
 }

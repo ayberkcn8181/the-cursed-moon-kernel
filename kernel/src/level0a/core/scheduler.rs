@@ -23,6 +23,8 @@ pub enum TaskState {
     Unused,
     Ready,
     Running,
+    /// Belirli bir PIT tick'ine kadar zamanlanmaz (`sleep`).
+    Blocked,
     Terminated,
 }
 
@@ -44,6 +46,8 @@ pub struct Task {
     /// Baglam degisiminde yuklenir; boylece her Ring 3 sureci kendi
     /// kullanici bellegini gorur (bkz. `core::mmu`).
     pub address_space: usize,
+    /// `Blocked` iken: bu PIT tick'inde uyandirilir.
+    pub wake_tick: u32,
 }
 
 impl Task {
@@ -56,6 +60,7 @@ impl Task {
             user_resume: 0,
             in_user_mode: false,
             address_space: 0,
+            wake_tick: 0,
         }
     }
 }
@@ -108,6 +113,7 @@ pub fn spawn(name: &'static str, entry: extern "C" fn() -> !) -> Option<usize> {
         (*tasks.add(index)).user_resume = 0;
         (*tasks.add(index)).in_user_mode = false;
         (*tasks.add(index)).address_space = 0;
+        (*tasks.add(index)).wake_tick = 0;
 
         TASK_COUNT.store(index + 1, Ordering::Relaxed);
         Some(index)
@@ -244,6 +250,7 @@ pub fn terminate_current() -> ! {
 
 fn pick_next(current: usize) -> usize {
     let count = TASK_COUNT.load(Ordering::Relaxed);
+    wake_expired(count);
     unsafe {
         let tasks = core::ptr::addr_of!(TASKS) as *const Task;
         for offset in 1..=count {
@@ -254,6 +261,76 @@ fn pick_next(current: usize) -> usize {
         }
     }
     current
+}
+
+/// Suresi dolan uyuyan gorevleri hazir hale getirir.
+///
+/// Uyandirmayi **secim aninda** yapmak, ayri bir zamanlayici kuyruguna
+/// gerek birakmaz: gorev sayisi kucuk oldugu icin dogrusal tarama
+/// kuyruk yonetiminden ucuzdur ve zaman kaymasi olusturmaz.
+fn wake_expired(count: usize) {
+    let now = crate::level0a::pit::ticks();
+    unsafe {
+        let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+        for i in 0..count {
+            let task = &mut *tasks.add(i);
+            if task.state != TaskState::Blocked {
+                continue;
+            }
+            // Tick sayaci sarsa bile dogru calissin diye fark uzerinden
+            // karsilastirilir.
+            if now.wrapping_sub(task.wake_tick) < 0x8000_0000 {
+                task.state = TaskState::Ready;
+            }
+        }
+    }
+}
+
+/// Calisan gorevi `ticks` PIT tik'i boyunca uykuya alir.
+///
+/// Uyuyan gorev `pick_next` tarafindan **atlanir**; suresi dolunca
+/// `wake_expired` onu yeniden hazir yapar. Idle gorevi uyutulmaz --
+/// masaustu dongusudur ve her zaman kosabilir olmalidir, ayrica uyanacak
+/// baska gorev kalmadiginda sistemi ilerletecek tek akis odur.
+pub fn sleep_ticks(ticks: u32) {
+    let current = CURRENT.load(Ordering::Relaxed);
+    if current == 0 || ticks == 0 {
+        yield_now();
+        return;
+    }
+
+    let wake = crate::level0a::pit::ticks().wrapping_add(ticks);
+    crate::arch::cpu::without_interrupts(|| unsafe {
+        let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+        (*tasks.add(current)).wake_tick = wake;
+        (*tasks.add(current)).state = TaskState::Blocked;
+    });
+
+    // Idle her zaman hazir oldugu icin `yield_now` mutlaka baska bir
+    // goreve gecer; bu dongu ancak uyandirildiktan sonra kirilir.
+    loop {
+        yield_now();
+        let now = crate::level0a::pit::ticks();
+        if now.wrapping_sub(wake) < 0x8000_0000 {
+            break;
+        }
+    }
+
+    crate::arch::cpu::without_interrupts(|| unsafe {
+        let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+        (*tasks.add(current)).state = TaskState::Running;
+    });
+}
+
+/// Kac gorev su an uyuyor (kabuk raporu icin).
+pub fn sleeping_count() -> usize {
+    let count = TASK_COUNT.load(Ordering::Relaxed);
+    unsafe {
+        let tasks = core::ptr::addr_of!(TASKS) as *const Task;
+        (0..count)
+            .filter(|i| (*tasks.add(*i)).state == TaskState::Blocked)
+            .count()
+    }
 }
 
 /// Calisan gorevin numarasi. Level-0b2'nin Yuk Dengeleyicisi cagrilari

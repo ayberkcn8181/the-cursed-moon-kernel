@@ -55,6 +55,7 @@ fn main() {
         }
 
         frame += 1;
+        // Bilerek `flush` (uyku YOK): bu uygulamanin amaci acgozlu olmak.
         win.flush();
     }
 }

@@ -198,6 +198,7 @@ fn state_name(state: scheduler::TaskState) -> &'static str {
         scheduler::TaskState::Unused => "bos",
         scheduler::TaskState::Ready => "hazir",
         scheduler::TaskState::Running => "calisiyor",
+        scheduler::TaskState::Blocked => "uyuyor",
         scheduler::TaskState::Terminated => "bitti",
     }
 }
@@ -263,7 +264,9 @@ fn execute(line: &str) {
             write_num(scheduler::switch_count());
             write_str("  (zorla: ");
             write_num(scheduler::preemptions());
-            write_line(")");
+            write_str(")  uyuyan: ");
+            write_num(scheduler::sleeping_count());
+            newline();
         }
         "top" => {
             write_str("son saniye -- kota ");

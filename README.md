@@ -81,6 +81,7 @@ POSIX/NT'de karsiligi olmayan islevler icin `0x500+` araligi ayrildi:
 | 0x505 | `mouse_state()` | fare konumu + tus durumu |
 | 0x506 | `yield()` | CPU'yu birak (pencere gerektirmez) |
 | 0x507 | `win_pos(id)` | (x<<16)\|y -- pencere suruklendiginde tazelenir |
+| 0x508 | `sleep(ms)` | sureci uyut (zamanlayici hic secmez) |
 
 Pencere tamponu **yalnizca sahibinin** adres uzayina eslenir (bkz. "Surec
 basina adres uzayi"); uygulama piksellerini kendisi yazar, cekirdek
@@ -574,6 +575,40 @@ hala hizmet bekler ve bir daha IRQ0 gelmez), sonra
 
 Kesme kapisi IF=0 ile girildigi icin ic ice preemption olmaz;
 `without_interrupts` bolgeleri de dogal olarak korunur.
+
+### Uyku: `TaskState::Blocked`
+
+Preemption CPU'yu adil bolusturur ama uygulamalarin **istemedigi** zamani
+geri vermez: sadece `flush` cagiran bir GUI dongusu sirasi geldiginde
+hemen bir kare daha cizer, yani ekranin yenilenme hizindan bagimsiz olarak
+CPU'yu doldurur.
+
+`sleep` (0x508) bunu kapatir. Uyuyan gorev `pick_next` tarafindan **hic
+secilmez**; suresi dolunca `wake_expired` onu yeniden hazir yapar.
+Uyandirmayi secim aninda yapmak ayri bir zamanlayici kuyruguna gerek
+birakmiyor -- gorev sayisi kucuk oldugu icin dogrusal tarama kuyruk
+yonetiminden ucuz.
+
+Userland tarafinda tek satir:
+
+```rust
+win.frame(30);   // flush + 30 ms uyku
+```
+
+```
+tcmk> ps
+   id durum      ad            cagri  adres-uzayi
+    2 uyuyor     paint          3635  0x01000000 (191 sayfa)
+    3 hazir      plasma         2018  0x01082000 (187 sayfa)
+    4 uyuyor     plasma          405  0x01104000 (187 sayfa)
+    5 uyuyor     spin             81  0x01186000 (164 sayfa)
+baglam degisimi: 6056  (zorla: 2943)  uyuyan: 3
+```
+
+Idle gorevi uyutulmaz: masaustu dongusudur ve uyanacak baska gorev
+kalmadiginda sistemi ilerletecek tek akistir. `sleep_ticks`'in dongusu de
+bu garantiye dayanir -- idle her zaman hazir oldugu icin `yield_now`
+mutlaka baska bir goreve gecer.
 
 ### Bolunemez isler: `preempt_disable`
 

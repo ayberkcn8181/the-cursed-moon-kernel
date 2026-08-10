@@ -41,7 +41,7 @@ fn main() {
             break;
         }
         frame += 1;
-        win.flush();
+        win.frame(30);
 
         // --- Saf hesap: syscall yok, yield yok ---
         let mut acc = frame;

@@ -30,6 +30,7 @@ pub const SYS_WIN_POLL_KEY: u32 = 0x504;
 pub const SYS_MOUSE_STATE: u32 = 0x505;
 pub const SYS_YIELD: u32 = 0x506;
 pub const SYS_WIN_POS: u32 = 0x507;
+pub const SYS_SLEEP: u32 = 0x508;
 
 // Linux syscall numaralari MIMARIYE GORE DEGISIR -- ayni isim, farkli sayi.
 // Bunu tek bir kumeyle gecistirmek Faz 4'te gercek bir hataya yol acti:
@@ -169,6 +170,14 @@ pub fn dispatch(frame: &mut SyscallFrame) {
         }
         SYS_YIELD => {
             crate::level0a::core::scheduler::yield_now();
+            frame.set_return(0);
+            return;
+        }
+        SYS_SLEEP => {
+            // arg1 = milisaniye. PIT 100 Hz oldugu icin cozunurluk 10 ms;
+            // sifirdan buyuk her istek en az bir tik surer.
+            let ticks = ((arg1 as u32) / 10).max(1);
+            crate::level0a::core::scheduler::sleep_ticks(ticks);
             frame.set_return(0);
             return;
         }
