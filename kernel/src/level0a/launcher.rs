@@ -117,5 +117,8 @@ extern "C" fn app_task() -> ! {
         None => crate::println!("[launcher] baslatilacak uygulama bulunamadi."),
     }
 
+    // Uygulama bitti: penceresi de kapanmali. Adres uzayini `process`
+    // zaten birakti.
+    crate::level0a::wm::close_owned_by(scheduler::current_id());
     scheduler::terminate_current()
 }

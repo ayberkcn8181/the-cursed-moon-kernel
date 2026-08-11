@@ -376,17 +376,29 @@ pub fn terminate(index: usize) -> Result<(), &'static str> {
     if index == current_id() {
         return Err("calisan gorev bu yoldan sonlandirilamaz");
     }
-    crate::arch::cpu::without_interrupts(|| unsafe {
+    let space = crate::arch::cpu::without_interrupts(|| unsafe {
         let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
         match (*tasks.add(index)).state {
             TaskState::Unused => Err("gorev yok"),
             TaskState::Terminated => Err("gorev zaten sonlandirilmis"),
             _ => {
                 (*tasks.add(index)).state = TaskState::Terminated;
-                Ok(())
+                let space = (*tasks.add(index)).address_space;
+                (*tasks.add(index)).address_space = 0;
+                Ok(space)
             }
         }
-    })
+    })?;
+
+    // Gorevin izleri: penceresi ekranda kalirsa artik kimsenin cizmedigi
+    // olu bir dikdortgen olur; adres uzayi birakilmazsa cerceveler sizar.
+    // Normal cikista bunlari surecin kendi yolu yapar (bkz.
+    // `level0b1::process`), disaridan oldurmede buraya duser.
+    crate::level0a::wm::close_owned_by(index);
+    if space != 0 {
+        unsafe { crate::level0a::core::mmu::destroy_user_space(space) };
+    }
+    Ok(())
 }
 
 pub fn current_name() -> &'static str {

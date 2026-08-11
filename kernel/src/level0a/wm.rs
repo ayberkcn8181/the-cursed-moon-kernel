@@ -82,6 +82,44 @@ static DRAG_DY: AtomicUsize = AtomicUsize::new(0);
 /// Kabuk penceresinin kimligi (icerigini kabuk modulu cizer).
 static SHELL_WINDOW: AtomicUsize = AtomicUsize::new(usize::MAX);
 
+/// Kapanmis (yeniden kullanilabilir) bir pencere yuvasi.
+fn free_slot(count: usize) -> Option<usize> {
+    unsafe {
+        let windows = core::ptr::addr_of!(WINDOWS) as *const Window;
+        (0..count).find(|i| !(*windows.add(*i)).used)
+    }
+}
+
+/// Bir gorevin tum pencerelerini kapatir.
+///
+/// Surec oldugunde (normal cikis ya da `kill`) penceresi ekranda kalirsa
+/// artik kimsenin cizmedigi olu bir dikdortgen olur; tamponu da bosuna
+/// tutulur. Yuva serbest birakilir, `create` onu yeniden kullanir.
+pub fn close_owned_by(owner: usize) -> usize {
+    crate::arch::cpu::without_interrupts(|| unsafe {
+        let count = WINDOW_COUNT.load(Ordering::Relaxed);
+        let windows = core::ptr::addr_of_mut!(WINDOWS) as *mut Window;
+        let mut closed = 0;
+        for i in 0..count {
+            let w = &mut *windows.add(i);
+            if !w.used || w.system || w.owner != owner {
+                continue;
+            }
+            w.used = false;
+            w.user_addr = 0;
+            closed += 1;
+            if FOCUSED.load(Ordering::Relaxed) == i {
+                // Odagi kabuga geri ver; aksi halde tuslar bosluga gider.
+                FOCUSED.store(SHELL_WINDOW.load(Ordering::Relaxed), Ordering::Relaxed);
+            }
+            if DRAG_WINDOW.load(Ordering::Relaxed) == i {
+                DRAG_WINDOW.store(usize::MAX, Ordering::Relaxed);
+            }
+        }
+        closed
+    })
+}
+
 /// Bir gorevin halihazirda kac penceresi var (kullanici slot secimi icin).
 fn owned_window_count(owner: usize) -> usize {
     let count = WINDOW_COUNT.load(Ordering::Relaxed);
@@ -119,7 +157,13 @@ pub fn start() {
 pub fn create(title: &str, x: usize, y: usize, width: usize, height: usize, system: bool) -> Option<usize> {
     crate::arch::cpu::without_interrupts(|| unsafe {
         let count = WINDOW_COUNT.load(Ordering::Relaxed);
-        if count >= MAX_WINDOWS || width == 0 || height == 0 {
+        if width == 0 || height == 0 {
+            return None;
+        }
+        // Kapanmis bir pencerenin yuvasi varsa once o kullanilir; aksi
+        // halde uygulamalar acilip kapandikca tablo dolar.
+        let slot = free_slot(count);
+        if slot.is_none() && count >= MAX_WINDOWS {
             return None;
         }
 
@@ -177,19 +221,21 @@ pub fn create(title: &str, x: usize, y: usize, width: usize, height: usize, syst
             win.title[i] = b;
             win.title_len = i + 1;
         }
-        windows.add(count).write(win);
+        let index = slot.unwrap_or(count);
+        windows.add(index).write(win);
 
-        let z = core::ptr::addr_of_mut!(Z_ORDER) as *mut usize;
-        z.add(count).write(count);
-
-        WINDOW_COUNT.store(count + 1, Ordering::Relaxed);
+        if slot.is_none() {
+            let z = core::ptr::addr_of_mut!(Z_ORDER) as *mut usize;
+            z.add(count).write(count);
+            WINDOW_COUNT.store(count + 1, Ordering::Relaxed);
+        }
         // Yeni pencere odagi CALMAZ: aksi halde arka planda acilan bir
         // uygulama, kullanicinin yazdigi kabuktan odagi kapiyor. Odak
         // yalnizca tiklama ile (veya `focus()` ile acikca) degisir.
         if FOCUSED.load(Ordering::Relaxed) == usize::MAX {
-            FOCUSED.store(count, Ordering::Relaxed);
+            FOCUSED.store(index, Ordering::Relaxed);
         }
-        Some(count)
+        Some(index)
     })
 }
 

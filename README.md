@@ -710,6 +710,24 @@ gidiyor; bu yuzden ayri bir cerceve ayiricisi eklendi. `mem` sayaci
 tutuyor: dort surec = 520 cerceve (surec basina 128 veri + 1 sayfa dizini
 + 1 sayfa tablosu).
 
+### Surec olurken
+
+Bir surec bittiginde (normal cikis ya da `kill`) uc sey birakilir:
+adres uzayi, cerceveleri ve **pencereleri**. Pencere kapatilmazsa
+ekranda artik kimsenin cizmedigi olu bir dikdortgen kalir ve tamponu
+bosuna tutulur.
+
+```
+tcmk> mem                       tcmk> kill 4
+cerceve havuzu: 520 / 4096      tcmk> kill 5
+                                tcmk> mem
+                                cerceve havuzu: 260 / 4096 (tepe 520)
+```
+
+Iki surec = 260 cerceve, birebir geri dondu. Pencere yuvalari da serbest
+kalir; `create` once bos yuva arar, aksi halde uygulamalar acilip
+kapandikca sekiz pencerelik tablo dolardi.
+
 ### Sinirlar
 
 - Surec basina **512 KiB** eslenir (`USER_MAP_SIZE`), tum 2 MiB degil.
