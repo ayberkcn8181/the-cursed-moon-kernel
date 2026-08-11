@@ -29,6 +29,7 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 7b | **Ithal tablosu (IAT)**: `KERNEL32.dll` cozumu + thunk uretimi | ✅ (i386) |
 | 7c | **Ordinal ile ithal** (adsiz ihracatlar) | ✅ (i386) |
 | 4 | **x86_64 portu**: Long Mode, 4 seviyeli sayfalama, ELF64, `syscall` | ✅ |
+| 4b | **x86_64 Rust userland**: ayni kaynak, `syscall` ABI, GUI | ✅ |
 | 13 | **Framebuffer/grafik**: 1024x768x32, bitmap font, cift tampon | ✅ (i386) |
 | 14 | **Pencere yoneticisi**: kompozitor, fare, surukleme, GUI syscall'lari | ✅ (i386) |
 | 6 | AArch64 portu (EL1/EL0, GIC, `svc #0`) | ⏳ yapilmadi |
@@ -111,12 +112,34 @@ yani PE ve ELF uygulamalari **ayni pencere yoneticisini** paylasir.
 | Linux syscall | `int 0x80` | `syscall` komutu (MSR: EFER/STAR/LSTAR/SFMASK) |
 | Windows syscall | `int 0x2E` | — (PE32+ Faz 7'nin 64-bit ayagi) |
 | Ikili formatlar | ELF32 + PE32 | ELF64 |
+| Ring 3 uygulamalari | Rust (ELF32) + Rust (PE32) | Rust (ELF64) |
 | Kesme denetleyici | PIC 8259A | PIC 8259A (APIC ileride) |
 
 ```
 make ARCH=i386   run
 make ARCH=x86_64 run
 ```
+
+### x86_64 userland
+
+`make userland-x86_64` ayni `userland-rs` kaynagini ELF64 olarak derler.
+Uygulama kodunun tek satiri degismez; degisen yalnizca `sys.rs`'in icidir:
+
+| | i386 | x86_64 |
+|---|---|---|
+| giris | `int 0x80` | `syscall` komutu |
+| numara | EAX | RAX |
+| arg1..3 | EBX/ECX/EDX | RDI/RSI/RDX |
+
+Linux numaralari da mimariye gore ayrilir (`write` i386'da 4, x86_64'te
+1) -- bunu tek kumeyle gecistirmek cekirdek tarafinda daha once gercek
+bir hataya yol acmisti, o yuzden userland'de de ayri tutuluyor.
+
+![x86_64 Rust userland](docs/screenshot-x86_64-userland.png)
+
+Ekrandaki Plasma bir **ELF64** ikilisidir, Ring 3'te kosar ve cizim
+cagrilarini `syscall` ile yapar. Onceki durum yalnizca elle kodlanmis bir
+"hello" idi; artik i386'daki uygulamalarin aynisi calisiyor.
 
 Ortak katmanlar (`level0a`, `level0b1`, `level0b2`) **tek bir kod tabanidir**;
 mimariye ozel her sey `arch/<arch>/`, `level0a/gdt/<arch>.rs`,
@@ -1294,8 +1317,9 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
 
 - **Zamanlama round-robin ve onceliksiz.** Preemption var ama gorevler
   esit; oncelik, gercek zamanli sinif ve `nice` yok.
-- **GUI yalnizca i386'da.** x86_64 cekirdegi calisir ve framebuffer'i
-  eslerse de GUI uygulamalari su an yalnizca ELF32 olarak uretiliyor.
+- **x86_64'te surec basina adres uzayi yok.** Paylasimli tek uzay
+  modeli surdugu icin ayni anda tek Ring 3 uygulamasi guvenlidir;
+  `fork`/`waitpid` de bu yuzden yalnizca i386'dadir.
 - **`fork` copy-on-write degil.** Sayfalar cagri aninda tamamen
   kopyalanir; COW icin sayfalari salt okunur isaretleyip page fault'ta
   ayirmak gerekir. Dogruluk degil, maliyet farki.

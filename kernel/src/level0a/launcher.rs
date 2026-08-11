@@ -72,6 +72,10 @@ fn take_exec(task: usize) -> Option<&'static str> {
 /// derlemeden calisir.
 static KNOWN_APPS: &[(&str, &str, &str)] = &[
     // (kisa ad, tam yol, gorev adi)
+    //
+    // Liste her iki mimaride de aynidir; VFS'te hangi ikilinin durdugu
+    // (ELF32 mi ELF64 mu) mimariye gore degisir, `resolve` yalnizca yola
+    // bakar. Yani `run plasma` iki mimarida de calisir.
     ("paint", "/bin/paint", "paint"),
     ("plasma", "/bin/plasma", "plasma"),
     ("crash", "/bin/crash", "crash"),

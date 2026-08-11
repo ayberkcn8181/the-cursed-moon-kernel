@@ -83,8 +83,21 @@ static TWINS_ELF: &[u8] = include_bytes!("../../userland/twins.elf");
 static RELAY_ELF: &[u8] = include_bytes!("../../userland/relay.elf");
 
 /// Linux (ELF64, x86_64) kullanici programi -- `tools/gen_hello_elf64.py`.
+/// Elle kodlanmis en kucuk ELF64: yukleyicinin dar yolunu sinar.
 #[cfg(target_arch = "x86_64")]
 static HELLO_ELF64: &[u8] = include_bytes!("../../userland/hello64.elf");
+
+/// **Rust ile yazilmis** x86_64 uygulamalari. i386'dakilerle ayni kaynak;
+/// degisen yalnizca sistem cagrisi bicimi (`syscall` komutu) ve Linux
+/// numaralaridir (bkz. `userland-rs/src/sys.rs`).
+#[cfg(target_arch = "x86_64")]
+static HELLO64_RS: &[u8] = include_bytes!("../../userland/hello.elf64");
+#[cfg(target_arch = "x86_64")]
+static PLASMA64: &[u8] = include_bytes!("../../userland/plasma.elf64");
+#[cfg(target_arch = "x86_64")]
+static PAINT64: &[u8] = include_bytes!("../../userland/paint.elf64");
+#[cfg(target_arch = "x86_64")]
+static NOTES64: &[u8] = include_bytes!("../../userland/notes.elf64");
 
 /// Kullanici programlarinin VFS uzerinden okudugu test dosyasi.
 static BOOT_MSG: &[u8] = b"/boot/msg.txt: VFS uzerinden okundu (RAMFS).\n";
@@ -111,6 +124,10 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
 #[cfg(target_arch = "x86_64")]
 static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/hello", HELLO_ELF64),
+    ("/bin/hello64", HELLO64_RS),
+    ("/bin/plasma", PLASMA64),
+    ("/bin/paint", PAINT64),
+    ("/bin/notes", NOTES64),
     ("/boot/msg.txt", BOOT_MSG),
 ];
 

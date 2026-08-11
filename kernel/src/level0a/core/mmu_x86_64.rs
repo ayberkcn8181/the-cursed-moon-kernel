@@ -33,12 +33,48 @@ pub const USER_MEM_SIZE: usize = 0x0020_0000; // 2 MiB (tam bir 2 MiB sayfa)
 /// Boot stub'inin ilk 1 GiB icin kurdugu esleme.
 const IDENTITY_MAPPED_BYTES: usize = 1024 * 1024 * 1024;
 
-/// Kullanici bolgesini kaplayan 2 MiB'lik girdinin yerine gecen
-/// 4 KiB'lik sayfa tablosu.
+/// Bir 2 MiB'lik girdinin yerine gecen 4 KiB'lik sayfa tablosu.
 #[repr(align(4096))]
 struct PageTable(#[allow(dead_code)] [u64; ENTRIES]);
 
-static mut USER_PT: PageTable = PageTable([0; ENTRIES]);
+/// Bolunmus 2 MiB girdileri icin tablo havuzu.
+///
+/// **Neden havuz:** basta tek bir statik tablo vardi ve "kullanici
+/// bolgesi" icin yeterli sanilmisti. Degildi -- Ring 3'e acilan tek sey
+/// program imaji degil: pencere piksel tamponlari da aciliyor ve onlar
+/// cekirdek yiginindan (baska bir 2 MiB bolgesinden) geliyor. Tek tablo
+/// paylasildiginda **ikinci bolme birincinin tablosunu caliyordu**: PD[6]
+/// hala eski tabloyu gosterirken tablonun icerigi baska bir bolgeye
+/// ait fiziksel adreslerle doluyor, yani calisan programin kod sayfasi
+/// ayagindan kayiyordu. Belirti, uygulamanin ilk pencere cagrisindan
+/// hemen sonra kendi kodunda page fault almasiydi.
+const MAX_SPLITS: usize = 8;
+static mut SPLIT_TABLES: [PageTable; MAX_SPLITS] =
+    [const { PageTable([0; ENTRIES]) }; MAX_SPLITS];
+/// Her tablonun hangi PD girdisine ait oldugu (`usize::MAX` = bos).
+static mut SPLIT_OWNER: [usize; MAX_SPLITS] = [usize::MAX; MAX_SPLITS];
+
+/// `pd_index` icin tablo dondurur; yoksa havuzdan ayirir.
+///
+/// # Safety
+/// Yalnizca sayfalama kurulumu sirasinda, kesmeler kapaliyken.
+unsafe fn split_table_for(pd_index: usize) -> Option<*mut u64> {
+    let owners = core::ptr::addr_of_mut!(SPLIT_OWNER) as *mut usize;
+    let tables = core::ptr::addr_of_mut!(SPLIT_TABLES) as *mut PageTable;
+
+    for i in 0..MAX_SPLITS {
+        if owners.add(i).read() == pd_index {
+            return Some(tables.add(i) as *mut u64);
+        }
+    }
+    for i in 0..MAX_SPLITS {
+        if owners.add(i).read() == usize::MAX {
+            owners.add(i).write(pd_index);
+            return Some(tables.add(i) as *mut u64);
+        }
+    }
+    None
+}
 
 /// Long Mode'da sayfalama zaten aciktir (aksi halde buraya gelinemezdi).
 /// Bu fonksiyon yalnizca durumu dogrular ve raporlar.
@@ -93,8 +129,18 @@ pub unsafe fn protect_user_range(start: usize, len: usize) {
         let pd_entry = pd_entry_ptr.read();
 
         let pt_phys = if pd_entry & PTE_HUGE != 0 {
-            // 2 MiB'lik girdiyi 4 KiB'lik tabloya bol.
-            let pt = core::ptr::addr_of_mut!(USER_PT) as *mut u64;
+            // 2 MiB'lik girdiyi 4 KiB'lik tabloya bol. Her PD girdisi
+            // KENDI tablosunu alir (bkz. `split_table_for`).
+            let pt = match split_table_for(pd_index) {
+                Some(p) => p,
+                None => {
+                    crate::println!(
+                        "[LEVEL-0a] mmu: bolme tablosu havuzu doldu (PD #{}).",
+                        pd_index
+                    );
+                    return;
+                }
+            };
             let base = (pd_index * LARGE_PAGE_SIZE) as u64;
             for i in 0..ENTRIES {
                 let phys = base + (i * PAGE_SIZE) as u64;

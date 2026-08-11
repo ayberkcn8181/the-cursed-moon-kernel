@@ -31,7 +31,7 @@ TARGET_JSON := $(ROOT_DIR)/targets/$(RUST_TARGET).json
 KERNEL_ELF := $(TARGET_DIR)/$(RUST_TARGET)/$(CARGO_OUT_DIR)/tcmk-kernel
 
 .DEFAULT_GOAL := all
-.PHONY: all iso run disk run-disk info clean bootloader userland userland-rust userland-win userland-legacy
+.PHONY: all iso run disk run-disk info clean bootloader userland userland-rust userland-x86_64 userland-win userland-legacy
 
 # Cekirdek 1. asamayi include_bytes! ile gomdugu icin onyukleyici
 # cekirdekten ONCE uretilmelidir.
@@ -114,7 +114,7 @@ WIN_APPS := winclock winpad
 WIN_LIB_DIR := $(ROOT_DIR)/build/winlib
 WIN_DEFS := kernel32 tcmkgui
 
-userland: userland-rust userland-win userland-legacy
+userland: userland-rust userland-x86_64 userland-win userland-legacy
 
 $(WIN_LIB_DIR)/stamp: $(patsubst %,$(USERLAND_DIR)/win/%.def,$(WIN_DEFS))
 	@mkdir -p $(WIN_LIB_DIR)
@@ -139,6 +139,26 @@ userland-rust:
 			--target-dir $(USERLAND_TARGET_DIR) \
 			-- -C link-arg=--image-base=$(USER_BASE) ); \
 		cp $(USERLAND_TARGET_DIR)/i686-tcmk/release/$$app $(ROOT_DIR)/userland/$$app.elf; \
+	done
+
+# x86_64 Ring 3 uygulamalari. Ayni kaynak, ayni `tcmk` kutuphanesi;
+# degisen yalnizca sistem cagrisi bicimi (`syscall` komutu) ve Linux
+# numaralari -- ikisi de `sys.rs` icinde cfg ile ayrilmistir. Cekirdek
+# hedefinin JSON'u aynen kullanilir: userland icin farkli olmasi gereken
+# tek sey taban adresidir, o da bir baglayici argumani.
+USER64_TARGET_DIR := $(TARGET_DIR)/userland64
+# fork/waitpid ve PE tarafi i386'ya ozgu oldugu icin liste daha kisa.
+USER64_APPS := hello plasma paint notes
+
+userland-x86_64:
+	@mkdir -p $(ROOT_DIR)/userland
+	@set -e; for app in $(USER64_APPS); do \
+		echo "  [userland] $$app (ELF64, taban $(USER_BASE))"; \
+		( cd $(USERLAND_DIR) && cargo rustc --release --bin $$app \
+			--target $(ROOT_DIR)/targets/x86_64-tcmk.json \
+			--target-dir $(USER64_TARGET_DIR) \
+			-- -C link-arg=--image-base=$(USER_BASE) ); \
+		cp $(USER64_TARGET_DIR)/x86_64-tcmk/release/$$app $(ROOT_DIR)/userland/$$app.elf64; \
 	done
 
 userland-win: $(WIN_LIB_DIR)/stamp

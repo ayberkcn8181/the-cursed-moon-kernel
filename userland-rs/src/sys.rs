@@ -1,22 +1,53 @@
-//! Ham sistem cagrisi katmani -- `int 0x80` (doc S.6 ABI).
+//! Ham sistem cagrisi katmani (doc S.6 ABI).
 //!
-//! Sozlesme: `EAX` = numara, `EBX/ECX/EDX` = arg1..3, donus `EAX`'te.
-//! Cekirdek tarafinda bu cagrilar once **Level-0b2 Dispatcher**'a duser,
-//! oradan **Level-0b1 POSIX cevirmenine** gider ve nihayet Level-0a'nin
-//! notr cekirdek API'sine baglanir. Uygulama bu zinciri hic bilmez.
+//! Cagri yolu iki mimaride de aynidir -- once **Level-0b2 Dispatcher**,
+//! oradan **Level-0b1 POSIX cevirmeni**, nihayet Level-0a'nin notr
+//! cekirdek API'si. Uygulama bu zinciri hic bilmez. Degisen yalnizca
+//! cekirdege giris bicimidir:
+//!
+//! | | i386 | x86_64 |
+//! |---|---|---|
+//! | giris | `int 0x80` | `syscall` komutu |
+//! | numara | EAX | RAX |
+//! | arg1..3 | EBX/ECX/EDX | RDI/RSI/RDX |
+//! | donus | EAX | RAX |
+//!
+//! **Numaralar da mimariye gore degisir**: ayni isim, farkli sayi. Bunu
+//! tek kumeyle gecistirmek cekirdek tarafinda gercek bir hataya yol
+//! acmisti (x86_64 `write`(=1), i386'nin `exit`'i sanilmisti), o yuzden
+//! burada da ayri tutulur.
 
 use core::arch::asm;
 
-// --- Linux (i386) numaralari ---
-pub const SYS_EXIT: usize = 1;
-pub const SYS_FORK: usize = 2;
-pub const SYS_WAITPID: usize = 7;
-pub const SYS_READ: usize = 3;
-pub const SYS_WRITE: usize = 4;
-pub const SYS_OPEN: usize = 5;
-pub const SYS_CLOSE: usize = 6;
-pub const SYS_BRK: usize = 45;
-pub const SYS_PIPE: usize = 42;
+// --- Linux numaralari (mimariye gore) ---
+#[cfg(target_arch = "x86")]
+pub use i386_numbers::*;
+#[cfg(target_arch = "x86_64")]
+pub use x86_64_numbers::*;
+
+#[cfg(target_arch = "x86")]
+mod i386_numbers {
+    pub const SYS_EXIT: usize = 1;
+    pub const SYS_FORK: usize = 2;
+    pub const SYS_READ: usize = 3;
+    pub const SYS_WRITE: usize = 4;
+    pub const SYS_OPEN: usize = 5;
+    pub const SYS_CLOSE: usize = 6;
+    pub const SYS_WAITPID: usize = 7;
+    pub const SYS_PIPE: usize = 42;
+    pub const SYS_BRK: usize = 45;
+}
+
+#[cfg(target_arch = "x86_64")]
+mod x86_64_numbers {
+    pub const SYS_READ: usize = 0;
+    pub const SYS_WRITE: usize = 1;
+    pub const SYS_OPEN: usize = 2;
+    pub const SYS_CLOSE: usize = 3;
+    pub const SYS_BRK: usize = 12;
+    pub const SYS_PIPE: usize = 22;
+    pub const SYS_EXIT: usize = 60;
+}
 
 // --- TCMK'ye ozgu cagrilar (POSIX'te karsiligi yok) ---
 pub const SYS_WIN_CREATE: usize = 0x500;
@@ -38,7 +69,8 @@ pub const STDERR: usize = 2;
 /// edilebildigi icin inline asm'de dogrudan `in("ebx")` kullanilamaz.
 /// Bu yuzden deger genel bir registerdan EBX'e tasinir; eski EBX yigina
 /// alinip geri yuklenir. `nostack` bu yuzden **verilemez**.
-macro_rules! int80 {
+#[cfg(target_arch = "x86")]
+macro_rules! syscall_asm {
     ($n:expr, $a1:expr, $a2:expr, $a3:expr) => {{
         let ret: usize;
         asm!(
@@ -55,33 +87,54 @@ macro_rules! int80 {
     }};
 }
 
+/// x86_64'te `syscall` komutu donus adresini **RCX**'e, RFLAGS'i
+/// **R11**'e yazar; ikisi de cagri sonrasi bozulmus sayilmalidir, yoksa
+/// derleyici onlarda tuttugu degerleri kaybeder.
+#[cfg(target_arch = "x86_64")]
+macro_rules! syscall_asm {
+    ($n:expr, $a1:expr, $a2:expr, $a3:expr) => {{
+        let ret: usize;
+        asm!(
+            "syscall",
+            inlateout("rax") $n => ret,
+            in("rdi") $a1,
+            in("rsi") $a2,
+            in("rdx") $a3,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+        ret
+    }};
+}
+
 /// # Safety
 /// Cagiran, verilen numaranin ve argumanlarin cekirdek sozlesmesine
 /// uydugunu garanti etmelidir (ornegin isaretciler gecerli olmalidir).
 #[inline(always)]
 pub unsafe fn syscall3(n: usize, a1: usize, a2: usize, a3: usize) -> usize {
-    int80!(n, a1, a2, a3)
+    syscall_asm!(n, a1, a2, a3)
 }
 
 /// # Safety
 /// Bkz. [`syscall3`].
 #[inline(always)]
 pub unsafe fn syscall2(n: usize, a1: usize, a2: usize) -> usize {
-    int80!(n, a1, a2, 0usize)
+    syscall_asm!(n, a1, a2, 0usize)
 }
 
 /// # Safety
 /// Bkz. [`syscall3`].
 #[inline(always)]
 pub unsafe fn syscall1(n: usize, a1: usize) -> usize {
-    int80!(n, a1, 0usize, 0usize)
+    syscall_asm!(n, a1, 0usize, 0usize)
 }
 
 /// # Safety
 /// Bkz. [`syscall3`].
 #[inline(always)]
 pub unsafe fn syscall0(n: usize) -> usize {
-    int80!(n, 0usize, 0usize, 0usize)
+    syscall_asm!(n, 0usize, 0usize, 0usize)
 }
 
 // --- Guvenli sarmalayicilar -------------------------------------------
@@ -160,16 +213,22 @@ pub fn sleep_ms(ms: usize) {
 
 /// Sureci ikiye ayirir.
 ///
+/// Yalnizca i386'da vardir: `fork` kopyalanacak bir adres uzayi ister,
+/// x86_64 ise hala paylasimli tek uzay modelindedir (bkz. cekirdekteki
+/// `level0b1::fork`).
+///
 /// **Tek cagri, iki donus**: ebeveynde cocugun gorev kimligi, cocukta
 /// `0`. Cocuk, ebeveynin bellegi kopyalanmis olarak bu satirdan devam
 /// eder -- yani `fork()`'tan sonraki kod iki kez calisir.
 ///
 /// Kaynak yoksa negatif deger doner (`-EAGAIN`).
+#[cfg(target_arch = "x86")]
 pub fn fork() -> isize {
     unsafe { syscall0(SYS_FORK) as isize }
 }
 
 /// `waitpid` secenegi: cocuk bitmemisse bekleme, 0 don.
+#[cfg(target_arch = "x86")]
 pub const WNOHANG: usize = 1;
 
 /// Bir cocuk surecin bitmesini bekler.
@@ -179,11 +238,13 @@ pub const WNOHANG: usize = 1;
 ///
 /// `status`, Linux'un kodlamasini kullanir: normal cikista
 /// `(kod & 0xFF) << 8`. `exit_status` bunu cozer.
+#[cfg(target_arch = "x86")]
 pub fn waitpid(pid: usize, status: &mut u32, options: usize) -> isize {
     unsafe { syscall3(SYS_WAITPID, pid, status as *mut u32 as usize, options) as isize }
 }
 
 /// `WEXITSTATUS`: durum kelimesinden cikis kodunu cikarir.
+#[cfg(target_arch = "x86")]
 pub fn exit_status(status: u32) -> u32 {
     (status >> 8) & 0xFF
 }
