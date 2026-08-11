@@ -33,7 +33,8 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 8 | **Preemptive zamanlama** + uyku durumu (`sleep`) | ✅ |
 | 9 | **Kalici depolama**: ATA PIO, MBR, TCMKFS (yazilabilir) | ✅ (i386) |
 | — | **Kendi onyukleyicisi** + diske kurulum (`install`) | ✅ (i386) |
-| 8+ | fork/execve + sinyaller, musl/busybox | ⏳ yapilmadi |
+| 8 | **`execve`** (surec kendi yerine program yukler) | ✅ (i386) |
+| 8+ | fork + sinyaller, musl/busybox | ⏳ yapilmadi |
 
 ## Grafiksel Alfa
 
@@ -59,6 +60,7 @@ Ekranda gorunenler:
   | bellek/disk | `mem` `disk` `df` `format onayla` `sync` `install onayla` |
   | dosya | `ls` `cat <yol>` `save <yol> <metin>` `cp <kaynak> <hedef>` `rm <yol>` |
   | uygulama/pencere | `apps` `run <ad>` `win` `focus <id>` `mouse` |
+  | uygulamalar | `paint` `plasma` `notes` `menu` `crash` `hog` `spin` |
   | diger | `echo <metin>` `clear` `help` |
 - **Sistem Gunlugu** -- cekirdek kaydinin canli goruntusu (konsol halka
   tamponu her karede pencereye cizilir).
@@ -82,6 +84,7 @@ POSIX/NT'de karsiligi olmayan islevler icin `0x500+` araligi ayrildi:
 | 0x506 | `yield()` | CPU'yu birak (pencere gerektirmez) |
 | 0x507 | `win_pos(id)` | (x<<16)\|y -- pencere suruklendiginde tazelenir |
 | 0x508 | `sleep(ms)` | sureci uyut (zamanlayici hic secmez) |
+| 0x509 | `execve(yol)` | surecin yerine baska bir program yukle |
 
 Pencere tamponu **yalnizca sahibinin** adres uzayina eslenir (bkz. "Surec
 basina adres uzayi"); uygulama piksellerini kendisi yazar, cekirdek
@@ -539,6 +542,39 @@ Launcher artik sabit bir uygulama listesine bagli degil: VFS'te var olan
 her yol calistirilabilir. Yani diske kopyalanan uygulamalar cekirdegi
 yeniden derlemeden calisir.
 
+## `execve`: surec kendi yerine baska bir program yukluyor
+
+![execve](docs/screenshot-execve.png)
+
+`run menu` bir baslatici acar; bir numaraya basinca secilen uygulama
+**menunun yerine** yuklenir. Yeni gorev acilmaz -- ayni gorev numarasi,
+yeni bir adres uzayi:
+
+```
+[launcher] '/bin/menu' sonlandi.
+[launcher] execve -> '/bin/notes'
+[launcher] '/bin/notes' Ring 3'te baslatiliyor.
+```
+
+### Neden "cik ve yerine sunu yukle"
+
+Imaj **yerinde** degistirilemez: surec o anda kendi kodunun icinde
+kosuyor, altindaki sayfalari degistirmek calisan komut akisini yok
+ederdi. Bu yuzden `execve` istegi cekirdekte gorev basina bir yuvaya
+yazilir, surec Ring 3'ten cikar (`sys_exit` ile ayni yol) ve
+`launcher`'in dongusu yeni imaji yukler:
+
+```rust
+while let Some(path) = next {
+    run_from_vfs_dynamic(path);
+    next = take_exec(current_id());   // execve istendi mi?
+}
+```
+
+Adres uzayi bu arada dogal olarak birakilip sifirdan kuruluyor -- zaten
+execve'nin istedigi sey. Surec basina adres uzayi olmadan bu temiz
+olmazdi: eski imajin kalintilari yeni programin altinda kalirdi.
+
 ## Notes: yaz, kaydet, kapat, ac
 
 Ring 3 uygulamasi metnini kendi ciziyor, POSIX `open(O_CREAT)`/`write` ile
@@ -863,9 +899,9 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
   esit; oncelik, gercek zamanli sinif ve `nice` yok.
 - **GUI yalnizca i386'da.** x86_64 cekirdegi calisir ve framebuffer'i
   eslerse de GUI uygulamalari su an yalnizca ELF32 olarak uretiliyor.
-- **`fork`/`execve` yok.** Her surec bos bir adres uzayinda dogar; sureci
-  kopyalamak (fork) ve calisan surecin uzerine yeni imaj yuklemek (execve)
-  Faz 8'in kalan yarisi.
+- **`fork` yok.** `execve` var ama sureci kopyalamak (fork) yok; her surec
+  bos bir adres uzayinda dogar. `fork` icin adres uzayi kopyalama
+  (ya da copy-on-write) gerekiyor.
 - **Surec basina 512 KiB eslenir**, talep uzerine sayfalama yok.
 - **TCMKFS duz bir isim uzayidir**, gercek dizin agaci degil: `/home/x`
   bir yol degil, dosyanin **adidir**. Azami 64 dosya, dosya basina 160 KiB

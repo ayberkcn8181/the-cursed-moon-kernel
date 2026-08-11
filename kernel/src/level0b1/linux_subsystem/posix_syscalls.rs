@@ -31,6 +31,7 @@ pub const SYS_MOUSE_STATE: u32 = 0x505;
 pub const SYS_YIELD: u32 = 0x506;
 pub const SYS_WIN_POS: u32 = 0x507;
 pub const SYS_SLEEP: u32 = 0x508;
+pub const SYS_EXECVE: u32 = 0x509;
 
 // Linux syscall numaralari MIMARIYE GORE DEGISIR -- ayni isim, farkli sayi.
 // Bunu tek bir kumeyle gecistirmek Faz 4'te gercek bir hataya yol acti:
@@ -173,6 +174,24 @@ pub fn dispatch(frame: &mut SyscallFrame) {
             crate::level0a::core::scheduler::yield_now();
             frame.set_return(0);
             return;
+        }
+        SYS_EXECVE => {
+            // arg1 = yol. Imaj YERINDE degistirilemez (surec o anda kendi
+            // kodunda kosuyor); istek kaydedilip Ring 3'ten cikilir,
+            // launcher yeni imaji yukler.
+            let mut storage = [0u8; PATH_MAX];
+            let path = unsafe { copy_user_cstr(arg1, &mut storage) };
+            match path {
+                Some(p) if crate::level0a::core::vfs::lookup(p).is_some() => {
+                    let task = crate::level0a::core::scheduler::current_id();
+                    if crate::level0a::launcher::request_exec(task, p) {
+                        unsafe { kernel_api::exit_to_exec() }
+                    }
+                    -EINVAL
+                }
+                Some(_) => -ENOENT,
+                None => -EFAULT,
+            }
         }
         SYS_SLEEP => {
             // arg1 = milisaniye. PIT 100 Hz oldugu icin cozunurluk 10 ms;

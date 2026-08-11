@@ -127,6 +127,20 @@ pub fn close(fd_num: u32) -> Result<(), KernelError> {
     }
 }
 
+/// `execve` icin Ring 3'ten cikar: gorev **sonlanmaz**.
+///
+/// Cikis yolu `sys_exit` ile aynidir (saklanmis cekirdek baglami geri
+/// yuklenir); fark, `launcher`'in donguye devam edip yeni imaji
+/// yuklemesidir. Surecin eski adres uzayi bu sirada birakilir, yenisi
+/// sifirdan kurulur -- execve'nin zaten istedigi sey.
+///
+/// # Safety
+/// Yalnizca Ring 3 baglamindan, `launcher::request_exec` basarili
+/// olduktan sonra cagrilmalidir.
+pub unsafe fn exit_to_exec() -> ! {
+    crate::arch::cpu::usermode::leave_user_mode()
+}
+
 /// Calisan gorevi/sureci sonlandirir (doc S.6: sys_exit).
 ///
 /// Iki farkli baglam vardir:

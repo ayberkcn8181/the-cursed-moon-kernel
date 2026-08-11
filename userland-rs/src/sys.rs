@@ -25,6 +25,7 @@ pub const SYS_MOUSE_STATE: usize = 0x505;
 pub const SYS_YIELD: usize = 0x506;
 pub const SYS_WIN_POS: usize = 0x507;
 pub const SYS_SLEEP: usize = 0x508;
+pub const SYS_EXECVE: usize = 0x509;
 
 pub const STDIN: usize = 0;
 pub const STDOUT: usize = 1;
@@ -125,6 +126,20 @@ pub fn brk(new: usize) -> usize {
 /// CPU'yu gonullu olarak birakir.
 pub fn yield_now() {
     unsafe { syscall0(SYS_YIELD) };
+}
+
+/// Calisan sureci verilen programla **degistirir**.
+///
+/// Basarili olursa geri donmez: cekirdek eski imaji ve adres uzayini
+/// birakir, ayni gorevde yeni programi yukler. Hata halinde negatif
+/// errno doner (dosya yok, yol gecersiz).
+pub fn execve(path: &str) -> isize {
+    let mut buf = [0u8; 64];
+    if path.len() >= buf.len() {
+        return -22; // -EINVAL
+    }
+    buf[..path.len()].copy_from_slice(path.as_bytes());
+    unsafe { syscall1(SYS_EXECVE, buf.as_ptr() as usize) as isize }
 }
 
 /// Sureci en az `ms` milisaniye uyutur.

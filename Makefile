@@ -95,7 +95,7 @@ USERLAND_DIR := $(ROOT_DIR)/userland-rs
 USERLAND_TARGET_DIR := $(TARGET_DIR)/userland
 USER_BASE := 0x00C00000
 
-USER_APPS := hello paint plasma crash hog spin notes
+USER_APPS := hello paint plasma crash hog spin notes menu
 
 userland: userland-rust userland-legacy
 

@@ -22,6 +22,49 @@ static mut PENDING_LEN: [usize; MAX_PENDING] = [0; MAX_PENDING];
 static PENDING_HEAD: AtomicUsize = AtomicUsize::new(0);
 static PENDING_TAIL: AtomicUsize = AtomicUsize::new(0);
 
+/// `execve` istegi: gorev basina "bir sonraki program" yuvasi.
+///
+/// Ring 3'ten gelen exec cagrisi imaji **yerinde** degistiremez -- surec
+/// o anda kendi kodunun icinde kosuyor. Bunun yerine istek buraya
+/// yazilir, surec Ring 3'ten cikar ve `app_task` dongusu yeni imaji
+/// yukler. Boylece exec, "cik ve yerine sunu yukle" haline gelir; adres
+/// uzayi da dogal olarak sifirdan kurulur (execve semantigi zaten bu).
+static mut EXEC_PATH: [[u8; MAX_PATH]; scheduler::MAX_TASKS] =
+    [[0; MAX_PATH]; scheduler::MAX_TASKS];
+static mut EXEC_LEN: [usize; scheduler::MAX_TASKS] = [0; scheduler::MAX_TASKS];
+
+/// Gorev icin `execve` istegi kaydeder.
+pub fn request_exec(task: usize, path: &str) -> bool {
+    if task >= scheduler::MAX_TASKS || path.is_empty() || path.len() >= MAX_PATH {
+        return false;
+    }
+    crate::arch::cpu::without_interrupts(|| unsafe {
+        let slot = (core::ptr::addr_of_mut!(EXEC_PATH) as *mut u8).add(task * MAX_PATH);
+        core::ptr::copy_nonoverlapping(path.as_ptr(), slot, path.len());
+        (core::ptr::addr_of_mut!(EXEC_LEN) as *mut usize)
+            .add(task)
+            .write(path.len());
+    });
+    true
+}
+
+/// Bekleyen `execve` istegini alir ve yuvayi bosaltir.
+fn take_exec(task: usize) -> Option<&'static str> {
+    if task >= scheduler::MAX_TASKS {
+        return None;
+    }
+    crate::arch::cpu::without_interrupts(|| unsafe {
+        let len_slot = (core::ptr::addr_of_mut!(EXEC_LEN) as *mut usize).add(task);
+        let len = len_slot.read();
+        if len == 0 {
+            return None;
+        }
+        len_slot.write(0);
+        let slot = (core::ptr::addr_of!(EXEC_PATH) as *const u8).add(task * MAX_PATH);
+        core::str::from_utf8(core::slice::from_raw_parts(slot, len)).ok()
+    })
+}
+
 /// Kisa adlar: `run paint` yazabilmek icin.
 ///
 /// Listede olmayan bir yol da calistirilabilir -- VFS'te varsa yeter.
@@ -35,6 +78,7 @@ static KNOWN_APPS: &[(&str, &str, &str)] = &[
     ("hog", "/bin/hog", "hog"),
     ("spin", "/bin/spin", "spin"),
     ("notes", "/bin/notes", "notes"),
+    ("menu", "/bin/menu", "menu"),
 ];
 
 /// Kabuktan gelen adi tam yola ve gorev adina cevirir.
@@ -103,18 +147,27 @@ fn take_pending() -> Option<&'static str> {
 
 /// Uygulama gorevinin giris noktasi: kuyruktaki yolu alir ve Ring 3'e girer.
 extern "C" fn app_task() -> ! {
-    let path = take_pending();
+    let mut next = take_pending();
+    if next.is_none() {
+        crate::println!("[launcher] baslatilacak uygulama bulunamadi.");
+    }
 
-    match path {
-        Some(p) => {
-            crate::println!("[launcher] '{}' Ring 3'te baslatiliyor.", p);
-            let result = unsafe { crate::level0b1::process::run_from_vfs_dynamic(p) };
-            match result {
-                Ok(()) => crate::println!("[launcher] '{}' sonlandi.", p),
-                Err(e) => crate::println!("[launcher] '{}' basarisiz: {:?}", p, e),
-            }
+    // Dongu `execve` icin: surec yerine baska bir program isterse ayni
+    // gorevde, yeni bir adres uzayiyla devam edilir.
+    while let Some(path) = next {
+        crate::println!("[launcher] '{}' Ring 3'te baslatiliyor.", path);
+        let result = unsafe { crate::level0b1::process::run_from_vfs_dynamic(path) };
+        match result {
+            Ok(()) => crate::println!("[launcher] '{}' sonlandi.", path),
+            Err(e) => crate::println!("[launcher] '{}' basarisiz: {:?}", path, e),
         }
-        None => crate::println!("[launcher] baslatilacak uygulama bulunamadi."),
+
+        next = take_exec(scheduler::current_id());
+        if let Some(p) = next {
+            // Yeni imaj eskinin penceresini devralmaz.
+            crate::level0a::wm::close_owned_by(scheduler::current_id());
+            crate::println!("[launcher] execve -> '{}'", p);
+        }
     }
 
     // Uygulama bitti: penceresi de kapanmali. Adres uzayini `process`
