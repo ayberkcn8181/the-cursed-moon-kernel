@@ -10,7 +10,7 @@
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::level0a::core::{fd, kmalloc, mmu, scheduler, tcmkfs, vfs};
-use crate::level0a::drivers::{block, gfx, partition};
+use crate::level0a::drivers::{block, gfx, partition, rtc};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ServiceState {
@@ -25,7 +25,8 @@ pub struct Service {
     pub state: ServiceState,
 }
 
-pub const MAX_SERVICES: usize = 8;
+// vmm, framebuffer, kmalloc, scheduler, vfs, fd-table, rtc, block, tcmkfs
+pub const MAX_SERVICES: usize = 12;
 
 static mut SERVICES: [Service; MAX_SERVICES] = [Service {
     name: "",
@@ -113,6 +114,19 @@ pub unsafe fn bring_up(ramfs_files: &[(&'static str, &'static [u8])]) {
     fd::init();
     // Acilista stdin/stdout/stderr disinda acik tanimlayici olmamali.
     register("fd-table", fd::open_count() == 0);
+
+    // Gercek zaman saati: dosya zaman damgalari ve kullaniciya gosterilen
+    // saat icin. Yoksa sistem calisir, yalnizca tarih bilinmez.
+    if rtc::init() {
+        register("rtc", true);
+        let t = rtc::now().unwrap_or_default();
+        crate::println!(
+            "[LEVEL-0a] saat: {:04}-{:02}-{:02} {:02}:{:02}:{:02} (UTC)",
+            t.year, t.month, t.day, t.hour, t.minute, t.second
+        );
+    } else {
+        crate::println!("[LEVEL-0a] saat: CMOS RTC okunamadi, tarih bilinmiyor.");
+    }
 
     // Disk: aygit + bolum tablosu. Disk yoksa servis kaydedilmez --
     // TCMK ISO'dan (disksiz) da acilabilmelidir.

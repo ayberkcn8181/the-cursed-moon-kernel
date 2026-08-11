@@ -9,7 +9,7 @@
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::level0a::core::{fd, frames, init, kmalloc, mmu, scheduler, tcmkfs, vfs};
-use crate::level0a::drivers::{ata, block, gfx, partition};
+use crate::level0a::drivers::{ata, block, gfx, partition, rtc};
 use crate::level0a::{exceptions, input, launcher, pit, wm};
 use crate::level0b2::{ipc, load_balancer, state_monitor};
 
@@ -186,6 +186,14 @@ fn write_num_right(n: usize, width: usize) {
     write_num(n);
 }
 
+/// Iki haneli, sifir dolgulu (tarih/saat alanlari icin).
+fn write_pad2(n: usize) {
+    if n < 10 {
+        put(b'0');
+    }
+    write_num(n);
+}
+
 fn write_padded(s: &str, width: usize) {
     write_str(s);
     for _ in s.len()..width {
@@ -218,7 +226,7 @@ fn execute(line: &str) {
     match cmd {
         "help" => {
             write_line("sistem:");
-            write_line("  ps  top  kill <id>  svc  health  uptime  ver");
+            write_line("  ps  top  kill <id>  svc  health  uptime  date  ver");
             write_line("level-0b2 (merkezi denetleyici):");
             write_line("  load          yuk dengeleyici istatistikleri");
             write_line("  ipc           mesaj kuyrugu + paylasimli bolge");
@@ -410,6 +418,12 @@ fn execute(line: &str) {
             write_str("minimal modda reddedilen cagri: ");
             write_num(crate::level0b2::fallback::unsupported_calls() as usize);
             newline();
+            write_str("gercek zaman saati: ");
+            if rtc::available() {
+                write_line("var (CMOS RTC)");
+            } else {
+                write_line("YOK -- zaman damgalari 0");
+            }
         }
         "stall" => {
             // Doc S.12 test maddesi: "Heartbeat timeout simulasyonunda
@@ -518,7 +532,25 @@ fn execute(line: &str) {
                     );
                     write_padded(path, 22);
                     write_num_right(vfs::size(i).unwrap_or(0), 7);
-                    write_line(" bayt");
+                    write_str(" bayt");
+                    // Yalnizca diskteki dosyalarin zaman damgasi vardir;
+                    // RAMFS dosyalari cekirdek imajiyla birlikte gelir.
+                    if let Some(epoch) = vfs::mtime(i) {
+                        if epoch != 0 {
+                            let t = rtc::from_unix(epoch);
+                            write_str("  ");
+                            write_num_right(t.year as usize, 4);
+                            put(b'-');
+                            write_pad2(t.month as usize);
+                            put(b'-');
+                            write_pad2(t.day as usize);
+                            put(b' ');
+                            write_pad2(t.hour as usize);
+                            put(b':');
+                            write_pad2(t.minute as usize);
+                        }
+                    }
+                    newline();
                 }
             }
             write_str(" toplam ");
@@ -822,12 +854,63 @@ fn execute(line: &str) {
                 None => write_line("kullanim: focus <pencere-no>"),
             }
         }
+        "date" => {
+            match rtc::now() {
+                Some(t) => {
+                    write_num_right(t.year as usize, 4);
+                    put(b'-');
+                    write_pad2(t.month as usize);
+                    put(b'-');
+                    write_pad2(t.day as usize);
+                    put(b' ');
+                    write_pad2(t.hour as usize);
+                    put(b':');
+                    write_pad2(t.minute as usize);
+                    put(b':');
+                    write_pad2(t.second as usize);
+                    write_line("  (UTC, CMOS RTC)");
+                    write_str("unix zamani: ");
+                    write_num(rtc::unix_time() as usize);
+                    newline();
+                }
+                None => write_line("gercek zaman saati yok."),
+            }
+        }
         "uptime" => {
             write_str("tick: ");
             write_num(pit::ticks() as usize);
             write_str("  (~");
             write_num(pit::ticks() as usize / 100);
             write_line(" saniye)");
+
+            // PIT tick'i sayar; RTC varsa duvardaki saate gore de olculur.
+            // Ikisinin farki, kesmelerin kacirildigini gosterir.
+            let boot = rtc::boot_epoch();
+            if boot != 0 {
+                let seconds = rtc::unix_time().saturating_sub(boot) as usize;
+                write_str("duvar saati: ");
+                write_num(seconds / 3600);
+                put(b':');
+                write_pad2((seconds / 60) % 60);
+                put(b':');
+                write_pad2(seconds % 60);
+                write_line("  (RTC)");
+
+                write_str("acilis: ");
+                let t = rtc::from_unix(boot);
+                write_num(t.year as usize);
+                put(b'-');
+                write_pad2(t.month as usize);
+                put(b'-');
+                write_pad2(t.day as usize);
+                put(b' ');
+                write_pad2(t.hour as usize);
+                put(b':');
+                write_pad2(t.minute as usize);
+                put(b':');
+                write_pad2(t.second as usize);
+                write_line(" (UTC)");
+            }
         }
         "clear" => {
             unsafe {

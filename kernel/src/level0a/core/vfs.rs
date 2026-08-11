@@ -179,6 +179,16 @@ pub fn size(node: usize) -> Option<usize> {
     node_at(node).map(|n| n.size)
 }
 
+/// Dosyanin son degisiklik ani (Unix zamani). RAMFS dugumleri icin `None`:
+/// icerikleri cekirdek imajiyla gelir, ayri bir zamanlari yoktur.
+pub fn mtime(node: usize) -> Option<u32> {
+    let n = node_at(node)?;
+    match n.source {
+        Source::Ram => None,
+        Source::Disk => tcmkfs::entry_mtime(n.inode),
+    }
+}
+
 pub fn source(node: usize) -> Option<Source> {
     node_at(node).map(|n| n.source)
 }

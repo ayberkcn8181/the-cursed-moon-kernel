@@ -118,7 +118,8 @@ struct SuperBlock {
 struct Inode {
     kind: u32,
     size: u32,
-    /// Olusturma/degistirme ani (PIT tick). Gercek saat (RTC) Faz 9+.
+    /// Olusturma/degistirme ani -- **Unix zamani** (RTC'den).
+    /// RTC yoksa 0 kalir; listelerde "tarih yok" olarak gosterilir.
     mtime: u32,
     flags: u32,
     name: [u8; MAX_NAME],
@@ -435,6 +436,15 @@ pub fn entry_name(index: usize) -> Option<&'static str> {
     Some(name_of(inode))
 }
 
+/// Dosyanin son degisiklik ani (Unix zamani); 0 = bilinmiyor.
+pub fn entry_mtime(index: usize) -> Option<u32> {
+    let inode = inode_ref(index)?;
+    if inode.kind != KIND_FILE {
+        return None;
+    }
+    Some(inode.mtime)
+}
+
 pub fn entry_size(index: usize) -> Option<usize> {
     let inode = inode_ref(index)?;
     if inode.kind != KIND_FILE {
@@ -479,7 +489,7 @@ pub fn create(name: &str) -> Result<usize, FsError> {
         }
         *inode = Inode::empty();
         inode.kind = KIND_FILE;
-        inode.mtime = crate::level0a::pit::ticks();
+        inode.mtime = crate::level0a::drivers::rtc::unix_time();
         for (j, b) in name.bytes().enumerate() {
             inode.name[j] = b;
         }
@@ -614,7 +624,7 @@ pub fn write(index: usize, offset: usize, data: &[u8]) -> Result<usize, FsError>
     if end > inode.size as usize {
         inode.size = end as u32;
     }
-    inode.mtime = crate::level0a::pit::ticks();
+    inode.mtime = crate::level0a::drivers::rtc::unix_time();
 
     flush_inodes()?;
     flush_bitmap()?;

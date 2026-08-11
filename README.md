@@ -55,7 +55,7 @@ Ekranda gorunenler:
 
   | Grup | Komutlar |
   |---|---|
-  | sistem | `ps` `top` `kill <id>` `svc` `health` `uptime` `ver` |
+  | sistem | `ps` `top` `kill <id>` `svc` `health` `uptime` `date` `ver` |
   | Level-0b2 | `load` `ipc` `faults` `stall <sn>` |
   | bellek/disk | `mem` `disk` `df` `format onayla` `sync` `install onayla` |
   | dosya | `ls` `cat <yol>` `save <yol> <metin>` `cp <kaynak> <hedef>` `rm <yol>` |
@@ -486,6 +486,7 @@ kapatilip yeniden baslatildi, dosyalar yerinde.
 | Bolum | `drivers/partition.rs` | MBR ayristirma, TCMKFS bolumunu bulma |
 | Dosya sistemi | `core/tcmkfs.rs` | superblock + inode + blok bitmap, yazma |
 | Isim uzayi | `core/vfs.rs` | RAMFS ve TCMKFS'i tek isim uzayinda birlestirir |
+| Saat | `drivers/rtc.rs` | CMOS RTC -> zaman damgalari icin Unix zamani |
 
 **ATA PIO neden:** port I/O disinda hicbir sey gerektirmez -- PCI taramasi,
 DMA, kesme yonetimi yok. Hem QEMU'da hem gercek (eski) donanimda calisir.
@@ -511,6 +512,43 @@ destegi olan kucuk bir dosya sistemi secildi. ext2 okuyucusu ileride VFS'e
 Dosya basina 40 **dogrudan** blok isaretcisi -> azami 160 KiB. Inode
 tablosu ve bitmap bellekte onbelleklenir, degisiklikler aninda diske
 yazilir (write-through), her yazmadan sonra ATA cache-flush verilir.
+
+### Duvar saati (CMOS RTC)
+
+PIT sistemin **ne kadar suredir** calistigini olcer; hangi gunde
+oldugumuzu bilmez. Bir dosyanin ne zaman yazildigini kaydetmek icin gercek
+tarih gerekir, bu yuzden `drivers/rtc.rs` CMOS saatini okur ve inode'un
+`mtime` alani **Unix zamani** olarak doldurulur.
+
+RTC saniyede bir kendini gunceller ve bu guncelleme atomik degildir --
+tam o anda okunan alanlar farkli anlara ait olabilir (dakika yeni, saniye
+eski). Iki savunma birlikte kullanilir: Status A'nin "guncelleme suruyor"
+biti beklenir, **ve** okuma iki kez ust uste ayni sonucu verene kadar
+tekrarlanir. Degerler BIOS'a gore BCD veya ikili, saat 12 ya da 24
+saatlik olabilir; Status B bunu soyler ve donusum surucude yapilir.
+
+```
+tcmk> date
+2026-08-11 00:16:08  (UTC, CMOS RTC)
+unix zamani: 1786407368
+
+tcmk> ls
+  disk  /saat.txt        14 bayt  2026-08-11 00:16
+```
+
+`uptime` ayni saatten ikinci bir olcum verir:
+
+```
+tcmk> uptime
+tick: 2416  (~24 saniye)
+duvar saati: 0:00:28  (RTC)
+acilis: 2026-08-11 00:15:43 (UTC)
+```
+
+Ikisinin farki bilerek gosteriliyor: PIT tick'i **kacirilan kesmeleri**
+sayamaz. Aradaki dort saniye, cekirdegin acilista kesmeler kapaliyken
+(ATA PIO bekleyisleri, bicimlendirme) gecirdigi suredir -- yani bu iki
+satir birlikte ucuz bir saglik gostergesidir.
 
 ### Disk imaji nasil uretiliyor (root gerekmeden)
 

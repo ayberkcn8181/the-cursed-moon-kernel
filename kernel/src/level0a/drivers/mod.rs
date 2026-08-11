@@ -4,5 +4,6 @@ pub mod console;
 pub mod font_data;
 pub mod gfx;
 pub mod partition;
+pub mod rtc;
 pub mod serial;
 pub mod vga;
