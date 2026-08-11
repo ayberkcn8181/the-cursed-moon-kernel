@@ -10,6 +10,7 @@ use core::arch::asm;
 // --- Linux (i386) numaralari ---
 pub const SYS_EXIT: usize = 1;
 pub const SYS_FORK: usize = 2;
+pub const SYS_WAITPID: usize = 7;
 pub const SYS_READ: usize = 3;
 pub const SYS_WRITE: usize = 4;
 pub const SYS_OPEN: usize = 5;
@@ -161,4 +162,23 @@ pub fn sleep_ms(ms: usize) {
 /// Kaynak yoksa negatif deger doner (`-EAGAIN`).
 pub fn fork() -> isize {
     unsafe { syscall0(SYS_FORK) as isize }
+}
+
+/// `waitpid` secenegi: cocuk bitmemisse bekleme, 0 don.
+pub const WNOHANG: usize = 1;
+
+/// Bir cocuk surecin bitmesini bekler.
+///
+/// Donus: cocugun kimligi, ya da `WNOHANG` verilip cocuk hala
+/// calisiyorsa `0`, ya da hata durumunda negatif deger.
+///
+/// `status`, Linux'un kodlamasini kullanir: normal cikista
+/// `(kod & 0xFF) << 8`. `exit_status` bunu cozer.
+pub fn waitpid(pid: usize, status: &mut u32, options: usize) -> isize {
+    unsafe { syscall3(SYS_WAITPID, pid, status as *mut u32 as usize, options) as isize }
+}
+
+/// `WEXITSTATUS`: durum kelimesinden cikis kodunu cikarir.
+pub fn exit_status(status: u32) -> u32 {
+    (status >> 8) & 0xFF
 }

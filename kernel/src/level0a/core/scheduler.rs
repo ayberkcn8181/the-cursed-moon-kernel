@@ -25,6 +25,13 @@ pub enum TaskState {
     Running,
     /// Belirli bir PIT tick'ine kadar zamanlanmaz (`sleep`).
     Blocked,
+    /// Bir cocuk gorevin bitmesini bekliyor (`waitpid`). Zamanla degil,
+    /// **baska bir gorevin durumuyla** uyanir.
+    ///
+    /// Yalnizca `fork` eden surecler bu duruma girer, o da i386'da
+    /// derlenir; x86_64'te hicbir sey bu varyanti uretmez.
+    #[cfg_attr(target_arch = "x86_64", allow(dead_code))]
+    Waiting,
     Terminated,
 }
 
@@ -48,6 +55,11 @@ pub struct Task {
     pub address_space: usize,
     /// `Blocked` iken: bu PIT tick'inde uyandirilir.
     pub wake_tick: u32,
+    /// `Waiting` iken: beklenen gorevin indeksi + 1 (0 = beklemiyor).
+    /// Sifirdan farkli olmasi gerekir cunku 0 gecerli bir gorev indeksi.
+    pub wait_for: usize,
+    /// Gorev sonlandiginda birakilan cikis kodu; `waitpid` bunu okur.
+    pub exit_code: u32,
 }
 
 impl Task {
@@ -61,6 +73,8 @@ impl Task {
             in_user_mode: false,
             address_space: 0,
             wake_tick: 0,
+            wait_for: 0,
+            exit_code: 0,
         }
     }
 }
@@ -114,6 +128,8 @@ pub fn spawn(name: &'static str, entry: extern "C" fn() -> !) -> Option<usize> {
         (*tasks.add(index)).in_user_mode = false;
         (*tasks.add(index)).address_space = 0;
         (*tasks.add(index)).wake_tick = 0;
+        (*tasks.add(index)).wait_for = 0;
+        (*tasks.add(index)).exit_code = 0;
 
         TASK_COUNT.store(index + 1, Ordering::Relaxed);
         Some(index)
@@ -274,13 +290,23 @@ fn wake_expired(count: usize) {
         let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
         for i in 0..count {
             let task = &mut *tasks.add(i);
-            if task.state != TaskState::Blocked {
-                continue;
-            }
-            // Tick sayaci sarsa bile dogru calissin diye fark uzerinden
-            // karsilastirilir.
-            if now.wrapping_sub(task.wake_tick) < 0x8000_0000 {
-                task.state = TaskState::Ready;
+            match task.state {
+                TaskState::Blocked => {
+                    // Tick sayaci sarsa bile dogru calissin diye fark
+                    // uzerinden karsilastirilir.
+                    if now.wrapping_sub(task.wake_tick) < 0x8000_0000 {
+                        task.state = TaskState::Ready;
+                    }
+                }
+                TaskState::Waiting => {
+                    // Zamanla degil, beklenen gorevin bitmesiyle uyanir.
+                    let target = task.wait_for - 1;
+                    if (*tasks.add(target)).state == TaskState::Terminated {
+                        task.state = TaskState::Ready;
+                        task.wait_for = 0;
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -439,6 +465,70 @@ pub fn set_current_address_space(cr3: usize) {
         let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
         (*tasks.add(CURRENT.load(Ordering::Relaxed))).address_space = cr3;
     }
+}
+
+/// Calisan gorevin cikis kodunu kaydeder (`waitpid` bunu okur).
+pub fn set_current_exit_code(code: u32) {
+    unsafe {
+        let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+        (*tasks.add(CURRENT.load(Ordering::Relaxed))).exit_code = code;
+    }
+}
+
+/// Bir gorevin cikis kodu.
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
+pub fn exit_code_of(index: usize) -> u32 {
+    if index >= MAX_TASKS {
+        return 0;
+    }
+    unsafe {
+        let tasks = core::ptr::addr_of!(TASKS) as *const Task;
+        (*tasks.add(index)).exit_code
+    }
+}
+
+/// `waitpid`: `child` gorevinin bitmesini bekler, cikis kodunu doner.
+///
+/// Beklerken gorev `Waiting` durumundadir ve `pick_next` tarafindan
+/// **atlanir** -- yani bekleyen bir surec CPU harcamaz. Uyanma zamanla
+/// degil, `wake_expired` icinde beklenen gorevin `Terminated` olmasiyla
+/// gerceklesir.
+///
+/// `None` doner: gecersiz indeks, kendini beklemek, ya da idle gorevinin
+/// cagirmasi (idle bloke edilemez -- masaustu dongusudur).
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
+pub fn wait_for_task(child: usize) -> Option<u32> {
+    let current = CURRENT.load(Ordering::Relaxed);
+    let count = TASK_COUNT.load(Ordering::Relaxed);
+    if child >= count || child == current || current == 0 {
+        return None;
+    }
+
+    if state_of(child) == TaskState::Unused {
+        return None;
+    }
+
+    // Zaten bitmisse beklemeye gerek yok.
+    if state_of(child) == TaskState::Terminated {
+        return Some(exit_code_of(child));
+    }
+
+    crate::arch::cpu::without_interrupts(|| unsafe {
+        let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+        (*tasks.add(current)).wait_for = child + 1;
+        (*tasks.add(current)).state = TaskState::Waiting;
+    });
+
+    // Idle her zaman hazir oldugu icin `yield_now` mutlaka baska bir
+    // goreve gecer; dongu ancak cocuk bitince kirilir.
+    loop {
+        yield_now();
+        if state_of(child) == TaskState::Terminated {
+            break;
+        }
+    }
+
+    Some(exit_code_of(child))
 }
 
 /// Baska bir gorevin adres uzayini kaydeder.

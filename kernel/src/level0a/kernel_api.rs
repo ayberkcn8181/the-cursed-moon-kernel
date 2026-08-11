@@ -149,6 +149,10 @@ pub unsafe fn exit_to_exec() -> ! {
 ///     geri yuklenerek `run_user_program`'in cagrildigi yere donulur.
 ///   - **Ring 0 cekirdek gorevi**: normal scheduler sonlandirmasi.
 pub fn exit_current_task(code: u32) -> ! {
+    // Kodu ONCE sakla: `waitpid` ile bekleyen ebeveyn bunu okuyacak ve
+    // gorev `Terminated` olur olmaz uyanabilir.
+    crate::level0a::core::scheduler::set_current_exit_code(code);
+
     crate::level0b2::ipc::post(
         crate::level0b2::ipc::Kind::AppExit,
         crate::level0a::core::scheduler::current_id(),

@@ -38,6 +38,7 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | — | **Kendi onyukleyicisi** + diske kurulum (`install`) | ✅ (i386) |
 | 8 | **`execve`** (surec kendi yerine program yukler) | ✅ (i386) |
 | 8 | **`fork`** (adres uzayi kopyasi + iki kez donen cagri) | ✅ (i386) |
+| 8 | **`waitpid`** (`Waiting` durumu, cikis kodu, `WNOHANG`) | ✅ (i386) |
 | 8+ | sinyaller, musl/busybox | ⏳ yapilmadi |
 
 ## Grafiksel Alfa
@@ -879,6 +880,33 @@ Cocuk kendi cekirdek yiginini `scheduler::spawn`'dan alir; ebeveyninkini
 paylasmasi, ikisi ayni anda syscall yaptiginda birbirinin cercevesini
 ezmek demek olurdu.
 
+### `waitpid`: cocugu toplamak
+
+![waitpid](docs/screenshot-waitpid.png)
+
+`twins`'te cocuk 60 kare sonra `42` ile cikar. Ebeveyn bunu toplar ve
+cikis kodunu ekranda gosterir; goruntude cocugun penceresi kapanmis,
+ebeveyn `cocuk bitti, kod:42` yaziyor.
+
+```
+[twins] cocuk 42 ile cikiyor.
+[LEVEL-0a] Ring 3 sureci cikis kodu 42 ile sonlandi.
+[twins] ebeveyn: cocuk 42 ile bitti.
+```
+
+Zamanlayiciya bunun icin bir `Waiting` durumu eklendi. Bekleyen gorev
+`pick_next` tarafindan **atlanir** -- yani bekleyen bir surec CPU
+harcamaz. `Blocked`'dan farki uyanma kosuludur: `Blocked` bir PIT
+tick'ini bekler, `Waiting` **baska bir gorevin durumunu**. Ikisi de ayni
+yerde, `wake_expired` icinde cozulur.
+
+Ebeveyn dongusunde `WNOHANG` kullanir; boylece cocugu her karede yoklar
+ama bloke olmaz ve penceresi akici kalir. Kullanici erken cikarsa
+ebeveyn bu kez bloke olarak bekler -- iki yol da `twins` icinde.
+
+Durum kelimesi Linux'un kodlamasini kullanir (`(kod & 0xFF) << 8`), yani
+`WEXITSTATUS` beklendigi gibi calisir.
+
 ## Notes: yaz, kaydet, kapat, ac
 
 Ring 3 uygulamasi metnini kendi ciziyor, POSIX `open(O_CREAT)`/`write` ile
@@ -1210,8 +1238,10 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
   an cekirdekte global; surec basina tasinmalari ayri bir adim. Yani
   cocugun `close`'u ebeveyni de etkiler.
 - **Sinyal yok.** `kill` bir gorevi sonlandirir ama POSIX sinyalleri
-  (`SIGTERM`, isleyiciler) yok; `wait`/`waitpid` de yok -- ebeveyn
-  cocugunun bitisini bekleyemez.
+  (`SIGTERM`, isleyiciler) yok.
+- **`waitpid` yalnizca belirli bir cocugu bekler.** `pid = -1` ("herhangi
+  bir cocuk") ve surec gruplari yok; oksuz kalan gorevler de
+  toplanmiyor -- gorev yuvasi surec bitse de tabloda kalir.
 - **Surec basina 512 KiB eslenir**, talep uzerine sayfalama yok.
 - **TCMKFS duz bir isim uzayidir**, gercek dizin agaci degil: `/home/x`
   bir yol degil, dosyanin **adidir**. Azami 64 dosya, dosya basina 160 KiB

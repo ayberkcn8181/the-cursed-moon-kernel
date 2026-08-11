@@ -207,6 +207,7 @@ fn state_name(state: scheduler::TaskState) -> &'static str {
         scheduler::TaskState::Ready => "hazir",
         scheduler::TaskState::Running => "calisiyor",
         scheduler::TaskState::Blocked => "uyuyor",
+        scheduler::TaskState::Waiting => "bekliyor",
         scheduler::TaskState::Terminated => "bitti",
     }
 }

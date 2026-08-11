@@ -12,6 +12,7 @@
 //!    6 = sys_close   (EBX = fd)
 //!   45 = sys_brk     (EBX = yeni break, 0 ise mevcut break dondurulur)
 //!    2 = sys_fork    (argumansiz; ebeveyne cocuk id, cocuga 0 doner)
+//!    7 = sys_waitpid (EBX = pid, ECX = *status, EDX = secenekler)
 
 use crate::arch::cpu::regs::SyscallFrame;
 use crate::level0a::core::mmu;
@@ -47,6 +48,7 @@ pub use x86_64_numbers::*;
 mod i386_numbers {
     pub const SYS_EXIT: u32 = 1;
     pub const SYS_FORK: u32 = 2;
+    pub const SYS_WAITPID: u32 = 7;
     pub const SYS_READ: u32 = 3;
     pub const SYS_WRITE: u32 = 4;
     pub const SYS_OPEN: u32 = 5;
@@ -75,6 +77,30 @@ const ENOSYS: i32 = 38;
 /// havuzu dolu demektir (Linux `fork` da bu kodu dondurur).
 #[cfg_attr(target_arch = "x86_64", allow(dead_code))]
 const EAGAIN: i32 = 11;
+/// Beklenecek boyle bir cocuk yok.
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
+const ECHILD: i32 = 10;
+
+/// `waitpid` secenegi: cocuk bitmemisse bloke olma, 0 don.
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
+const WNOHANG: usize = 1;
+
+/// `waitpid`'in durum kelimesini kullaniciya yazar.
+///
+/// Linux kodlamasi: normal cikista `status = (kod & 0xFF) << 8`, boylece
+/// `WEXITSTATUS(status)` = `(status >> 8) & 0xFF` calisir. Isaretci NULL
+/// olabilir (POSIX'te de oyle); o zaman yazilmaz ve cagri basarilidir.
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
+fn store_status(ptr: usize, code: u32) -> bool {
+    if ptr == 0 {
+        return true;
+    }
+    if !mmu::is_user_accessible(ptr) || !mmu::is_user_accessible(ptr + 3) {
+        return false;
+    }
+    unsafe { (ptr as *mut u32).write_unaligned((code & 0xFF) << 8) };
+    true
+}
 
 /// Kullanici alanindan gelen yol adinin en fazla uzunlugu.
 const PATH_MAX: usize = 128;
@@ -146,6 +172,47 @@ pub fn dispatch(frame: &mut SyscallFrame) {
                 }
                 Err(crate::level0b1::fork::ForkError::NotUserProcess) => -EINVAL,
                 Err(crate::level0b1::fork::ForkError::OutOfResources) => -EAGAIN,
+            }
+        }
+
+        #[cfg(target_arch = "x86")]
+        SYS_WAITPID => {
+            // waitpid(pid, *status, options)
+            //
+            // TCMK'de "pid" gorev indeksidir. Beklerken gorev `Waiting`
+            // durumundadir ve zamanlayici tarafindan atlanir -- yani
+            // bekleyen bir surec CPU harcamaz.
+            let child = arg1;
+            let status_ptr = arg2;
+            let nohang = arg3 & WNOHANG != 0;
+
+            if child >= crate::level0a::core::scheduler::task_count() {
+                -ECHILD
+            } else if nohang {
+                // Bitmediyse hemen 0 don (POSIX WNOHANG davranisi).
+                if crate::level0a::core::scheduler::state_of(child)
+                    != crate::level0a::core::scheduler::TaskState::Terminated
+                {
+                    0
+                } else {
+                    let code = crate::level0a::core::scheduler::exit_code_of(child);
+                    if !store_status(status_ptr, code) {
+                        -EFAULT
+                    } else {
+                        child as i32
+                    }
+                }
+            } else {
+                match crate::level0a::core::scheduler::wait_for_task(child) {
+                    Some(code) => {
+                        if !store_status(status_ptr, code) {
+                            -EFAULT
+                        } else {
+                            child as i32
+                        }
+                    }
+                    None => -ECHILD,
+                }
             }
         }
 
