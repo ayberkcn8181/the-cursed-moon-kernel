@@ -8,10 +8,10 @@
 ; Win32 adlarini ve gercek imzalarini kullanir.
 LIBRARY TCMKGUI.dll
 EXPORTS
-TcmkCreateWindow@20
-TcmkGetWindowBits@4
-TcmkGetClientRect@4
-TcmkGetWindowRect@4
-TcmkUpdateWindow@4
-TcmkGetMessage@4
-TcmkGetCursorPos@0
+TcmkCreateWindow@20 @1
+TcmkGetWindowBits@4 @2
+TcmkGetClientRect@4 @3
+TcmkGetWindowRect@4 @4
+TcmkUpdateWindow@4 @5
+TcmkGetMessage@4 @6
+TcmkGetCursorPos@0 @7

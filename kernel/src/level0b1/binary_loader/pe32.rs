@@ -12,8 +12,9 @@
 //! `int 0x2E` yazmak zorunda degildir; siradan bir Windows ikilisi gibi
 //! `WriteConsoleA` cagirabilir.
 //!
-//! Ordinal ile ithal (Faz 7c) desteklenmiyor: gomulu tablo ada gore
-//! arama yapar. Ordinal goruldugunde surec baslatilmaz.
+//! **Ordinal ile ithal** (Faz 7c) de destekleniyor: bazi DLL'ler
+//! fonksiyonlari adsiz, yalnizca sira numarasiyla ihrac eder. O durumda
+//! ikilide ad hic gecmez; arama gomulu tablonun ordinal alanina duser.
 
 use crate::level0a::core::mmu;
 use crate::level0b1::nt_subsystem::dll;
@@ -225,6 +226,7 @@ fn resolve_imports(
         }
 
         let mut index = 0usize;
+        let mut ordinals = 0usize;
         loop {
             let entry_at = names_rva + index * 4;
             if entry_at + 4 > image_size {
@@ -235,35 +237,44 @@ fn resolve_imports(
                 break;
             }
 
-            if entry & IMAGE_ORDINAL_FLAG32 != 0 {
-                // Ordinal ile ithal: ad yok, yalnizca numara. Gomulu
-                // tablomuz ada gore arama yaptigi icin desteklenmiyor
-                // (doc S.7'de Faz 7c olarak ayrilmisti).
-                crate::println!(
-                    "[LEVEL-0b1] PE ithal: {} ordinal #{} -- ordinal ile ithal desteklenmiyor.",
-                    dll_name,
-                    entry & 0xFFFF
-                );
-                return Err(PeError::UnresolvedImport);
-            }
+            // Ithal iki bicimden biridir (Faz 7b: ad, Faz 7c: ordinal).
+            // Ordinal bicimde ikilide ad hic yer almaz; ust bit isaretli
+            // olur ve alt 16 bit sira numarasini tasir.
+            let export = if entry & IMAGE_ORDINAL_FLAG32 != 0 {
+                let ordinal = (entry & 0xFFFF) as u16;
+                match dll::resolve_ordinal(dll_name, ordinal) {
+                    Some(e) => {
+                        ordinals += 1;
+                        e
+                    }
+                    None => {
+                        crate::println!(
+                            "[LEVEL-0b1] PE ithal: {}#{} bulunamadi -- surec baslatilmiyor.",
+                            dll_name,
+                            ordinal
+                        );
+                        return Err(PeError::UnresolvedImport);
+                    }
+                }
+            } else {
+                // IMAGE_IMPORT_BY_NAME: u16 hint, ardindan NUL'lu ad.
+                let mut fn_storage = [0u8; NAME_MAX];
+                let function =
+                    match image_cstr(load_base, image_size, entry as usize + 2, &mut fn_storage) {
+                        Some(name) => name,
+                        None => return Err(PeError::ImportOutOfBounds),
+                    };
 
-            // IMAGE_IMPORT_BY_NAME: u16 hint, ardindan NUL'lu ad.
-            let mut fn_storage = [0u8; NAME_MAX];
-            let function =
-                match image_cstr(load_base, image_size, entry as usize + 2, &mut fn_storage) {
-                    Some(name) => name,
-                    None => return Err(PeError::ImportOutOfBounds),
-                };
-
-            let export = match dll::resolve(dll_name, function) {
-                Some(e) => e,
-                None => {
-                    crate::println!(
-                        "[LEVEL-0b1] PE ithal: {}!{} bulunamadi -- surec baslatilmiyor.",
-                        dll_name,
-                        function
-                    );
-                    return Err(PeError::UnresolvedImport);
+                match dll::resolve(dll_name, function) {
+                    Some(e) => e,
+                    None => {
+                        crate::println!(
+                            "[LEVEL-0b1] PE ithal: {}!{} bulunamadi -- surec baslatilmiyor.",
+                            dll_name,
+                            function
+                        );
+                        return Err(PeError::UnresolvedImport);
+                    }
                 }
             };
 
@@ -288,11 +299,20 @@ fn resolve_imports(
             index += 1;
         }
 
-        crate::println!(
-            "[LEVEL-0b1] PE ithal: {} -- {} fonksiyon baglandi.",
-            dll_name,
-            index
-        );
+        if ordinals > 0 {
+            crate::println!(
+                "[LEVEL-0b1] PE ithal: {} -- {} fonksiyon baglandi ({} ordinal ile).",
+                dll_name,
+                index,
+                ordinals
+            );
+        } else {
+            crate::println!(
+                "[LEVEL-0b1] PE ithal: {} -- {} fonksiyon baglandi.",
+                dll_name,
+                index
+            );
+        }
 
         descriptor += 20;
     }

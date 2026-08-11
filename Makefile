@@ -124,6 +124,10 @@ $(WIN_LIB_DIR)/stamp: $(patsubst %,$(USERLAND_DIR)/win/%.def,$(WIN_DEFS))
 			-l $(WIN_LIB_DIR)/$$d.lib; \
 		echo "  [winlib] $$d.lib"; \
 	done
+	@# Ithal kutuphaneleri cargo'nun girdisi degildir; bir .def degistiginde
+	@# kaynaklara dokunulmazsa cargo yeniden LINKLEMEZ ve ikili eski ithal
+	@# tablosuyla kalir (sessiz, bulmasi zor bir tuzak).
+	@touch $(USERLAND_DIR)/src/win/*.rs
 	@touch $@
 
 userland-rust:

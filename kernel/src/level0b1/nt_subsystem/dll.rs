@@ -36,6 +36,13 @@
 pub struct Export {
     /// PE ithal tablosunda gorunen ad (suslemesiz).
     pub name: &'static str,
+    /// DLL icindeki sira numarasi. Bir ikili fonksiyonu adiyla degil
+    /// **ordinaliyle** de ithal edebilir (Windows DLL'lerinde yaygindir);
+    /// o zaman ad hic gecmez ve arama bu numaraya duser.
+    ///
+    /// Numaralar `userland-rs/win/*.def` ile birebir aynidir; iki taraf
+    /// oradaki acik `@N` isaretleriyle sabitlenmistir.
+    pub ordinal: u16,
     /// `int 0x2E` ile cagrilacak NT servis numarasi.
     pub service: u32,
     /// stdcall geregi thunk'in yigindan temizleyecegi bayt sayisi
@@ -57,36 +64,43 @@ use super::nt_syscalls as nt;
 static KERNEL32: &[Export] = &[
     Export {
         name: "ExitProcess",
+        ordinal: 1,
         service: nt::NT_TERMINATE_PROCESS,
         stack_bytes: 4,
     },
     Export {
         name: "Sleep",
+        ordinal: 2,
         service: nt::NT_SLEEP_MS,
         stack_bytes: 4,
     },
     Export {
         name: "GetTickCount",
+        ordinal: 3,
         service: nt::NT_GET_TICK_COUNT,
         stack_bytes: 0,
     },
     Export {
         name: "CloseHandle",
+        ordinal: 4,
         service: nt::NT_WIN32_CLOSE_HANDLE,
         stack_bytes: 4,
     },
     Export {
         name: "WriteConsoleA",
+        ordinal: 5,
         service: nt::NT_WRITE_CONSOLE_A,
         stack_bytes: 20,
     },
     Export {
         name: "CreateFileA",
+        ordinal: 6,
         service: nt::NT_CREATE_FILE_A,
         stack_bytes: 28,
     },
     Export {
         name: "ReadFile",
+        ordinal: 7,
         service: nt::NT_READ_FILE_WIN32,
         stack_bytes: 20,
     },
@@ -98,36 +112,43 @@ static KERNEL32: &[Export] = &[
 static TCMKGUI: &[Export] = &[
     Export {
         name: "TcmkCreateWindow",
+        ordinal: 1,
         service: nt::NT_USER_CREATE_WINDOW_W32,
         stack_bytes: 20,
     },
     Export {
         name: "TcmkGetWindowBits",
+        ordinal: 2,
         service: nt::NT_GDI_GET_BITS_W32,
         stack_bytes: 4,
     },
     Export {
         name: "TcmkGetClientRect",
+        ordinal: 3,
         service: nt::NT_USER_CLIENT_RECT_W32,
         stack_bytes: 4,
     },
     Export {
         name: "TcmkGetWindowRect",
+        ordinal: 4,
         service: nt::NT_USER_WINDOW_RECT_W32,
         stack_bytes: 4,
     },
     Export {
         name: "TcmkUpdateWindow",
+        ordinal: 5,
         service: nt::NT_USER_FLUSH_WINDOW_W32,
         stack_bytes: 4,
     },
     Export {
         name: "TcmkGetMessage",
+        ordinal: 6,
         service: nt::NT_USER_GET_MESSAGE_W32,
         stack_bytes: 4,
     },
     Export {
         name: "TcmkGetCursorPos",
+        ordinal: 7,
         service: nt::NT_USER_CURSOR_POS_W32,
         stack_bytes: 0,
     },
@@ -156,6 +177,19 @@ pub fn resolve(dll: &str, function: &str) -> Option<Export> {
         .exports
         .iter()
         .find(|e| e.name == function)
+        .copied()
+}
+
+/// Bir DLL adi + **ordinal** ciftini cozer.
+///
+/// Adla ithal edilen fonksiyonlar `resolve` ile bulunur; ordinal ile
+/// ithal edilenlerde ikilide ad hic yer almaz, yalnizca numara vardir.
+pub fn resolve_ordinal(dll: &str, ordinal: u16) -> Option<Export> {
+    let module = DLLS.iter().find(|d| eq_ignore_case(d.name, dll))?;
+    module
+        .exports
+        .iter()
+        .find(|e| e.ordinal == ordinal)
         .copied()
 }
 

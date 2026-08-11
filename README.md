@@ -27,6 +27,7 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 7 | **Windows NT/PE**: PE32 yukleyici + reloc + `int 0x2E` | ✅ (i386) |
 | 7b | **Derlenmis PE32 GUI uygulamasi** + `win32k` cagri tablosu | ✅ (i386) |
 | 7b | **Ithal tablosu (IAT)**: `KERNEL32.dll` cozumu + thunk uretimi | ✅ (i386) |
+| 7c | **Ordinal ile ithal** (adsiz ihracatlar) | ✅ (i386) |
 | 4 | **x86_64 portu**: Long Mode, 4 seviyeli sayfalama, ELF64, `syscall` | ✅ |
 | 13 | **Framebuffer/grafik**: 1024x768x32, bitmap font, cift tampon | ✅ (i386) |
 | 14 | **Pencere yoneticisi**: kompozitor, fare, surukleme, GUI syscall'lari | ✅ (i386) |
@@ -455,8 +456,28 @@ Cozulemeyen bir ad surecin baslatilmamasina yol acar -- Windows'un
 [LEVEL-0b1] PE ithal: KERNEL32.dll!HeapAlloc bulunamadi -- surec baslatilmiyor.
 ```
 
-Ordinal ile ithal (adi degil numarasi verilen) desteklenmiyor; gomulu
-tablo ada gore arama yapar (doc S.7'de Faz 7c).
+#### Ordinal ile ithal (Faz 7c)
+
+Bazi DLL'ler fonksiyonlari **adsiz**, yalnizca sira numarasiyla ihrac
+eder; o zaman ikilide ad hic gecmez ve IAT girdisinin ust biti isaretli
+olur. Gomulu tablo bu yuzden ada ek olarak bir de ordinal tasir ve
+numaralar `userland-rs/win/*.def` icinde **acikca** verilmistir -- iki
+taraf birbirinden bagimsiz kaymasin diye.
+
+`GetTickCount` bilerek `NONAME` olarak ihrac ediliyor, boylece her
+derlemede ordinal yolu da sinaniyor:
+
+```
+KERNEL32.dll
+    CloseHandle  CreateFileA  ExitProcess  [ordinal] #3  ReadFile ...
+```
+
+```
+[LEVEL-0b1] PE ithal: KERNEL32.dll -- 7 fonksiyon baglandi (1 ordinal ile).
+```
+
+Ekranin alt cubugundaki calisma suresi bu cagriyla geliyor -- yani
+ordinal yolu yalnizca cozulmuyor, gercekten kullaniliyor.
 
 ## Level-1: Rust userland (`userland-rs/`)
 
