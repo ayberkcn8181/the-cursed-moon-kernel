@@ -201,6 +201,11 @@ unsafe fn enter_ring3(prepared: Prepared, space: Option<usize>) -> Result<(), Sp
     // Program break: imajin bittigi yerden yigin tabanina kadar buyuyebilir.
     kernel_api::set_program_break(prepared.end, stack_bottom);
 
+    // Yeni imaj eski sinyal isleyicilerini devralmaz: kayitli adresler
+    // artik var olmayan bir programa aittir, calistirilirsa surec kendi
+    // kodunun ortasina dallanir. `execve` yolunda bu sart.
+    crate::level0b1::signal::reset(scheduler::current_id());
+
     // Ring 3 -> Ring 0 gecisleri icin ayri bir cekirdek yigini.
     let kstack = kmalloc::kmalloc_aligned(KERNEL_STACK_SIZE, 16).ok_or(SpawnError::OutOfMemory)?;
     let kstack_top = kstack.add(KERNEL_STACK_SIZE) as usize;

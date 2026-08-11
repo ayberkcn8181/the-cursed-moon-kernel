@@ -11,6 +11,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use crate::level0a::core::{fd, frames, init, kmalloc, mmu, pipe, scheduler, tcmkfs, vfs};
 use crate::level0a::drivers::{ata, block, gfx, partition, rtc};
 use crate::level0a::{exceptions, input, launcher, pit, wm};
+use crate::level0b1::signal;
 use crate::level0b2::{ipc, load_balancer, state_monitor};
 
 const MAX_ROWS: usize = 24;
@@ -201,6 +202,61 @@ fn write_padded(s: &str, width: usize) {
     }
 }
 
+/// "12 34" bicimindeki iki sayiyi ayirir (`signal <gorev> <sinyal>`).
+fn two_numbers(arg: &str) -> Option<(usize, usize)> {
+    let arg = arg.trim();
+    let space = arg.find(' ')?;
+    let first = arg[..space].trim().parse_usize()?;
+    let second = arg[space + 1..].trim().parse_usize()?;
+    Some((first, second))
+}
+
+/// `str::parse` `core`'da var ama hata tipi bicimleme gerektirir; kucuk
+/// bir ayristirici tutmak hem daha ucuz hem de bos/kirli girdide net.
+trait ParseUsize {
+    fn parse_usize(&self) -> Option<usize>;
+}
+
+impl ParseUsize for str {
+    fn parse_usize(&self) -> Option<usize> {
+        if self.is_empty() {
+            return None;
+        }
+        let mut value = 0usize;
+        for b in self.bytes() {
+            if !b.is_ascii_digit() {
+                return None;
+            }
+            value = value * 10 + (b - b'0') as usize;
+        }
+        Some(value)
+    }
+}
+
+/// Bir sinyal maskesini "SIGUSR1 SIGTERM" gibi yazar; bos maskede "-".
+fn write_sig_list(mask: u32, width: usize) {
+    let start = COL.load(Ordering::Relaxed);
+    if mask == 0 {
+        put(b'-');
+    } else {
+        let mut first = true;
+        for signo in 1..=signal::MAX_SIGNAL {
+            if mask & (1 << signo) == 0 {
+                continue;
+            }
+            if !first {
+                put(b',');
+            }
+            first = false;
+            write_str(signal::name_of(signo));
+        }
+    }
+    let written = COL.load(Ordering::Relaxed).saturating_sub(start);
+    for _ in written..width {
+        put(b' ');
+    }
+}
+
 fn state_name(state: scheduler::TaskState) -> &'static str {
     match state {
         scheduler::TaskState::Unused => "bos",
@@ -228,6 +284,8 @@ fn execute(line: &str) {
         "help" => {
             write_line("sistem:");
             write_line("  ps  top  kill <id>  svc  health  uptime  date  ver");
+            write_line("  signal <id> <sinyal>   sinyal gonder (9=KILL 10=USR1 15=TERM)");
+            write_line("  sigs                   isleyicileri ve bekleyen sinyalleri goster");
             write_line("level-0b2 (merkezi denetleyici):");
             write_line("  load          yuk dengeleyici istatistikleri");
             write_line("  ipc           mesaj kuyrugu + paylasimli bolge");
@@ -488,16 +546,69 @@ fn execute(line: &str) {
                     acc
                 }
             });
+            // `kill` POSIX'te "SIGKILL gonder"in kisaltmasidir; TCMK'de de
+            // oyle. Fark su ki artik `signal` ile baska bir sinyal de
+            // gonderilebilir ve surec onu yakalayabilir -- SIGKILL ise
+            // yakalanamaz, hedefi kosulsuz durdurur.
             match id {
-                Some(i) => match scheduler::terminate(i) {
+                Some(i) => match signal::raise(i, signal::SIGKILL) {
                     Ok(()) => {
-                        write_str("sonlandirildi: gorev #");
+                        write_str("SIGKILL gonderildi: gorev #");
                         write_num(i);
                         newline();
                     }
-                    Err(e) => write_line(e),
+                    Err(_) => write_line("boyle bir gorev yok ('ps' ile listeleyin)"),
                 },
                 None => write_line("kullanim: kill <gorev-no>  ('ps' ile listeleyin)"),
+            }
+        }
+        "signal" => {
+            // signal <gorev-no> <sinyal>
+            match two_numbers(arg) {
+                Some((task, signo)) => match signal::raise(task, signo as u32) {
+                    Ok(()) => {
+                        write_str(signal::name_of(signo as u32));
+                        write_str(" gonderildi: gorev #");
+                        write_num(task);
+                        write_line(" (teslim, surec bir sonraki syscall'da Ring 3'e donerken)");
+                    }
+                    Err(signal::SignalError::InvalidSignal) => {
+                        write_line("gecersiz sinyal (1..31)")
+                    }
+                    Err(signal::SignalError::Uncatchable) => write_line("bu sinyal yakalanamaz"),
+                    Err(signal::SignalError::NoSuchTask) => {
+                        write_line("boyle bir gorev yok ('ps' ile listeleyin)")
+                    }
+                },
+                None => {
+                    write_line("kullanim: signal <gorev-no> <sinyal-no>");
+                    write_line("  9=SIGKILL (yakalanamaz)  10=SIGUSR1  12=SIGUSR2  15=SIGTERM");
+                }
+            }
+        }
+        "sigs" => {
+            write_str("gonderilen: ");
+            write_num(signal::sent_count() as usize);
+            write_str("   teslim edilen: ");
+            write_num(signal::delivered_count() as usize);
+            newline();
+            write_line("  id  gorev        isleyicili        bekleyen");
+            for i in 0..scheduler::MAX_TASKS {
+                if scheduler::state_of(i) == scheduler::TaskState::Unused {
+                    continue;
+                }
+                let handled = signal::handled_mask(i);
+                let pending = signal::pending_mask(i);
+                if handled == 0 && pending == 0 {
+                    continue;
+                }
+                write_num_right(i, 4);
+                write_str("  ");
+                write_padded(scheduler::name_of(i), 12);
+                write_str(" ");
+                write_sig_list(handled, 17);
+                write_sig_list(pending, 0);
+                newline();
             }
         }
         "echo" => write_line(arg),

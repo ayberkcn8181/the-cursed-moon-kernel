@@ -91,6 +91,32 @@ impl SyscallFrame {
             esp: iret.add(3).read(),
         }
     }
+
+    /// `user_context`'in tersi: cerceveye yazilan baglam, `popa` + `iret`
+    /// ile Ring 3'e **oldugu gibi** doner.
+    ///
+    /// Sinyal teslimi bunu ister: kullanicinin EIP'si isleyiciye, ESP'si
+    /// isleyicinin cercevesine cevrilir; `sigreturn` de saklanan baglami
+    /// ayni yoldan geri koyar.
+    ///
+    /// CS/SS'e dokunulmaz -- ayricalik seviyesi degismiyor.
+    ///
+    /// # Safety
+    /// `user_context` ile ayni kosul: yalnizca Ring 3'ten gelen bir
+    /// cerceve icin gecerlidir.
+    pub unsafe fn set_user_context(&mut self, ctx: &UserContext) {
+        self.edi = ctx.edi;
+        self.esi = ctx.esi;
+        self.ebp = ctx.ebp;
+        self.ebx = ctx.ebx;
+        self.edx = ctx.edx;
+        self.ecx = ctx.ecx;
+        self.eax = ctx.eax;
+        let iret = (self as *mut SyscallFrame as *mut u32).add(8);
+        iret.write(ctx.eip);
+        iret.add(2).write(ctx.eflags);
+        iret.add(3).write(ctx.esp);
+    }
 }
 
 impl UserContext {
@@ -111,6 +137,17 @@ impl UserContext {
     /// Baglamin devam edecegi komut adresi (gunluk icin).
     pub fn instruction_pointer(&self) -> usize {
         self.eip as usize
+    }
+
+    /// Kullanici yigin isaretcisi -- sinyal cercevesi buraya kurulur.
+    pub fn stack_pointer(&self) -> usize {
+        self.esp as usize
+    }
+
+    /// Baglami baska bir kod adresine ve yigina cevirir (sinyal teslimi).
+    pub fn redirect(&mut self, ip: usize, sp: usize) {
+        self.eip = ip as u32;
+        self.esp = sp as u32;
     }
 }
 

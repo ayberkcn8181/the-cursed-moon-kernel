@@ -93,6 +93,10 @@ pub unsafe fn fork(frame: &SyscallFrame) -> Result<usize, ForkError> {
     // oldugu gibi gecerlidir.
     crate::level0a::kernel_api::clone_program_break(child);
 
+    // Sinyal isleyicileri kopyalanir (POSIX), bekleyen sinyaller
+    // kopyalanmaz -- cocuk temiz baslar.
+    crate::level0b1::signal::clone_into(child);
+
     scheduler::set_address_space(child, child_space);
 
     crate::println!(

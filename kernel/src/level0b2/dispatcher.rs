@@ -58,6 +58,15 @@ pub fn handle_syscall(frame: &mut SyscallFrame) {
     }
 
     posix::dispatch(frame);
+
+    // Cagri islendi, Ring 3'e donulmek uzere: **sinyal teslim noktasi**
+    // burasidir. Bekleyen bir sinyal varsa cerceve isleyiciye cevrilir,
+    // yani surec cagirdigi yere degil isleyiciye doner.
+    //
+    // Teslimin kesme isleyicisinde degil de burada yapilmasi bilincli:
+    // burada cercevenin Ring 3'ten geldigi kesindir ve `set_user_context`
+    // ile guvenle yazilabilir.
+    unsafe { crate::level0b1::signal::deliver_pending(frame) };
 }
 
 /// IDT vektor 46'dan (int 0x2E) gelen Windows NT uyumlu sistem cagrisi.
@@ -78,4 +87,10 @@ pub fn handle_nt_syscall(frame: &mut SyscallFrame) {
     }
 
     crate::level0b1::nt_subsystem::nt_syscalls::dispatch(frame);
+
+    // Sinyaller Windows sureclerinde de gecerlidir: cekirdek acisindan
+    // ikisi de ayni gorev tablosundaki ayni turden bir surectir. Bir PE
+    // uygulamasi `SIGKILL`/`SIGTERM` ile durur; isleyici kaydetmek icin
+    // POSIX cagrisini kullanmasi gerekir, ki bu da mumkun.
+    unsafe { crate::level0b1::signal::deliver_pending(frame) };
 }

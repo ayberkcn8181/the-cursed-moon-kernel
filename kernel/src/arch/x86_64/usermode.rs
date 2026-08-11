@@ -176,3 +176,44 @@ pub fn in_user_mode() -> bool {
 pub unsafe fn leave_user_mode() -> ! {
     arch_return_from_user(crate::level0a::core::scheduler::current_resume_slot())
 }
+
+/// Ring 3 yigininin ustune bir **sinyal cercevesi** kurar ve baglami
+/// isleyiciye cevirir.
+///
+/// System V AMD64 duzeni: ilk arguman RDI'dedir, yigina yalnizca donus
+/// adresi konur.
+///
+/// ```text
+///   RDI     = signo
+///   [rsp]   = restorer   (isleyici `ret` ile buraya doner)
+///
+/// ```
+///
+/// Iki incelik:
+///
+/// * **Kirmizi bolge** (red zone): `rsp`'nin 128 bayt altini yaprak
+///   fonksiyonlar cekirdekten haber vermeden kullanabilir. Cerceve oraya
+///   kurulursa calisan kodun yerel degiskenleri ezilir; bu yuzden once
+///   128 bayt atlanir. (Linux de aynisini yapar.)
+/// * **Hizalama**: `call` sonrasi `rsp % 16 == 8` beklenir; donus
+///   adresini ittikten sonra tam bu durum olusur.
+///
+/// # Safety
+/// Cagiran gorevin adres uzayi etkin olmalidir; yazilan adres dogrulanir.
+pub unsafe fn build_signal_frame(
+    context: &mut UserContext,
+    signo: u32,
+    handler: usize,
+    restorer: usize,
+) -> Option<()> {
+    use crate::level0a::core::mmu;
+
+    let sp = ((context.stack_pointer() - 128) & !0xF) - 8;
+    if !mmu::is_user_accessible(sp) || !mmu::is_user_accessible(sp + 7) {
+        return None;
+    }
+    (sp as *mut u64).write_unaligned(restorer as u64);
+    context.rdi = signo as u64;
+    context.redirect(handler, sp);
+    Some(())
+}

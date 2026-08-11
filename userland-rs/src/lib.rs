@@ -61,6 +61,8 @@ pub mod gui;
 #[cfg(not(target_os = "windows"))]
 pub mod io;
 #[cfg(not(target_os = "windows"))]
+pub mod signal;
+#[cfg(not(target_os = "windows"))]
 pub mod sys;
 
 // --- Windows/NT tarafi (PE ikilisi) ---

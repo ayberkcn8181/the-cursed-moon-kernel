@@ -173,3 +173,43 @@ pub fn in_user_mode() -> bool {
 pub unsafe fn leave_user_mode() -> ! {
     arch_return_from_user(crate::level0a::core::scheduler::current_resume_slot())
 }
+
+/// Ring 3 yigininin ustune bir **sinyal cercevesi** kurar ve baglami
+/// isleyiciye cevirir.
+///
+/// i386 cdecl duzeni, isleyiciye girildigi andaki yigin:
+///
+/// ```text
+///   [esp]   = restorer   (donus adresi -- isleyici `ret` ile buraya doner)
+///   [esp+4] = signo      (arg1)
+/// ```
+///
+/// `restorer`, kullanici tarafinin verdigi kucuk bir tramplendir; tek
+/// isi `sigreturn` cagirmaktir. Gercek i386 Linux'ta da bu boyledir
+/// (`sigaction.sa_restorer`) -- cekirdek kullanici yiginina kod yazmak
+/// zorunda kalmasin diye.
+///
+/// Hizalama: cagri geleneginde fonksiyon girisinde `esp+4`'un 16'ya
+/// bolunmesi beklenir (`call` donus adresini ittikten sonraki durum), o
+/// yuzden `esp % 16 == 12` secilir.
+///
+/// # Safety
+/// Cagiran gorevin adres uzayi etkin olmalidir; yazilan adresler
+/// dogrulanir, dogrulama basarisizsa `None` doner.
+pub unsafe fn build_signal_frame(
+    context: &mut UserContext,
+    signo: u32,
+    handler: usize,
+    restorer: usize,
+) -> Option<()> {
+    use crate::level0a::core::mmu;
+
+    let sp = ((context.stack_pointer() - 8) & !0xF) - 4;
+    if !mmu::is_user_accessible(sp) || !mmu::is_user_accessible(sp + 7) {
+        return None;
+    }
+    (sp as *mut u32).write_unaligned(restorer as u32);
+    ((sp + 4) as *mut u32).write_unaligned(signo);
+    context.redirect(handler, sp);
+    Some(())
+}

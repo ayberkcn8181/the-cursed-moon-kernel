@@ -87,6 +87,17 @@ impl UserContext {
     pub fn instruction_pointer(&self) -> usize {
         self.rip as usize
     }
+
+    /// Kullanici yigin isaretcisi -- sinyal cercevesi buraya kurulur.
+    pub fn stack_pointer(&self) -> usize {
+        self.rsp as usize
+    }
+
+    /// Baglami baska bir kod adresine ve yigina cevirir (sinyal teslimi).
+    pub fn redirect(&mut self, ip: usize, sp: usize) {
+        self.rip = ip as u64;
+        self.rsp = sp as u64;
+    }
 }
 
 impl SyscallFrame {
@@ -127,6 +138,35 @@ impl SyscallFrame {
             rsp: user_rsp,
             rflags: self.r11,
         }
+    }
+
+    /// `user_context`'in tersi: cerceveye yazilan baglam `sysretq` ile
+    /// Ring 3'e **oldugu gibi** doner.
+    ///
+    /// RIP ve RFLAGS'in RCX/R11 uzerinden gitmesi burada bir kolaylik:
+    /// `sysretq` zaten o ikisini kullanir, yani ayri bir yol gerekmez.
+    ///
+    /// # Safety
+    /// `user_context` ile ayni kosul: yalnizca Ring 3'ten gelen bir
+    /// cerceve icin gecerlidir.
+    pub unsafe fn set_user_context(&mut self, ctx: &UserContext) {
+        self.rax = ctx.rax;
+        self.rbx = ctx.rbx;
+        self.rdx = ctx.rdx;
+        self.rsi = ctx.rsi;
+        self.rdi = ctx.rdi;
+        self.rbp = ctx.rbp;
+        self.r8 = ctx.r8;
+        self.r9 = ctx.r9;
+        self.r10 = ctx.r10;
+        self.r12 = ctx.r12;
+        self.r13 = ctx.r13;
+        self.r14 = ctx.r14;
+        self.r15 = ctx.r15;
+        // RCX = donus RIP'i, R11 = donus RFLAGS'i (sysretq boyle ister).
+        self.rcx = ctx.rip;
+        self.r11 = ctx.rflags;
+        (self as *mut SyscallFrame as *mut u64).add(15).write(ctx.rsp);
     }
 
     /// x86_64 Linux ABI: RAX = syscall numarasi.

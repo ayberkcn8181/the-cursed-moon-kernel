@@ -15,3 +15,4 @@ pub mod linux_subsystem;
 pub mod nt_subsystem;
 pub mod fork;
 pub mod process;
+pub mod signal;

@@ -36,6 +36,10 @@ mod i386_numbers {
     pub const SYS_WAITPID: usize = 7;
     pub const SYS_PIPE: usize = 42;
     pub const SYS_BRK: usize = 45;
+    pub const SYS_GETPID: usize = 20;
+    pub const SYS_KILL: usize = 37;
+    pub const SYS_SIGNAL: usize = 48;
+    pub const SYS_SIGRETURN: usize = 119;
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -50,6 +54,11 @@ mod x86_64_numbers {
     pub const SYS_EXIT: usize = 60;
     /// Linux x86_64'te `waitpid` yoktur; `wait4` onun yerine gecer.
     pub const SYS_WAITPID: usize = 61;
+    pub const SYS_GETPID: usize = 39;
+    pub const SYS_KILL: usize = 62;
+    /// x86_64'te klasik `signal` yoktur; yerini `rt_sigaction` alir.
+    pub const SYS_SIGNAL: usize = 13;
+    pub const SYS_SIGRETURN: usize = 15;
 }
 
 // --- TCMK'ye ozgu cagrilar (POSIX'te karsiligi yok) ---

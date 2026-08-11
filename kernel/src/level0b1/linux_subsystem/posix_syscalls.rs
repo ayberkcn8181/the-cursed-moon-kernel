@@ -22,6 +22,7 @@ use crate::arch::cpu::regs::SyscallFrame;
 use crate::level0a::core::mmu;
 use crate::level0a::gui_api;
 use crate::level0a::kernel_api::{self, KernelError};
+use crate::level0b1::signal;
 
 // --- TCMK'ye ozgu GUI cagrilari ---
 //
@@ -59,6 +60,13 @@ mod i386_numbers {
     pub const SYS_OPEN: u32 = 5;
     pub const SYS_CLOSE: u32 = 6;
     pub const SYS_BRK: u32 = 45;
+    pub const SYS_GETPID: u32 = 20;
+    pub const SYS_KILL: u32 = 37;
+    /// i386 Linux'ta klasik `signal(2)`. TCMK ucuncu bir arguman ister
+    /// (tramplen); gercek Linux'ta o deger `sigaction.sa_restorer`
+    /// alanindan gelir -- yani fikir ayni, tasima yolu farkli.
+    pub const SYS_SIGNAL: u32 = 48;
+    pub const SYS_SIGRETURN: u32 = 119;
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -73,6 +81,13 @@ mod x86_64_numbers {
     pub const SYS_EXIT: u32 = 60;
     /// Linux x86_64'te `waitpid` yoktur; `wait4` onun yerine gecer.
     pub const SYS_WAITPID: u32 = 61;
+    pub const SYS_GETPID: u32 = 39;
+    pub const SYS_KILL: u32 = 62;
+    /// x86_64'te klasik `signal` numarasi yoktur; yerini `rt_sigaction`
+    /// alir. TCMK ayni yuvayi sadelestirilmis uc registerli bicimle
+    /// kullanir (isleyici, tramplen) -- `sigaction` yapisi kopyalanmaz.
+    pub const SYS_SIGNAL: u32 = 13;
+    pub const SYS_SIGRETURN: u32 = 15;
 }
 
 // Linux hata kodlari negatif dondurulur (ornegin -EBADF = -9).
@@ -87,6 +102,8 @@ const ENOSYS: i32 = 38;
 const EAGAIN: i32 = 11;
 /// Beklenecek boyle bir cocuk yok.
 const ECHILD: i32 = 10;
+/// Boyle bir surec yok (`kill` hedefi).
+const ESRCH: i32 = 3;
 
 /// `waitpid` secenegi: cocuk bitmemisse bloke olma, 0 don.
 const WNOHANG: usize = 1;
@@ -304,6 +321,39 @@ pub fn dispatch(frame: &mut SyscallFrame) {
             crate::level0a::core::scheduler::sleep_ticks(ticks);
             frame.set_return(0);
             return;
+        }
+
+        SYS_GETPID => crate::level0a::core::scheduler::current_id() as i32,
+
+        SYS_KILL => {
+            // arg1 = hedef gorev, arg2 = sinyal.
+            //
+            // POSIX'te `kill` "oldur" demek degildir; "sinyal gonder"
+            // demektir. Oldurme, sinyalin **varsayilan** davranisidir.
+            match signal::raise(arg1, arg2 as u32) {
+                Ok(()) => 0,
+                Err(signal::SignalError::NoSuchTask) => -ESRCH,
+                Err(_) => -EINVAL,
+            }
+        }
+
+        SYS_SIGNAL => {
+            // arg1 = sinyal, arg2 = isleyici, arg3 = tramplen.
+            let task = crate::level0a::core::scheduler::current_id();
+            match signal::set_handler(task, arg1 as u32, arg2, arg3) {
+                Ok(previous) => previous as i32,
+                Err(_) => -EINVAL,
+            }
+        }
+
+        SYS_SIGRETURN => {
+            // Baglam geri konur; `set_return` CAGRILMAZ, cunku donus
+            // degeri de saklanan baglamin parcasidir. Kullanicinin
+            // isleyiciye girmeden once aldigi EAX/RAX aynen geri gelir.
+            if unsafe { signal::sigreturn(frame) } {
+                return;
+            }
+            -EINVAL
         }
 
         _ => {

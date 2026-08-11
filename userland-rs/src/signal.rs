@@ -1,0 +1,109 @@
+//! POSIX sinyalleri -- kullanici tarafi.
+//!
+//! Sinyal, uygulamanin kendi akisini kesip cagirdigi bir islevdir; ama
+//! **uygulama onu cagirmaz**, cekirdek cagirir. Isleyici dondugunde
+//! program hicbir sey olmamis gibi kaldigi yerden devam eder.
+//!
+//! ## Tramplen neden var
+//!
+//! Isleyici sirandan bir Rust fonksiyonudur; bittiginde `ret` yapar. O
+//! `ret` bir yere donmek zorunda -- ama donulecek "cagiran" yoktur,
+//! cunku cagri gercek bir cagri degildi. Bu yuzden cekirdek yigina bir
+//! donus adresi koyar ve o adres burada tanimli tramplendir: tek isi
+//! `sigreturn` cagirmaktir, boylece cekirdek saklanan baglami geri koyar.
+//!
+//! Tramplenin **kullanici tarafinda** olmasi bilincli: aksi halde
+//! cekirdegin surecin adres uzayina kod yazmasi gerekirdi. Gercek i386
+//! Linux'ta da cozum aynidir (`sigaction.sa_restorer`).
+//!
+//! ## Kullanim
+//!
+//! ```ignore
+//! extern "C" fn on_usr1(signo: u32) { /* ... */ }
+//! signal::install(signal::SIGUSR1, on_usr1);
+//! ```
+//!
+//! Isleyici icinde ne yapilabilecegi sinirlidir: cekirdek isleyici
+//! calisirken yeni sinyal teslim etmez, ama isleyici asil akisin ortasinda
+//! calistigi icin paylasilan durumu bozabilir. Sayac artirmak, bayrak
+//! kaldirmak guvenlidir.
+
+use crate::sys;
+
+pub const SIGHUP: u32 = 1;
+pub const SIGINT: u32 = 2;
+pub const SIGQUIT: u32 = 3;
+pub const SIGILL: u32 = 4;
+pub const SIGABRT: u32 = 6;
+pub const SIGFPE: u32 = 8;
+/// Yakalanamaz: `install` bu sinyal icin basarisiz olur.
+pub const SIGKILL: u32 = 9;
+pub const SIGUSR1: u32 = 10;
+pub const SIGSEGV: u32 = 11;
+pub const SIGUSR2: u32 = 12;
+pub const SIGALRM: u32 = 14;
+pub const SIGTERM: u32 = 15;
+
+/// Varsayilan davranis (TCMK'de: sureci sonlandir).
+pub const SIG_DFL: usize = 0;
+/// Sinyali yok say.
+pub const SIG_IGN: usize = 1;
+
+// Tramplen. `global_asm!` ile yazilir cunku bir fonksiyon prologu/epilogu
+// istemiyoruz: cekirdek buraya `ret` ile gelir, biz de dogrudan cekirdege
+// geri gireriz. Cagri **donmez**; cekirdek baglami degistirdigi icin
+// islemci baska bir noktada uyanir.
+#[cfg(target_arch = "x86")]
+core::arch::global_asm!(
+    ".globl __tcmk_sigreturn",
+    "__tcmk_sigreturn:",
+    "mov eax, 119",
+    "int 0x80",
+);
+
+#[cfg(target_arch = "x86_64")]
+core::arch::global_asm!(
+    ".globl __tcmk_sigreturn",
+    "__tcmk_sigreturn:",
+    "mov eax, 15",
+    "syscall",
+);
+
+extern "C" {
+    fn __tcmk_sigreturn();
+}
+
+/// Bir sinyal icin isleyici kurar; onceki isleyiciyi doner.
+///
+/// `SIGKILL` icin basarisizdir (negatif doner) -- yakalanamaz.
+pub fn install(signo: u32, handler: extern "C" fn(u32)) -> isize {
+    unsafe {
+        sys::syscall3(
+            sys::SYS_SIGNAL,
+            signo as usize,
+            handler as usize,
+            __tcmk_sigreturn as *const () as usize,
+        ) as isize
+    }
+}
+
+/// Sinyali yok saydirir.
+pub fn ignore(signo: u32) -> isize {
+    unsafe { sys::syscall3(sys::SYS_SIGNAL, signo as usize, SIG_IGN, 0) as isize }
+}
+
+/// Varsayilan davranisa dondurur.
+pub fn default(signo: u32) -> isize {
+    unsafe { sys::syscall3(sys::SYS_SIGNAL, signo as usize, SIG_DFL, 0) as isize }
+}
+
+/// Bir surece sinyal gonderir. POSIX'te `kill` "oldur" degil "sinyal
+/// gonder" demektir; oldurme, sinyalin varsayilan davranisidir.
+pub fn kill(pid: usize, signo: u32) -> isize {
+    unsafe { sys::syscall2(sys::SYS_KILL, pid, signo as usize) as isize }
+}
+
+/// Calisan surecin kimligi.
+pub fn getpid() -> usize {
+    unsafe { sys::syscall0(sys::SYS_GETPID) }
+}

@@ -42,7 +42,8 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 8 | **`waitpid`** (`Waiting` durumu, cikis kodu, `WNOHANG`) | ✅ (i386 + x86_64) |
 | 8 | **`pipe`** + surec basina fd tablosu | ✅ |
 | 8 | **Surec basina program break** (`brk`) + **`read(0)` = klavye** | ✅ |
-| 8+ | sinyaller, musl/busybox | ⏳ yapilmadi |
+| 8 | **POSIX sinyalleri** (`kill`/`signal`/`sigreturn`, isleyici cagrisi) | ✅ (i386 + x86_64) |
+| 8+ | musl/busybox | ⏳ yapilmadi |
 
 ## Grafiksel Alfa
 
@@ -63,12 +64,12 @@ Ekranda gorunenler:
 
   | Grup | Komutlar |
   |---|---|
-  | sistem | `ps` `top` `kill <id>` `svc` `health` `uptime` `date` `ver` |
+  | sistem | `ps` `top` `kill <id>` `signal <id> <sinyal>` `sigs` `svc` `health` `uptime` `date` `ver` |
   | Level-0b2 | `load` `ipc` `faults` `stall <sn>` |
   | bellek/disk | `mem` `disk` `df` `format onayla` `sync` `install onayla` |
   | dosya | `ls` `cat <yol>` `save <yol> <metin>` `cp <kaynak> <hedef>` `rm <yol>` |
   | uygulama/pencere | `apps` `run <ad>` `win` `focus <id>` `mouse` |
-  | uygulamalar (ELF) | `paint` `plasma` `notes` `menu` `twins` `relay` `echo2` `crash` `hog` `spin` |
+  | uygulamalar (ELF) | `paint` `plasma` `notes` `menu` `twins` `relay` `echo2` `sigdemo` `crash` `hog` `spin` |
   | uygulamalar (PE32) | `winclock` (ham `int 0x2E`) `winpad` (IAT) |
   | diger | `echo <metin>` `pipes` `clear` `help` |
 - **Sistem Gunlugu** -- cekirdek kaydinin canli goruntusu (konsol halka
@@ -1051,6 +1052,86 @@ olan bir surec penceresini de dondurur, oysa buradaki uygulamalar kendi
 cizim dongulerini surer. `relay`'in ebeveyni her karede yoklar ve grafik
 akici kalir.
 
+## Sinyaller: cekirdek uygulamanin akisini kesip isleyicisini cagiriyor
+
+Butun diger sistem cagrilarinda **kullanici cagirir, cekirdek doner**.
+Sinyalde bu ters doner: cekirdek cagirir, kullanici doner. Bir surece
+sinyal geldiginde cekirdek onun Ring 3 baglamini kenara koyar, yigininin
+ustune sahte bir cagri cercevesi kurar ve donusu isleyicinin adresine
+cevirir. Surec hicbir sey cagirmadigi halde kendini isleyicinin icinde
+bulur.
+
+```
+tcmk> run sigdemo
+tcmk> signal 4 10        # SIGUSR1
+tcmk> signal 4 12        # SIGUSR2
+tcmk> signal 4 15        # SIGTERM -- isleyici kuruldugu icin uygulama YASAR
+tcmk> kill 4             # SIGKILL -- yakalanamaz, aninda sonlanir
+```
+
+![sigdemo](docs/screenshot-sigdemo.png)
+
+Ekrandaki "kare" sayaci sinyalin nerede yakalandigini gosterir: sayac
+kesintisiz artmaya devam eder, cunku isleyici dondugunde surec **tam
+kaldigi komuttan** devam eder. "son sinyal kare" alani ise isleyicinin
+cizim dongusunun ortasinda calistigini kanitlar.
+
+### Isleyiciden nasil geri donuluyor
+
+Isleyici siradan bir fonksiyondur; bitince `ret` yapar. Ama donulecek bir
+"cagiran" yoktur -- cagri gercek bir cagri degildi. Cozum, cekirdegin
+yigina bir donus adresi koymasi: kullanici kutuphanesindeki kucuk bir
+**tramplen**. Tek isi `sigreturn` cagirmaktir; cekirdek de saklanan
+baglami geri koyar.
+
+```asm
+__tcmk_sigreturn:            ; i386
+    mov eax, 119             ; sys_sigreturn
+    int 0x80
+```
+
+Tramplenin kullanici tarafinda olmasi bilincli: aksi halde cekirdegin
+surecin adres uzayina **kod yazmasi** gerekirdi. Gercek i386 Linux'ta da
+cozum aynidir (`sigaction.sa_restorer`).
+
+Cerceve duzeni mimariye gore degisir ve iki incelik tasir:
+
+| | i386 | x86_64 |
+|---|---|---|
+| sinyal no | `[esp+4]` (cdecl) | `RDI` (SysV) |
+| donus adresi | `[esp]` | `[rsp]` |
+| hizalama | `esp % 16 == 12` | `rsp % 16 == 8` |
+| kirmizi bolge | yok | `rsp`'nin 128 bayt alti **atlanir** |
+
+Kirmizi bolge atlanmazsa, cerceve o anda calisan yaprak fonksiyonun
+yerel degiskenlerinin ustune kurulur ve surec sinyalden sonra bozuk
+verilerle devam eder -- teshisi cok zor bir hata. (Linux de ayni 128 bayti
+atlar.)
+
+### Teslim ne zaman olur
+
+Sinyal aninda calismaz; bekleyenler maskesine yazilir ve surec bir
+sonraki sefer **cekirdekten Ring 3'e donerken** teslim edilir -- yani
+teslim noktasi bir syscall donusudur (`level0b2::dispatcher`). TCMK
+uygulamalari her karede `win_flush` cagirdigi icin gecikme bir kareden
+kucuktur.
+
+`SIGKILL` bu kuralin disindadir: beklemeye alinmaz, gonderen taraf hedefi
+dogrudan sonlandirir. Beklemeye alinsaydi hicbir syscall yapmayan bir
+surec (`spin` gibi) oldurulemezdi -- yani "her seyi durdurabilen komut"
+olma ozelligi kaybolurdu.
+
+### `fork` ve `execve` ile iliskisi
+
+* **`fork`**: isleyiciler cocuga kopyalanir (POSIX), bekleyen sinyaller
+  kopyalanmaz -- cocuk temiz baslar.
+* **`execve`**: butun isleyiciler sifirlanir. Kayitli adresler artik var
+  olmayan bir programa aittir; devralinsalardi surec kendi kodunun
+  ortasina dallanirdi.
+
+Kabuk tarafinda `sigs` komutu hangi gorevin hangi sinyalleri yakaladigini
+ve bekleyenleri listeler.
+
 ## Standart girdi: `read(0, ...)` gercekten klavye
 
 Bu ana kadar TCMK uygulamalari tuslari **TCMK'ye ozgu** bir cagriyla
@@ -1435,8 +1516,12 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
   biriken tuslari **o an ne varsa** dondurur, tus yoksa 0. Bloke eden bir
   `read` GUI dongusunu de dondururdu; terminal disiplini (satir tamponu,
   yankilama, `termios`) da yok -- yankiyi uygulama kendi yapar.
-- **Sinyal yok.** `kill` bir gorevi sonlandirir ama POSIX sinyalleri
-  (`SIGTERM`, isleyiciler) yok.
+- **Sinyal teslimi syscall donusune baglidir.** Hicbir syscall yapmayan
+  saf hesap dongusu sinyali gormez (`spin` boyle); `SIGKILL` ise
+  isbirligi gerektirmedigi icin her zaman calisir. Ayrica maskeleme
+  (`sigprocmask`), `siginfo`/`sigaction` bayraklari, `alarm` ve
+  gercek-zamanli sinyaller yok; isleyici icinde ikinci bir sinyal teslim
+  edilmez (ic ice cagri yok).
 - **`waitpid` yalnizca belirli bir cocugu bekler.** `pid = -1` ("herhangi
   bir cocuk") ve surec gruplari yok; oksuz kalan gorevler de
   toplanmiyor -- gorev yuvasi surec bitse de tabloda kalir.
@@ -1449,6 +1534,5 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
 
 ## Kapsam Disi (sonraki fazlar)
 
-x86_64 (Faz 4) ve AArch64 (Faz 6) portlari, NT/PE uyumlulugu (Faz 7),
-fork/execve + sinyaller (Faz 8), ext2/tmpfs ve genis POSIX (Faz 9-10),
+AArch64 portu (Faz 6), ext2/tmpfs ve genis POSIX (Faz 9-10),
 musl/busybox + shell (Faz 11-12), framebuffer/virtio-net (Faz 13-14).
