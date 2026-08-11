@@ -13,6 +13,9 @@
 //!   45 = sys_brk     (EBX = yeni break, 0 ise mevcut break dondurulur)
 //!    2 = sys_fork    (argumansiz; ebeveyne cocuk id, cocuga 0 doner)
 //!    7 = sys_waitpid (EBX = pid, ECX = *status, EDX = secenekler)
+//!
+//! x86_64 numaralari farklidir (fork = 57, wait4 = 61); ikisi de ayni
+//! cevirmene duser.
 //!   42 = sys_pipe    (argumansiz; (okuma << 16) | yazma doner)
 
 use crate::arch::cpu::regs::SyscallFrame;
@@ -66,7 +69,10 @@ mod x86_64_numbers {
     pub const SYS_CLOSE: u32 = 3;
     pub const SYS_BRK: u32 = 12;
     pub const SYS_PIPE: u32 = 22;
+    pub const SYS_FORK: u32 = 57;
     pub const SYS_EXIT: u32 = 60;
+    /// Linux x86_64'te `waitpid` yoktur; `wait4` onun yerine gecer.
+    pub const SYS_WAITPID: u32 = 61;
 }
 
 // Linux hata kodlari negatif dondurulur (ornegin -EBADF = -9).
@@ -78,14 +84,11 @@ const EINVAL: i32 = 22;
 const ENOSYS: i32 = 38;
 /// Kaynak gecici olarak yok -- `fork` icin gorev tablosu ya da cerceve
 /// havuzu dolu demektir (Linux `fork` da bu kodu dondurur).
-#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
 const EAGAIN: i32 = 11;
 /// Beklenecek boyle bir cocuk yok.
-#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
 const ECHILD: i32 = 10;
 
 /// `waitpid` secenegi: cocuk bitmemisse bloke olma, 0 don.
-#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
 const WNOHANG: usize = 1;
 
 /// `waitpid`'in durum kelimesini kullaniciya yazar.
@@ -93,7 +96,6 @@ const WNOHANG: usize = 1;
 /// Linux kodlamasi: normal cikista `status = (kod & 0xFF) << 8`, boylece
 /// `WEXITSTATUS(status)` = `(status >> 8) & 0xFF` calisir. Isaretci NULL
 /// olabilir (POSIX'te de oyle); o zaman yazilmaz ve cagri basarilidir.
-#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
 fn store_status(ptr: usize, code: u32) -> bool {
     if ptr == 0 {
         return true;
@@ -164,7 +166,6 @@ pub fn dispatch(frame: &mut SyscallFrame) {
             return;
         }
 
-        #[cfg(target_arch = "x86")]
         SYS_FORK => {
             // Tek cagri, iki donus: ebeveyn cocugun kimligini alir,
             // cocuk 0 alir (bkz. `level0b1::fork`).
@@ -178,7 +179,6 @@ pub fn dispatch(frame: &mut SyscallFrame) {
             }
         }
 
-        #[cfg(target_arch = "x86")]
         SYS_WAITPID => {
             // waitpid(pid, *status, options)
             //

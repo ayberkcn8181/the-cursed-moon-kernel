@@ -12,7 +12,7 @@
 //! 1. Ebeveynin adres uzayi **icerigiyle** kopyalanir
 //!    (`mmu::clone_user_space`).
 //! 2. Syscall cercevesinden ebeveynin tam Ring 3 baglami okunur
-//!    (`SyscallFrame::user_context`) ve `eax = 0` yapilir -- cocugun
+//!    (`SyscallFrame::user_context`) ve donus degeri sifirlanir -- cocugun
 //!    `fork`'tan gorecegi donus degeri budur.
 //! 3. Bu baglam cocuk gorevin yuvasina yazilir; gorev `child_task` ile
 //!    baslar ve dogrudan Ring 3'e, ebeveynin durdugu komuta doner.
@@ -40,18 +40,7 @@ use crate::level0a::core::{mmu, scheduler};
 /// icin arguman gecirilemez; baglam bu tablo uzerinden aktarilir
 /// (`launcher`'in `EXEC_PATH` ile ayni kalip).
 static mut CHILD_CONTEXT: [UserContext; scheduler::MAX_TASKS] =
-    [UserContext {
-        edi: 0,
-        esi: 0,
-        ebp: 0,
-        ebx: 0,
-        edx: 0,
-        ecx: 0,
-        eax: 0,
-        eip: 0,
-        esp: 0,
-        eflags: 0,
-    }; scheduler::MAX_TASKS];
+    [UserContext::ZERO; scheduler::MAX_TASKS];
 static mut CHILD_PENDING: [bool; scheduler::MAX_TASKS] = [false; scheduler::MAX_TASKS];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,7 +78,7 @@ pub unsafe fn fork(frame: &SyscallFrame) -> Result<usize, ForkError> {
     // 3. Ebeveynin baglamini al, donus degerini sifirla: cocuk `fork`'tan
     //    0 ile doner -- POSIX'in "hangisiyim?" sorusuna verdigi cevap.
     let mut context = frame.user_context();
-    context.eax = 0;
+    context.set_return(0);
 
     let slot = core::ptr::addr_of_mut!(CHILD_CONTEXT) as *mut UserContext;
     slot.add(child).write(context);
@@ -107,7 +96,7 @@ pub unsafe fn fork(frame: &SyscallFrame) -> Result<usize, ForkError> {
         "[LEVEL-0b1] fork: gorev #{} -> #{} (eip=0x{:08x}, {} sayfa kopyalandi)",
         parent,
         child,
-        context.eip,
+        context.instruction_pointer(),
         mmu::user_pages(child_space)
     );
 

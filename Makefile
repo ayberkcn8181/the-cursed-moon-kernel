@@ -147,8 +147,8 @@ userland-rust:
 # hedefinin JSON'u aynen kullanilir: userland icin farkli olmasi gereken
 # tek sey taban adresidir, o da bir baglayici argumani.
 USER64_TARGET_DIR := $(TARGET_DIR)/userland64
-# fork/waitpid ve PE tarafi i386'ya ozgu oldugu icin liste daha kisa.
-USER64_APPS := hello plasma paint notes
+# PE tarafi (winclock/winpad) i386'ya ozgu; gerisi iki mimaride de var.
+USER64_APPS := hello plasma paint notes twins relay
 
 userland-x86_64:
 	@mkdir -p $(ROOT_DIR)/userland

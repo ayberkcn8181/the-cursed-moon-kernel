@@ -181,7 +181,6 @@ pub fn close_end(index: usize, writer: bool) {
 ///
 /// Sayaclar olmasa cocugun kapattigi uc boruyu tumden oldururdu; iki
 /// taraf da kapatana kadar acik kalmasi gerekir.
-#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
 pub fn add_ref(index: usize, writer: bool) {
     if index >= MAX_PIPES || !PIPES[index].used.load(Ordering::Relaxed) {
         return;

@@ -38,8 +38,8 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 9 | **Kalici depolama**: ATA PIO, MBR, TCMKFS (yazilabilir) | ✅ (i386) |
 | — | **Kendi onyukleyicisi** + diske kurulum (`install`) | ✅ (i386) |
 | 8 | **`execve`** (surec kendi yerine program yukler) | ✅ (i386) |
-| 8 | **`fork`** (adres uzayi kopyasi + iki kez donen cagri) | ✅ (i386) |
-| 8 | **`waitpid`** (`Waiting` durumu, cikis kodu, `WNOHANG`) | ✅ (i386) |
+| 8 | **`fork`** (adres uzayi kopyasi + iki kez donen cagri) | ✅ (i386 + x86_64) |
+| 8 | **`waitpid`** (`Waiting` durumu, cikis kodu, `WNOHANG`) | ✅ (i386 + x86_64) |
 | 8 | **`pipe`** + surec basina fd tablosu | ✅ |
 | 8+ | sinyaller, musl/busybox | ⏳ yapilmadi |
 
@@ -113,6 +113,7 @@ yani PE ve ELF uygulamalari **ayni pencere yoneticisini** paylasir.
 | Windows syscall | `int 0x2E` | — (PE32+ Faz 7'nin 64-bit ayagi) |
 | Ikili formatlar | ELF32 + PE32 | ELF64 |
 | Ring 3 uygulamalari | Rust (ELF32) + Rust (PE32) | Rust (ELF64) |
+| Surec modeli | fork / execve / waitpid / pipe | fork / waitpid / pipe |
 | Kesme denetleyici | PIC 8259A | PIC 8259A (APIC ileride) |
 
 ```
@@ -166,6 +167,21 @@ kapsar. Program imaji 0x00C00000'da durur, ama pencere piksel tamponlari
 0x00D00000'dan baslayip dort yuvayla 0x00F00000'a uzanir -- yani ikinci
 girdiye tasar. i386'da bir PDE 4 MiB kapsadigi icin bu sorun hic
 cikmamisti.
+
+Uzay **kopyalanabildigi** icin (`clone_user_space`) `fork` ve `waitpid`
+de x86_64'te calisir:
+
+```
+[LEVEL-0b1] fork: gorev #2 -> #3 (eip=0x00c01adb, 128 sayfa kopyalandi)
+[twins] fork dondu: 3 -- ben ebeveyn
+[twins] fork dondu: 0 -- ben cocuk
+[twins] ebeveyn: cocuk 42 ile bitti.
+```
+
+Cocugu Ring 3'te canlandirmak icin `sysretq` degil **`iretq`** kullanilir:
+`sysretq` RCX ve R11'i kendi sozlesmesi icin ister (donus RIP'i ve
+RFLAGS), oysa `fork`'ta ikisi de geri yuklenmesi gereken gercek kullanici
+degerleridir.
 
 Ortak katmanlar (`level0a`, `level0b1`, `level0b2`) **tek bir kod tabanidir**;
 mimariye ozel her sey `arch/<arch>/`, `level0a/gdt/<arch>.rs`,
@@ -1343,9 +1359,8 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
 
 - **Zamanlama round-robin ve onceliksiz.** Preemption var ama gorevler
   esit; oncelik, gercek zamanli sinif ve `nice` yok.
-- **`fork`/`waitpid` yalnizca i386'da.** Adres uzayi **kopyalama**
-  (`clone_user_space`) henuz yalnizca i386'da var; x86_64'te surec basina
-  uzay var ama kopyalanmiyor.
+- **`execve` yalnizca i386'da.** Digerleri (fork/waitpid/pipe) iki
+  mimaride de var.
 - **`fork` copy-on-write degil.** Sayfalar cagri aninda tamamen
   kopyalanir; COW icin sayfalari salt okunur isaretleyip page fault'ta
   ayirmak gerekir. Dogruluk degil, maliyet farki.

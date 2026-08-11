@@ -93,6 +93,27 @@ impl SyscallFrame {
     }
 }
 
+impl UserContext {
+    /// Bos baglam -- `static` dizilerde kullanilir (`Default` const degil).
+    pub const ZERO: Self = UserContext {
+        edi: 0, esi: 0, ebp: 0, ebx: 0, edx: 0, ecx: 0, eax: 0,
+        eip: 0, esp: 0, eflags: 0,
+    };
+
+    /// Syscall donus degerini ayarlar (`fork`'ta cocuk icin 0).
+    ///
+    /// Mimariden bagimsiz: ust katman hangi registerin donus tasidigini
+    /// bilmek zorunda kalmasin diye.
+    pub fn set_return(&mut self, value: usize) {
+        self.eax = value as u32;
+    }
+
+    /// Baglamin devam edecegi komut adresi (gunluk icin).
+    pub fn instruction_pointer(&self) -> usize {
+        self.eip as usize
+    }
+}
+
 /// Bir Ring 3 baglaminin tamami -- `arch_enter_user_mode_regs` bunu
 /// oldugu gibi geri yukleyip `iretd` ile Ring 3'e doner.
 ///

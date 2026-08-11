@@ -461,6 +461,70 @@ pub fn user_pages(cr3: usize) -> usize {
     }
 }
 
+/// Bir adres uzayinin kullanici bolgesini **icerigiyle** kopyalar
+/// (`fork`).
+///
+/// i386'daki ile ayni gerekce: kaynak ve hedef ayni sanal adreste ama
+/// farkli CR3'lerde durur, yani ikisi birden gorunmez. Kopyalama
+/// **fiziksel** adresler uzerinden yapilir -- cerceve havuzu cekirdegin
+/// birebir haritasinin icinde oldugu icin her iki cerceveye de dogrudan
+/// yazilabilir.
+///
+/// Tam kopyadir, copy-on-write degil.
+///
+/// # Safety
+/// `src_cr3` bu modulun urettigi bir uzay olmalidir.
+pub unsafe fn clone_user_space(src_cr3: usize) -> Option<usize> {
+    if src_cr3 == 0 || src_cr3 == kernel_cr3() {
+        return None;
+    }
+
+    let dst_cr3 = create_user_space()?;
+
+    let src_pdpt = (table_entry(src_cr3 as u64, 0).read() & ADDR_MASK) as usize;
+    let src_pd = (table_entry(src_pdpt as u64, 0).read() & ADDR_MASK) as usize;
+
+    for pd_index in USER_PD_FIRST..=USER_PD_LAST {
+        let src_entry = table_entry(src_pd as u64, pd_index).read();
+        if src_entry & PTE_PRESENT == 0 || src_entry & PTE_HUGE != 0 {
+            continue;
+        }
+        let src_pt = src_entry & ADDR_MASK;
+
+        for i in 0..ENTRIES {
+            let page = table_entry(src_pt, i).read();
+            if page & PTE_PRESENT == 0 {
+                continue;
+            }
+
+            let vaddr = pd_index * LARGE_PAGE_SIZE + i * PAGE_SIZE;
+            let dst_entry = match user_pte(dst_cr3, vaddr) {
+                Some(e) => e,
+                None => {
+                    destroy_user_space(dst_cr3);
+                    return None;
+                }
+            };
+            let frame = match frames::alloc() {
+                Some(f) => f,
+                None => {
+                    destroy_user_space(dst_cr3);
+                    return None;
+                }
+            };
+
+            core::ptr::copy_nonoverlapping(
+                (page & ADDR_MASK) as *const u8,
+                frame as *mut u8,
+                PAGE_SIZE,
+            );
+            dst_entry.write(frame as u64 | PTE_PRESENT | PTE_WRITABLE | PTE_USER);
+        }
+    }
+
+    Some(dst_cr3)
+}
+
 /// Bir tabloyu (512 girdi) oldugu gibi kopyalar.
 unsafe fn copy_table(src: usize, dst: usize) {
     core::ptr::copy_nonoverlapping(src as *const u64, dst as *mut u64, ENTRIES);

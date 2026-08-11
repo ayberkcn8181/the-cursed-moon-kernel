@@ -13,9 +13,5 @@
 pub mod binary_loader;
 pub mod linux_subsystem;
 pub mod nt_subsystem;
-// `fork` surec basina adres uzayi gerektirir (kopyalanacak bir uzay
-// olmali); x86_64 su an paylasimli tek uzay modelinde oldugu icin
-// yalnizca i386'da derlenir (bkz. core/mmu_x86_64.rs).
-#[cfg(target_arch = "x86")]
 pub mod fork;
 pub mod process;

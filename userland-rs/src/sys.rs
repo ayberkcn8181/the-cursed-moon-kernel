@@ -46,7 +46,10 @@ mod x86_64_numbers {
     pub const SYS_CLOSE: usize = 3;
     pub const SYS_BRK: usize = 12;
     pub const SYS_PIPE: usize = 22;
+    pub const SYS_FORK: usize = 57;
     pub const SYS_EXIT: usize = 60;
+    /// Linux x86_64'te `waitpid` yoktur; `wait4` onun yerine gecer.
+    pub const SYS_WAITPID: usize = 61;
 }
 
 // --- TCMK'ye ozgu cagrilar (POSIX'te karsiligi yok) ---
@@ -213,22 +216,16 @@ pub fn sleep_ms(ms: usize) {
 
 /// Sureci ikiye ayirir.
 ///
-/// Yalnizca i386'da vardir: `fork` kopyalanacak bir adres uzayi ister,
-/// x86_64 ise hala paylasimli tek uzay modelindedir (bkz. cekirdekteki
-/// `level0b1::fork`).
-///
 /// **Tek cagri, iki donus**: ebeveynde cocugun gorev kimligi, cocukta
 /// `0`. Cocuk, ebeveynin bellegi kopyalanmis olarak bu satirdan devam
 /// eder -- yani `fork()`'tan sonraki kod iki kez calisir.
 ///
 /// Kaynak yoksa negatif deger doner (`-EAGAIN`).
-#[cfg(target_arch = "x86")]
 pub fn fork() -> isize {
     unsafe { syscall0(SYS_FORK) as isize }
 }
 
 /// `waitpid` secenegi: cocuk bitmemisse bekleme, 0 don.
-#[cfg(target_arch = "x86")]
 pub const WNOHANG: usize = 1;
 
 /// Bir cocuk surecin bitmesini bekler.
@@ -238,13 +235,11 @@ pub const WNOHANG: usize = 1;
 ///
 /// `status`, Linux'un kodlamasini kullanir: normal cikista
 /// `(kod & 0xFF) << 8`. `exit_status` bunu cozer.
-#[cfg(target_arch = "x86")]
 pub fn waitpid(pid: usize, status: &mut u32, options: usize) -> isize {
     unsafe { syscall3(SYS_WAITPID, pid, status as *mut u32 as usize, options) as isize }
 }
 
 /// `WEXITSTATUS`: durum kelimesinden cikis kodunu cikarir.
-#[cfg(target_arch = "x86")]
 pub fn exit_status(status: u32) -> u32 {
     (status >> 8) & 0xFF
 }

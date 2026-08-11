@@ -28,9 +28,6 @@ pub enum TaskState {
     /// Bir cocuk gorevin bitmesini bekliyor (`waitpid`). Zamanla degil,
     /// **baska bir gorevin durumuyla** uyanir.
     ///
-    /// Yalnizca `fork` eden surecler bu duruma girer, o da i386'da
-    /// derlenir; x86_64'te hicbir sey bu varyanti uretmez.
-    #[cfg_attr(target_arch = "x86_64", allow(dead_code))]
     Waiting,
     Terminated,
 }
@@ -481,7 +478,6 @@ pub fn set_current_exit_code(code: u32) {
 }
 
 /// Bir gorevin cikis kodu.
-#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
 pub fn exit_code_of(index: usize) -> u32 {
     if index >= MAX_TASKS {
         return 0;
@@ -501,7 +497,6 @@ pub fn exit_code_of(index: usize) -> u32 {
 ///
 /// `None` doner: gecersiz indeks, kendini beklemek, ya da idle gorevinin
 /// cagirmasi (idle bloke edilemez -- masaustu dongusudur).
-#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
 pub fn wait_for_task(child: usize) -> Option<u32> {
     let current = CURRENT.load(Ordering::Relaxed);
     let count = TASK_COUNT.load(Ordering::Relaxed);
@@ -540,8 +535,6 @@ pub fn wait_for_task(child: usize) -> Option<u32> {
 ///
 /// `fork` icin gerekir: cocugun uzayi ebeveyn tarafindan, cocuk daha hic
 /// calismadan kurulur. Baglam degisimi CR3'u buradan yukler.
-// Yalnizca `fork` kullanir, o da i386'da derlenir.
-#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
 pub fn set_address_space(index: usize, cr3: usize) {
     if index >= MAX_TASKS {
         return;
@@ -568,7 +561,6 @@ pub fn address_space_of(index: usize) -> usize {
 /// Paylasimli adres uzayi modelinde (x86_64) bu sayinin **birden fazla
 /// olmamasi** gerekir: butun imajlar ayni sanal adrese yuklendigi icin
 /// ikinci bir surec birincinin kodunun uzerine yazardi.
-#[cfg_attr(target_arch = "x86", allow(dead_code))]
 pub fn user_task_count() -> usize {
     let count = TASK_COUNT.load(Ordering::Relaxed);
     unsafe {

@@ -82,8 +82,6 @@ pub fn init() {
 /// POSIX semantigi: cocuk ayni nesnelere bakan **kendi** tanimlayicilarini
 /// alir. Boru uclarinin sayaclari bu yuzden artirilir -- cocuk kapatinca
 /// boru olmemeli, iki taraf da kapatinca olmeli.
-// Yalnizca `fork` kullanir, o da i386'da derlenir.
-#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
 pub fn clone_into(child: usize) {
     if child >= scheduler::MAX_TASKS {
         return;

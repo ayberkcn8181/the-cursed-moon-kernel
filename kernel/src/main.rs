@@ -98,6 +98,10 @@ static PLASMA64: &[u8] = include_bytes!("../../userland/plasma.elf64");
 static PAINT64: &[u8] = include_bytes!("../../userland/paint.elf64");
 #[cfg(target_arch = "x86_64")]
 static NOTES64: &[u8] = include_bytes!("../../userland/notes.elf64");
+#[cfg(target_arch = "x86_64")]
+static TWINS64: &[u8] = include_bytes!("../../userland/twins.elf64");
+#[cfg(target_arch = "x86_64")]
+static RELAY64: &[u8] = include_bytes!("../../userland/relay.elf64");
 
 /// Kullanici programlarinin VFS uzerinden okudugu test dosyasi.
 static BOOT_MSG: &[u8] = b"/boot/msg.txt: VFS uzerinden okundu (RAMFS).\n";
@@ -128,6 +132,8 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/plasma", PLASMA64),
     ("/bin/paint", PAINT64),
     ("/bin/notes", NOTES64),
+    ("/bin/twins", TWINS64),
+    ("/bin/relay", RELAY64),
     ("/boot/msg.txt", BOOT_MSG),
 ];
 
