@@ -563,6 +563,24 @@ pub fn address_space_of(index: usize) -> usize {
     }
 }
 
+/// Su an Ring 3'te bir imaj yuruten gorev sayisi.
+///
+/// Paylasimli adres uzayi modelinde (x86_64) bu sayinin **birden fazla
+/// olmamasi** gerekir: butun imajlar ayni sanal adrese yuklendigi icin
+/// ikinci bir surec birincinin kodunun uzerine yazardi.
+#[cfg_attr(target_arch = "x86", allow(dead_code))]
+pub fn user_task_count() -> usize {
+    let count = TASK_COUNT.load(Ordering::Relaxed);
+    unsafe {
+        let tasks = core::ptr::addr_of!(TASKS) as *const Task;
+        (0..count)
+            .filter(|&i| {
+                (*tasks.add(i)).in_user_mode && (*tasks.add(i)).state != TaskState::Terminated
+            })
+            .count()
+    }
+}
+
 pub fn current_in_user_mode() -> bool {
     unsafe {
         let tasks = core::ptr::addr_of!(TASKS) as *const Task;

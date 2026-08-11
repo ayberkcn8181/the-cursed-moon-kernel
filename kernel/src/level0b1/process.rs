@@ -34,6 +34,10 @@ pub enum BinaryFormat {
 
 #[derive(Debug)]
 pub enum SpawnError {
+    /// Paylasimli adres uzayi zaten bir surec tarafindan kullaniliyor
+    /// (yalnizca x86_64; i386'da her surecin kendi uzayi var).
+    #[cfg_attr(target_arch = "x86", allow(dead_code))]
+    AddressSpaceBusy,
     // Alanlar yalnizca turetilmis Debug uzerinden okunur; dead-code analizi
     // bunu gormedigi icin acikca izin veriliyor.
     #[cfg(target_arch = "x86")]
@@ -88,6 +92,16 @@ pub unsafe fn run_image(name: &str, image: &[u8]) -> Result<(), SpawnError> {
     // yukleyici imaji 0x00C00000'e kopyalarken artik bu surecin kendi
     // cerceveleri eslenmis olur. Onceki modelde tum surecler ayni bolgeyi
     // paylastigi icin her uygulama farkli bir "slot"a linklenmek zorundaydi.
+    // Paylasimli adres uzayi modelinde (x86_64) ayni anda tek Ring 3
+    // sureci guvenlidir: butun imajlar ayni sanal adrese yuklenir, yani
+    // ikincisi birincinin kodunun uzerine yazar. Sessizce bozmaktansa
+    // acikca reddetmek dogru olan -- belirtisi baska turlu "calisan
+    // uygulamanin kendi kodunda page fault almasi" olurdu.
+    #[cfg(target_arch = "x86_64")]
+    if scheduler::user_task_count() > 0 {
+        return Err(SpawnError::AddressSpaceBusy);
+    }
+
     let space = mmu::create_user_space();
     if let Some(cr3) = space {
         mmu::switch_to(cr3);

@@ -112,6 +112,16 @@ pub fn available() -> &'static [(&'static str, &'static str, &'static str)] {
 
 /// Bir uygulamayi yeni bir gorevde Ring 3'te baslatir.
 pub fn spawn_user_app(path: &str) -> Result<(), &'static str> {
+    // Paylasimli adres uzayi modelinde (x86_64) ikinci bir Ring 3 sureci
+    // birincinin kodunun uzerine yazardi. Asil denetim `process`'te ama
+    // orasi gorev basladiktan SONRA calisir; kabuktan gelen istegi burada
+    // reddetmek, kullaniciya "baslatildi" deyip arkadan hata basmaktan
+    // durustur.
+    #[cfg(target_arch = "x86_64")]
+    if scheduler::user_task_count() > 0 {
+        return Err("bu mimaride ayni anda tek uygulama calisabilir (paylasimli adres uzayi)");
+    }
+
     let (resolved, task_name) =
         resolve(path).ok_or("bilinmeyen uygulama ('apps'/'ls' ile listeleyin)")?;
     if resolved.len() >= MAX_PATH {

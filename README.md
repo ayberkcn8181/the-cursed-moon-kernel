@@ -1317,9 +1317,12 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
 
 - **Zamanlama round-robin ve onceliksiz.** Preemption var ama gorevler
   esit; oncelik, gercek zamanli sinif ve `nice` yok.
-- **x86_64'te surec basina adres uzayi yok.** Paylasimli tek uzay
-  modeli surdugu icin ayni anda tek Ring 3 uygulamasi guvenlidir;
-  `fork`/`waitpid` de bu yuzden yalnizca i386'dadir.
+- **x86_64'te surec basina adres uzayi yok.** Paylasimli tek uzay modeli
+  surdugu icin ayni anda **tek** Ring 3 uygulamasi calisabilir: butun
+  imajlar ayni sanal adrese yuklenir, ikincisi birincinin kodunun uzerine
+  yazardi. Cekirdek bunu sessizce bozmak yerine acikca reddeder
+  (`bu mimaride ayni anda tek uygulama calisabilir`). `fork`/`waitpid` de
+  ayni sebeple yalnizca i386'dadir.
 - **`fork` copy-on-write degil.** Sayfalar cagri aninda tamamen
   kopyalanir; COW icin sayfalari salt okunur isaretleyip page fault'ta
   ayirmak gerekir. Dogruluk degil, maliyet farki.
