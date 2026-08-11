@@ -26,11 +26,9 @@
 //! * **Copy-on-write yok.** Sayfalar hemen kopyalanir. COW, sayfalari
 //!   salt okunur isaretleyip page fault'ta ayirmayi gerektirir; dogruluk
 //!   acisindan fark yoktur, yalnizca maliyet farkidir.
-//! * **Dosya tanimlayicilari ve program break paylasilir.** Ikisi de su
-//!   an cekirdekte global (bkz. `core::fd`, `kernel_api`); surec basina
-//!   tasinmalari ayri bir adimdir. POSIX'te fd'ler zaten miras alinir,
-//!   ama burada *ayni tablo* paylasilir -- yani cocugun `close`'u
-//!   ebeveyni de etkiler.
+//! * **Program break paylasilir.** `kernel_api`'deki break hala
+//!   globaldir; surec basina tasinmasi ayri bir adimdir. (Dosya
+//!   tanimlayicilari artik kopyalaniyor -- bkz. `core::fd::clone_into`.)
 //! * **Pencere miras alinmaz.** Pencereler gorev kimligine bagli
 //!   (`wm::close_owned_by`); cocuk kendi penceresini acmalidir.
 
@@ -98,6 +96,10 @@ pub unsafe fn fork(frame: &SyscallFrame) -> Result<usize, ForkError> {
     (core::ptr::addr_of_mut!(CHILD_PENDING) as *mut bool)
         .add(child)
         .write(true);
+
+    // Tanimlayicilar POSIX'in dedigi gibi **kopyalanir**: cocuk ayni
+    // nesnelere bakan kendi tablosunu alir.
+    crate::level0a::core::fd::clone_into(child);
 
     scheduler::set_address_space(child, child_space);
 

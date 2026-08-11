@@ -39,6 +39,7 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 8 | **`execve`** (surec kendi yerine program yukler) | ✅ (i386) |
 | 8 | **`fork`** (adres uzayi kopyasi + iki kez donen cagri) | ✅ (i386) |
 | 8 | **`waitpid`** (`Waiting` durumu, cikis kodu, `WNOHANG`) | ✅ (i386) |
+| 8 | **`pipe`** + surec basina fd tablosu | ✅ |
 | 8+ | sinyaller, musl/busybox | ⏳ yapilmadi |
 
 ## Grafiksel Alfa
@@ -65,9 +66,9 @@ Ekranda gorunenler:
   | bellek/disk | `mem` `disk` `df` `format onayla` `sync` `install onayla` |
   | dosya | `ls` `cat <yol>` `save <yol> <metin>` `cp <kaynak> <hedef>` `rm <yol>` |
   | uygulama/pencere | `apps` `run <ad>` `win` `focus <id>` `mouse` |
-  | uygulamalar (ELF) | `paint` `plasma` `notes` `menu` `twins` `crash` `hog` `spin` |
+  | uygulamalar (ELF) | `paint` `plasma` `notes` `menu` `twins` `relay` `crash` `hog` `spin` |
   | uygulamalar (PE32) | `winclock` (ham `int 0x2E`) `winpad` (IAT) |
-  | diger | `echo <metin>` `clear` `help` |
+  | diger | `echo <metin>` `pipes` `clear` `help` |
 - **Sistem Gunlugu** -- cekirdek kaydinin canli goruntusu (konsol halka
   tamponu her karede pencereye cizilir).
 - Ust cubukta canli gorev/pencere/tick/nabiz sayaclari, altta fare imleci.
@@ -907,6 +908,70 @@ ebeveyn bu kez bloke olarak bekler -- iki yol da `twins` icinde.
 Durum kelimesi Linux'un kodlamasini kullanir (`(kod & 0xFF) << 8`), yani
 `WEXITSTATUS` beklendigi gibi calisir.
 
+## `pipe`: ayri adres uzaylarindaki iki surec konusuyor
+
+![pipe](docs/screenshot-pipe.png)
+
+`twins` iki surecin **ayri** oldugunu gosteriyordu: bellek kopyalanir,
+sayaclar ayrisir. `run relay` tam tersini gosterir -- ayri adres
+uzaylarindaki iki surec nasil konusur.
+
+Kalip UNIX'in klasigidir: **once boru, sonra catallanma**.
+
+```text
+  pipe()  ->  (okuma_fd, yazma_fd)
+  fork()
+    cocuk  : okuma ucunu kapat, olctugu degerleri yazma ucuna yaz
+    ebeveyn: yazma ucunu kapat, okuma ucundan okuyup ekrana ciz
+```
+
+```
+[relay] boru: okuma fd=3 yazma fd=4
+[LEVEL-0b1] fork: gorev #4 -> #5 (128 sayfa kopyalandi)
+[relay] cocuk 40 olcum gonderiyor.
+[relay] cocuk bitirdi, yazma ucu kapandi.
+[relay] ebeveyn 40 olcum aldi, cocuk 0 ile bitti.
+```
+
+Ekrandaki cubuk grafik cocugun urettigi 40 degerin aynisidir; toplam
+1268, `(i * 37 + 11) % 64` dizisinin toplamiyla birebir tutuyor. Yani
+veri yalnizca akmiyor, **bozulmadan** akiyor.
+
+Tampon cekirdektedir, `fork`'ta kopyalanmaz -- iki surec de ayni halka
+tamponu gorur. Paylasilan bir degisken olsaydi zaten kopyalanirdi ve is
+gormezdi; `twins`'teki sayaclarin ayrismasi bunun kanitiydi.
+
+### Surec basina fd tablosu (borularin zorunlu kildigi degisiklik)
+
+Tanimlayici tablosu uzun sure **globaldi**; tek kullanici sureci varken
+sorun degildi. Borular bunu surdurulemez hale getirdi: yukaridaki kalipta
+her taraf kullanmadigi ucu kapatir, ve paylasilan bir tabloda cocugun
+kapattigi tanimlayici ebeveyninkini de yok ediyordu. Ilk denemede
+ebeveyn tam olarak bu yuzden **sifir bayt** aldi.
+
+POSIX semantigi zaten dogru olani soyluyor: `fork` tanimlayicilari
+*kopyalar*. Tablo surec basina tasindi, `fork` ebeveynin tablosunu
+cocuga klonluyor ve boru uclarinin sayaclarini artiriyor. Bir uc ancak
+**iki taraf da** kapatinca oluyor; gorev sonlandiginda tanimlayicilari
+otomatik birakiliyor, yoksa kapanmayan bir yazma ucu okuyan tarafta
+"dosya sonu"nun hic gorunmemesi demek olurdu.
+
+Kabuktan izlenebilir:
+
+```
+tcmk> pipes
+acik boru: 1 / 4  (tampon 1024 bayt)
+  #0  bekleyen:    0  yazan:1  okuyan:1
+```
+
+### Bloke etmeyen okuma
+
+Gercek POSIX'te bos bir borudan okumak veri gelene kadar bloke olur.
+TCMK'de okuma bloke etmez; veri yoksa `0` doner. Nedeni GUI'dir: bloke
+olan bir surec penceresini de dondurur, oysa buradaki uygulamalar kendi
+cizim dongulerini surer. `relay`'in ebeveyni her karede yoklar ve grafik
+akici kalir.
+
 ## Notes: yaz, kaydet, kapat, ac
 
 Ring 3 uygulamasi metnini kendi ciziyor, POSIX `open(O_CREAT)`/`write` ile
@@ -1234,9 +1299,10 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
 - **`fork` copy-on-write degil.** Sayfalar cagri aninda tamamen
   kopyalanir; COW icin sayfalari salt okunur isaretleyip page fault'ta
   ayirmak gerekir. Dogruluk degil, maliyet farki.
-- **`fork` sonrasi fd tablosu ve program break paylasilir.** Ikisi de su
-  an cekirdekte global; surec basina tasinmalari ayri bir adim. Yani
-  cocugun `close`'u ebeveyni de etkiler.
+- **`fork` sonrasi program break paylasilir.** `brk` hala global; surec
+  basina tasinmasi ayri bir adim. (fd tablosu artik surec basina.)
+- **Boru okumasi bloke etmez** ve boru sayisi dorttur; `dup`/`dup2` ve
+  `select`/`poll` yok.
 - **Sinyal yok.** `kill` bir gorevi sonlandirir ama POSIX sinyalleri
   (`SIGTERM`, isleyiciler) yok.
 - **`waitpid` yalnizca belirli bir cocugu bekler.** `pid = -1` ("herhangi

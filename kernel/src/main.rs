@@ -78,6 +78,9 @@ static MENU_ELF: &[u8] = include_bytes!("../../userland/menu.elf");
 /// fork gosterimi: tek program, iki surec, ayrisan sayaclar.
 #[cfg(target_arch = "x86")]
 static TWINS_ELF: &[u8] = include_bytes!("../../userland/twins.elf");
+/// pipe gosterimi: ayri adres uzaylarindaki iki surec konusuyor.
+#[cfg(target_arch = "x86")]
+static RELAY_ELF: &[u8] = include_bytes!("../../userland/relay.elf");
 
 /// Linux (ELF64, x86_64) kullanici programi -- `tools/gen_hello_elf64.py`.
 #[cfg(target_arch = "x86_64")]
@@ -99,6 +102,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/notes", NOTES_ELF),
     ("/bin/menu", MENU_ELF),
     ("/bin/twins", TWINS_ELF),
+    ("/bin/relay", RELAY_ELF),
     ("/bin/winclock.exe", WINCLOCK_EXE),
     ("/bin/winpad.exe", WINPAD_EXE),
     ("/boot/msg.txt", BOOT_MSG),

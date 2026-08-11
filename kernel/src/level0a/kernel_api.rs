@@ -7,7 +7,7 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::level0a::core::{fd, vfs};
+use crate::level0a::core::{fd, pipe, vfs};
 
 /// Standart POSIX tanimlayicilari.
 pub const FD_STDIN: u32 = 0;
@@ -77,10 +77,17 @@ pub unsafe fn write(fd_num: u32, buf: *const u8, len: usize) -> Result<usize, Ke
         _ => {
             let entry = fd::get(fd_num as usize).ok_or(KernelError::BadFileDescriptor)?;
             let bytes = core::slice::from_raw_parts(buf, len);
-            let written = vfs::write_at(entry.node, entry.offset, bytes)
-                .map_err(|_| KernelError::NotSupported)?;
-            fd::advance(fd_num as usize, written);
-            Ok(written)
+            match entry.kind {
+                fd::FdKind::PipeWrite => Ok(pipe::write(entry.node, bytes)),
+                // Borunun okuma ucuna yazmak POSIX'te de hatadir.
+                fd::FdKind::PipeRead => Err(KernelError::BadFileDescriptor),
+                fd::FdKind::File => {
+                    let written = vfs::write_at(entry.node, entry.offset, bytes)
+                        .map_err(|_| KernelError::NotSupported)?;
+                    fd::advance(fd_num as usize, written);
+                    Ok(written)
+                }
+            }
         }
     }
 }
@@ -114,9 +121,46 @@ pub unsafe fn read(fd_num: u32, buf: *mut u8, len: usize) -> Result<usize, Kerne
 
     let entry = fd::get(fd_num as usize).ok_or(KernelError::BadFileDescriptor)?;
     let slice = core::slice::from_raw_parts_mut(buf, len);
-    let n = vfs::read(entry.node, entry.offset, slice).ok_or(KernelError::BadFileDescriptor)?;
-    fd::advance(fd_num as usize, n);
-    Ok(n)
+    match entry.kind {
+        // Boru okumasi bloke ETMEZ: veri yoksa 0 doner. Bloke olan bir
+        // surec penceresini de dondururdu (bkz. `core::pipe`).
+        fd::FdKind::PipeRead => Ok(pipe::read(entry.node, slice)),
+        fd::FdKind::PipeWrite => Err(KernelError::BadFileDescriptor),
+        fd::FdKind::File => {
+            let n =
+                vfs::read(entry.node, entry.offset, slice).ok_or(KernelError::BadFileDescriptor)?;
+            fd::advance(fd_num as usize, n);
+            Ok(n)
+        }
+    }
+}
+
+/// Yeni bir boru acar; `(okuma_fd, yazma_fd)` dondurur.
+///
+/// POSIX `pipe(int fd[2])` ile ayni anlam, farkli tasima: iki
+/// tanimlayici tek bir kelimede paketlenir (`okuma << 16 | yazma`),
+/// boylece cagri kullanici bellegine yazmak zorunda kalmaz.
+pub fn create_pipe() -> Result<(usize, usize), KernelError> {
+    let index = pipe::create().ok_or(KernelError::TooManyOpenFiles)?;
+
+    let read_fd = match fd::allocate_pipe(index, fd::FdKind::PipeRead) {
+        Some(f) => f,
+        None => {
+            pipe::close_end(index, false);
+            pipe::close_end(index, true);
+            return Err(KernelError::TooManyOpenFiles);
+        }
+    };
+    let write_fd = match fd::allocate_pipe(index, fd::FdKind::PipeWrite) {
+        Some(f) => f,
+        None => {
+            let _ = fd::close(read_fd);
+            pipe::close_end(index, true);
+            return Err(KernelError::TooManyOpenFiles);
+        }
+    };
+
+    Ok((read_fd, write_fd))
 }
 
 pub fn close(fd_num: u32) -> Result<(), KernelError> {

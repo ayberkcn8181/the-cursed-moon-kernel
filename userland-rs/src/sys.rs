@@ -16,6 +16,7 @@ pub const SYS_WRITE: usize = 4;
 pub const SYS_OPEN: usize = 5;
 pub const SYS_CLOSE: usize = 6;
 pub const SYS_BRK: usize = 45;
+pub const SYS_PIPE: usize = 42;
 
 // --- TCMK'ye ozgu cagrilar (POSIX'te karsiligi yok) ---
 pub const SYS_WIN_CREATE: usize = 0x500;
@@ -116,6 +117,10 @@ pub unsafe fn open_raw(path: *const u8, flags: usize) -> isize {
     syscall3(SYS_OPEN, path as usize, flags, 0) as isize
 }
 
+/// Tanimlayiciyi kapatir.
+///
+/// Boru ucu icin ayrica anlam tasir: son yazan uc kapandiginda okuyan
+/// taraf icin "dosya sonu" olusur.
 pub fn close(fd: usize) -> isize {
     unsafe { syscall1(SYS_CLOSE, fd) as isize }
 }
@@ -181,4 +186,16 @@ pub fn waitpid(pid: usize, status: &mut u32, options: usize) -> isize {
 /// `WEXITSTATUS`: durum kelimesinden cikis kodunu cikarir.
 pub fn exit_status(status: u32) -> u32 {
     (status >> 8) & 0xFF
+}
+
+/// Yeni bir boru acar; `(okuma_fd, yazma_fd)` dondurur.
+///
+/// `fork`'tan **once** cagrilmalidir: cocuk ancak o zaman ayni boruyu
+/// gorur. Bu, UNIX'in klasik kalibidir -- once boru, sonra catallanma.
+pub fn pipe() -> Option<(usize, usize)> {
+    let packed = unsafe { syscall0(SYS_PIPE) };
+    if (packed as isize) < 0 {
+        return None;
+    }
+    Some((packed >> 16, packed & 0xFFFF))
 }

@@ -250,6 +250,10 @@ pub fn yield_now() {
 
 /// Calisan gorevi sonlandirir ve bir daha asla ona donmez.
 pub fn terminate_current() -> ! {
+    // Tanimlayicilari birak. Boru uclari icin sart: kapanmayan bir yazma
+    // ucu, okuyan tarafta "dosya sonu"nun hic gorunmemesi demektir.
+    crate::level0a::core::fd::close_all(CURRENT.load(Ordering::Relaxed));
+
     crate::arch::cpu::without_interrupts(|| unsafe {
         let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
         let current = CURRENT.load(Ordering::Relaxed);
@@ -421,6 +425,7 @@ pub fn terminate(index: usize) -> Result<(), &'static str> {
     // Normal cikista bunlari surecin kendi yolu yapar (bkz.
     // `level0b1::process`), disaridan oldurmede buraya duser.
     crate::level0a::wm::close_owned_by(index);
+    crate::level0a::core::fd::close_all(index);
     if space != 0 {
         unsafe { crate::level0a::core::mmu::destroy_user_space(space) };
     }

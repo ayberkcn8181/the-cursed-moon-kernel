@@ -8,7 +8,7 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::level0a::core::{fd, frames, init, kmalloc, mmu, scheduler, tcmkfs, vfs};
+use crate::level0a::core::{fd, frames, init, kmalloc, mmu, pipe, scheduler, tcmkfs, vfs};
 use crate::level0a::drivers::{ata, block, gfx, partition, rtc};
 use crate::level0a::{exceptions, input, launcher, pit, wm};
 use crate::level0b2::{ipc, load_balancer, state_monitor};
@@ -240,7 +240,7 @@ fn execute(line: &str) {
             write_line("uygulama / pencere:");
             write_line("  apps  run <ad>  win  focus <id>  mouse");
             write_line("diger:");
-            write_line("  echo <metin>  clear  help");
+            write_line("  echo <metin>  pipes  clear  help");
         }
         "ps" => {
             write_line("  id durum      ad            cagri  adres-uzayi");
@@ -377,6 +377,28 @@ fn execute(line: &str) {
             } else {
                 "HAYIR"
             });
+        }
+        "pipes" => {
+            write_str("acik boru: ");
+            write_num(pipe::open_count());
+            write_str(" / ");
+            write_num(pipe::MAX_PIPES);
+            write_str("  (tampon ");
+            write_num(pipe::PIPE_CAPACITY);
+            write_line(" bayt)");
+            for i in 0..pipe::MAX_PIPES {
+                if let Some((bytes, writers, readers)) = pipe::info(i) {
+                    write_str("  #");
+                    write_num(i);
+                    write_str("  bekleyen:");
+                    write_num_right(bytes, 5);
+                    write_str("  yazan:");
+                    write_num(writers);
+                    write_str("  okuyan:");
+                    write_num(readers);
+                    newline();
+                }
+            }
         }
         "health" => {
             write_str("Level-0a durumu: ");

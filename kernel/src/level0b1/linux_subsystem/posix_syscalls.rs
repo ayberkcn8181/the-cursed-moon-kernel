@@ -13,6 +13,7 @@
 //!   45 = sys_brk     (EBX = yeni break, 0 ise mevcut break dondurulur)
 //!    2 = sys_fork    (argumansiz; ebeveyne cocuk id, cocuga 0 doner)
 //!    7 = sys_waitpid (EBX = pid, ECX = *status, EDX = secenekler)
+//!   42 = sys_pipe    (argumansiz; (okuma << 16) | yazma doner)
 
 use crate::arch::cpu::regs::SyscallFrame;
 use crate::level0a::core::mmu;
@@ -49,6 +50,7 @@ mod i386_numbers {
     pub const SYS_EXIT: u32 = 1;
     pub const SYS_FORK: u32 = 2;
     pub const SYS_WAITPID: u32 = 7;
+    pub const SYS_PIPE: u32 = 42;
     pub const SYS_READ: u32 = 3;
     pub const SYS_WRITE: u32 = 4;
     pub const SYS_OPEN: u32 = 5;
@@ -63,6 +65,7 @@ mod x86_64_numbers {
     pub const SYS_OPEN: u32 = 2;
     pub const SYS_CLOSE: u32 = 3;
     pub const SYS_BRK: u32 = 12;
+    pub const SYS_PIPE: u32 = 22;
     pub const SYS_EXIT: u32 = 60;
 }
 
@@ -213,6 +216,20 @@ pub fn dispatch(frame: &mut SyscallFrame) {
                     }
                     None => -ECHILD,
                 }
+            }
+        }
+
+        SYS_PIPE => {
+            // Linux'ta `pipe(int fd[2])` iki tanimlayiciyi kullanici
+            // bellegine yazar. TCMK ikisini tek kelimede paketleyip
+            // dondurur (`okuma << 16 | yazma`): kullanici isaretcisi
+            // dogrulamak gerekmez ve cagri yalinlasir.
+            match kernel_api::create_pipe() {
+                Ok((read_fd, write_fd)) => {
+                    frame.set_return((read_fd << 16) | (write_fd & 0xFFFF));
+                    return;
+                }
+                Err(e) => errno_of(e),
             }
         }
 
