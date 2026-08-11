@@ -37,7 +37,7 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 8 | **Preemptive zamanlama** + uyku durumu (`sleep`) | ✅ |
 | 9 | **Kalici depolama**: ATA PIO, MBR, TCMKFS (yazilabilir) | ✅ (i386) |
 | — | **Kendi onyukleyicisi** + diske kurulum (`install`) | ✅ (i386) |
-| 8 | **`execve`** (surec kendi yerine program yukler) | ✅ (i386) |
+| 8 | **`execve`** (surec kendi yerine program yukler) | ✅ (i386 + x86_64) |
 | 8 | **`fork`** (adres uzayi kopyasi + iki kez donen cagri) | ✅ (i386 + x86_64) |
 | 8 | **`waitpid`** (`Waiting` durumu, cikis kodu, `WNOHANG`) | ✅ (i386 + x86_64) |
 | 8 | **`pipe`** + surec basina fd tablosu | ✅ |
@@ -113,7 +113,7 @@ yani PE ve ELF uygulamalari **ayni pencere yoneticisini** paylasir.
 | Windows syscall | `int 0x2E` | — (PE32+ Faz 7'nin 64-bit ayagi) |
 | Ikili formatlar | ELF32 + PE32 | ELF64 |
 | Ring 3 uygulamalari | Rust (ELF32) + Rust (PE32) | Rust (ELF64) |
-| Surec modeli | fork / execve / waitpid / pipe | fork / waitpid / pipe |
+| Surec modeli | fork / execve / waitpid / pipe | fork / execve / waitpid / pipe |
 | Kesme denetleyici | PIC 8259A | PIC 8259A (APIC ileride) |
 
 ```
@@ -182,6 +182,19 @@ Cocugu Ring 3'te canlandirmak icin `sysretq` degil **`iretq`** kullanilir:
 `sysretq` RCX ve R11'i kendi sozlesmesi icin ister (donus RIP'i ve
 RFLAGS), oysa `fork`'ta ikisi de geri yuklenmesi gereken gercek kullanici
 degerleridir.
+
+`execve` zaten mimariden bagimsizdi (0x500 araligindaki TCMK cagrilarindan
+biri, `launcher` dongusune dayanir); yalnizca `menu` uygulamasi x86_64'e
+derlenmedigi icin gosterilemiyordu:
+
+```
+[launcher] '/bin/menu' sonlandi.
+[launcher] execve -> '/bin/plasma'
+[launcher] '/bin/plasma' Ring 3'te baslatiliyor.
+```
+
+Hata izolasyonu da ayni: `run crash` sureci page fault alir, Level-0b2
+onu sonlandirir, sistem calismaya devam eder.
 
 Ortak katmanlar (`level0a`, `level0b1`, `level0b2`) **tek bir kod tabanidir**;
 mimariye ozel her sey `arch/<arch>/`, `level0a/gdt/<arch>.rs`,
@@ -1359,8 +1372,10 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
 
 - **Zamanlama round-robin ve onceliksiz.** Preemption var ama gorevler
   esit; oncelik, gercek zamanli sinif ve `nice` yok.
-- **`execve` yalnizca i386'da.** Digerleri (fork/waitpid/pipe) iki
-  mimaride de var.
+- **PE (Windows) ikilileri yalnizca i386'da.** PE32 yukleyicisi, NT
+  cevirmeni ve gomulu DLL'ler i386'ya ozgudur; PE32+ (64-bit) yukleyici
+  yapilmadi. Geri kalan her sey -- surec modeli, GUI, dosya sistemi --
+  iki mimaride de ayni.
 - **`fork` copy-on-write degil.** Sayfalar cagri aninda tamamen
   kopyalanir; COW icin sayfalari salt okunur isaretleyip page fault'ta
   ayirmak gerekir. Dogruluk degil, maliyet farki.

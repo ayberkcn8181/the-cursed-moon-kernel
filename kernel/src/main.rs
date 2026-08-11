@@ -102,6 +102,10 @@ static NOTES64: &[u8] = include_bytes!("../../userland/notes.elf64");
 static TWINS64: &[u8] = include_bytes!("../../userland/twins.elf64");
 #[cfg(target_arch = "x86_64")]
 static RELAY64: &[u8] = include_bytes!("../../userland/relay.elf64");
+#[cfg(target_arch = "x86_64")]
+static MENU64: &[u8] = include_bytes!("../../userland/menu.elf64");
+#[cfg(target_arch = "x86_64")]
+static CRASH64: &[u8] = include_bytes!("../../userland/crash.elf64");
 
 /// Kullanici programlarinin VFS uzerinden okudugu test dosyasi.
 static BOOT_MSG: &[u8] = b"/boot/msg.txt: VFS uzerinden okundu (RAMFS).\n";
@@ -134,6 +138,8 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/notes", NOTES64),
     ("/bin/twins", TWINS64),
     ("/bin/relay", RELAY64),
+    ("/bin/menu", MENU64),
+    ("/bin/crash", CRASH64),
     ("/boot/msg.txt", BOOT_MSG),
 ];
 

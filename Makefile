@@ -148,7 +148,7 @@ userland-rust:
 # tek sey taban adresidir, o da bir baglayici argumani.
 USER64_TARGET_DIR := $(TARGET_DIR)/userland64
 # PE tarafi (winclock/winpad) i386'ya ozgu; gerisi iki mimaride de var.
-USER64_APPS := hello plasma paint notes twins relay
+USER64_APPS := hello plasma paint notes menu crash twins relay
 
 userland-x86_64:
 	@mkdir -p $(ROOT_DIR)/userland
