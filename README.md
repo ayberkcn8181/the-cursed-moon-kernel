@@ -26,6 +26,7 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 5 | POSIX dosya cagrilari + VFS/RAMFS + FD tablosu + brk | ✅ |
 | 7 | **Windows NT/PE**: PE32 yukleyici + reloc + `int 0x2E` | ✅ (i386) |
 | 7b | **Derlenmis PE32 GUI uygulamasi** + `win32k` cagri tablosu | ✅ (i386) |
+| 7b | **Ithal tablosu (IAT)**: `KERNEL32.dll` cozumu + thunk uretimi | ✅ (i386) |
 | 4 | **x86_64 portu**: Long Mode, 4 seviyeli sayfalama, ELF64, `syscall` | ✅ |
 | 13 | **Framebuffer/grafik**: 1024x768x32, bitmap font, cift tampon | ✅ (i386) |
 | 14 | **Pencere yoneticisi**: kompozitor, fare, surukleme, GUI syscall'lari | ✅ (i386) |
@@ -62,7 +63,7 @@ Ekranda gorunenler:
   | dosya | `ls` `cat <yol>` `save <yol> <metin>` `cp <kaynak> <hedef>` `rm <yol>` |
   | uygulama/pencere | `apps` `run <ad>` `win` `focus <id>` `mouse` |
   | uygulamalar (ELF) | `paint` `plasma` `notes` `menu` `crash` `hog` `spin` |
-  | uygulamalar (PE32) | `winclock` |
+  | uygulamalar (PE32) | `winclock` (ham `int 0x2E`) `winpad` (IAT) |
   | diger | `echo <metin>` `clear` `help` |
 - **Sistem Gunlugu** -- cekirdek kaydinin canli goruntusu (konsol halka
   tamponu her karede pencereye cizilir).
@@ -123,7 +124,12 @@ mimariye ozel her sey `arch/<arch>/`, `level0a/gdt/<arch>.rs`,
 ```
 rustup toolchain install nightly --component rust-src,llvm-tools
 sudo apt install qemu-system-x86 grub-pc-bin grub-common xorriso mtools
+sudo apt install llvm            # llvm-dlltool: PE ithal kutuphaneleri
 ```
+
+Windows tarafi icin **hicbir Windows arac zinciri gerekmez**: `rust-lld`
+zaten PE32 uretebiliyor, `llvm-dlltool` da ithal kutuphanelerini
+`.def`'ten olusturuyor.
 
 (`rust-toolchain.toml` bu depoda nightly'yi otomatik secer.)
 
@@ -372,6 +378,86 @@ tcmk> cat /clock.txt
 TCMKFS dosyanin hangi ABI'den geldigini bilmez; Level-0b1'de ayrisan iki
 dunya Level-0a'da tek bir dosya sisteminde bulusur.
 
+### Ithal tablosu: `KERNEL32.dll` (Faz 7b)
+
+Yukaridaki iki PE de sistem cagrilarini **elle** yapiyor (`int 0x2E`).
+Gercek bir Windows programi bunu asla yapmaz: `WriteConsoleA` cagirir,
+cagri `KERNEL32.dll`'in **ithal tablosu** (IAT) uzerinden cozulur. Ithal
+tablosunu cozmeyen bir cekirdek, derleyicinin urettigi siradan hicbir
+Windows ikilisini calistiramaz -- bu yuzden Faz 7b, "Wine'in yapamadigini
+yapmak" iddiasinin gercek esigidir.
+
+**Cozum: DLL'i yuklerken var et.** Diskte `KERNEL32.dll` diye bir dosya
+yok ve olmasi da gerekmiyor. Yukleyici ithal edilen her fonksiyon icin
+**surecin kendi adres uzayina** kucuk bir thunk yazar ve IAT girdisini
+oraya yonlendirir:
+
+```
+    mov eax, <servis numarasi>
+    lea edx, [esp+4]          ; cagiranin yigin argumanlarina isaretci
+    int 0x2E
+    ret <bayt>                ; stdcall: yigini cagirilan temizler
+```
+
+`EDX = arguman blogu` sozlesmesi Windows'un kendi secimidir (gercek NT
+stub'i `mov edx, esp; sysenter` yapar) ve onemli bir sey saglar:
+**parametre sayisi sinirsizdir**. Uc registere sigdirma zorunlulugu
+olsaydi `CreateFileA`'nin yedi parametresi ya da `WriteConsoleA`'nin
+*cikti* parametresi desteklenemezdi. Su an cozulen adlar:
+
+| DLL | Ihracatlar |
+|---|---|
+| `KERNEL32.dll` | `ExitProcess` `Sleep` `GetTickCount` `CloseHandle` `WriteConsoleA` `CreateFileA` `ReadFile` |
+| `TCMKGUI.dll` | `TcmkCreateWindow` `TcmkGetWindowBits` `TcmkGetClientRect` `TcmkGetWindowRect` `TcmkUpdateWindow` `TcmkGetMessage` `TcmkGetCursorPos` |
+
+`KERNEL32.dll` adlari ve **parametre sayilari gercek Win32 imzalarinin
+aynisidir**. GUI tarafi bilerek `Tcmk` onekli: `CreateWindowExA` on iki
+parametre alir ve bir pencere sinifi + `WndProc` bekler; TCMK'de pencere
+sinifi yoktur. Gercek adi farkli bir imzayla ihrac etmek yaniltici
+olurdu.
+
+Ikili tarafta ortada gercek bir DLL yok; `llvm-dlltool` ile
+`userland-rs/win/*.def`'ten uretilen **ithal kutuphaneleri** yalnizca
+baglayiciya "bu adlar `KERNEL32.dll`'den gelecek" demenin bicimsel
+yoludur. Sonuc, ikilinin icinde sahici bir ithal tablosudur:
+
+```
+DLL: KERNEL32.dll   INT=0x38ac IAT=0x38dc
+    CloseHandle  CreateFileA  ReadFile  Sleep  WriteConsoleA
+DLL: TCMKGUI.dll   INT=0x38c4 IAT=0x38f4
+    TcmkCreateWindow  TcmkGetClientRect  TcmkGetMessage ...
+```
+
+Acilista cekirdek bunlari cozer:
+
+```
+[LEVEL-0b1] PE ithal: KERNEL32.dll -- 7 fonksiyon baglandi.
+[LEVEL-0b1] PE ithal: TCMKGUI.dll -- 5 fonksiyon baglandi.
+[winpad] IAT uzerinden KERNEL32.dll + TCMKGUI.dll kullaniliyor.
+```
+
+`winpad` (`userland-rs/src/win/notepad.rs`) bunun gosterimidir: **tek bir
+elle yazilmis sistem cagrisi icermez**. Pencereyi `TcmkCreateWindow` acar,
+tuslari `TcmkGetMessage` okur, notu `CreateFileA` + `WriteConsoleA`
+yazar, acilista `ReadFile` geri okur, cikisi `ExitProcess` yapar.
+Yazilan not makine kapatilip acildiktan sonra yerindedir.
+
+![PE32 ithal tablosu](docs/screenshot-pe-imports.png)
+
+`ps` ciktisinda yedi gorev var: iki **PE32** (`winclock` ham `int 0x2E`,
+`winpad` ithal tablosu uzerinden) ve uc **ELF32** uygulama, hepsi ayni
+zamanlayicida, ayni pencere yoneticisinde, her biri kendi adres uzayinda.
+
+Cozulemeyen bir ad surecin baslatilmamasina yol acar -- Windows'un
+"The procedure entry point could not be located" davranisinin karsiligi:
+
+```
+[LEVEL-0b1] PE ithal: KERNEL32.dll!HeapAlloc bulunamadi -- surec baslatilmiyor.
+```
+
+Ordinal ile ithal (adi degil numarasi verilen) desteklenmiyor; gomulu
+tablo ada gore arama yapar (doc S.7'de Faz 7c).
+
 ## Level-1: Rust userland (`userland-rs/`)
 
 Ring 3 uygulamalari artik **Rust ile yaziliyor**. `userland-rs` ayri bir
@@ -423,11 +509,16 @@ tarafta oldugunu **hedef** belirler (`lib.rs` icinde `cfg(target_os)`):
 
 | | ELF (`i686-tcmk`) | PE (`i686-tcmk-win`) |
 |---|---|---|
-| sistem cagrisi | `int 0x80` -- `sys` | `int 0x2E` -- `nt` |
-| pencere | `gui::Window` | `win32::Hwnd` |
-| konsol | `io::Stdout` | `win32::Console` |
-| cikis | `sys_exit` | `NtTerminateProcess` |
+| sistem cagrisi | `int 0x80` -- `sys` | `int 0x2E` -- `nt`, ya da **IAT** -- `winapi` |
+| pencere | `gui::Window` | `win32::Hwnd` / `winapi::Window` |
+| konsol | `io::Stdout` | `win32::Console` / `winapi::Console` |
+| cikis | `sys_exit` | `NtTerminateProcess` / `ExitProcess` |
 | **cizim** | `canvas::Canvas` | `canvas::Canvas` |
+
+PE tarafinda iki secenek var: `win32` sistem cagrilarini elle yapar,
+`winapi` ise onlari `KERNEL32.dll`/`TCMKGUI.dll`'den **ithal eder**.
+Ikincisi gercek bir Windows programinin yaptigidir (bkz. "Ithal
+tablosu").
 
 Son satir kasitli: cizim kodu **ortaktir**. `Window` da `Hwnd` de ayni
 `Canvas`'a `Deref` eder, yani `win.text(...)`, `win.fill(...)`,

@@ -1,0 +1,12 @@
+; TCMK'nin KERNEL32.dll'i -- gercek Windows adlari, gercek stdcall
+; parametre sayilari. Cekirdek bu adlari yukleme aninda cozer ve her biri
+; icin surecin adres uzayina kucuk bir thunk uretir (bkz. pe32.rs).
+LIBRARY KERNEL32.dll
+EXPORTS
+ExitProcess@4
+Sleep@4
+GetTickCount@0
+CloseHandle@4
+WriteConsoleA@20
+CreateFileA@28
+ReadFile@20

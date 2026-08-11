@@ -50,6 +50,12 @@ static HELLO_EXE: &[u8] = include_bytes!("../../userland/hello.exe");
 #[cfg(target_arch = "x86")]
 static WINCLOCK_EXE: &[u8] = include_bytes!("../../userland/winclock.exe");
 
+/// Ithal tablosu (Faz 7b) gosterimi: bu PE tek bir `int 0x2E` icermez.
+/// Butun cagrilari `KERNEL32.dll` ve `TCMKGUI.dll`'den ithal eder; ithal
+/// tablosunu cozmeyen bir cekirdek onu calistiramaz.
+#[cfg(target_arch = "x86")]
+static WINPAD_EXE: &[u8] = include_bytes!("../../userland/winpad.exe");
+
 /// Ring 3 GUI uygulamalari -- `tools/gen_gui_app.py`.
 #[cfg(target_arch = "x86")]
 static PAINT_ELF: &[u8] = include_bytes!("../../userland/paint.elf");
@@ -90,6 +96,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/notes", NOTES_ELF),
     ("/bin/menu", MENU_ELF),
     ("/bin/winclock.exe", WINCLOCK_EXE),
+    ("/bin/winpad.exe", WINPAD_EXE),
     ("/boot/msg.txt", BOOT_MSG),
 ];
 

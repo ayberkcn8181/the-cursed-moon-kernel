@@ -16,6 +16,10 @@ path = "src/lib.rs"
 name = "winclock"
 path = "src/win/clock.rs"
 
+[[bin]]
+name = "winpad"
+path = "src/win/notepad.rs"
+
 [profile.dev]
 panic = "abort"
 opt-level = 1

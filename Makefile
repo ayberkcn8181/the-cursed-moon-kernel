@@ -104,9 +104,27 @@ USER_APPS := hello paint plasma crash hog spin notes menu
 # imaji yuklerken taban yeniden yerlesimi uygular -- gercek bir Windows
 # programinda oldugu gibi.
 WIN_TARGET_DIR := $(TARGET_DIR)/userland-win
-WIN_APPS := winclock
+WIN_APPS := winclock winpad
+
+# Ithal kutuphaneleri (Faz 7b). Ortada gercek bir DLL YOKTUR: bunlar
+# yalnizca baglayiciya "bu adlar KERNEL32.dll'den gelecek" demenin
+# bicimsel yoludur, boylece ikilinin icinde gercek bir ithal tablosu
+# olusur. Cekirdek yukleme aninda adlari gomulu tablosunda cozer ve her
+# biri icin surecin adres uzayina bir thunk yazar (nt_subsystem/dll.rs).
+WIN_LIB_DIR := $(ROOT_DIR)/build/winlib
+WIN_DEFS := kernel32 tcmkgui
 
 userland: userland-rust userland-win userland-legacy
+
+$(WIN_LIB_DIR)/stamp: $(patsubst %,$(USERLAND_DIR)/win/%.def,$(WIN_DEFS))
+	@mkdir -p $(WIN_LIB_DIR)
+	@set -e; for d in $(WIN_DEFS); do \
+		llvm-dlltool -m i386 --kill-at \
+			-d $(USERLAND_DIR)/win/$$d.def \
+			-l $(WIN_LIB_DIR)/$$d.lib; \
+		echo "  [winlib] $$d.lib"; \
+	done
+	@touch $@
 
 userland-rust:
 	@mkdir -p $(ROOT_DIR)/userland
@@ -119,13 +137,14 @@ userland-rust:
 		cp $(USERLAND_TARGET_DIR)/i686-tcmk/release/$$app $(ROOT_DIR)/userland/$$app.elf; \
 	done
 
-userland-win:
+userland-win: $(WIN_LIB_DIR)/stamp
 	@mkdir -p $(ROOT_DIR)/userland
 	@set -e; for app in $(WIN_APPS); do \
 		echo "  [userland] $$app.exe (PE32, taban 0x00400000)"; \
 		( cd $(USERLAND_DIR) && cargo rustc --release --bin $$app \
 			--target $(ROOT_DIR)/targets/i686-tcmk-win.json \
-			--target-dir $(WIN_TARGET_DIR) ); \
+			--target-dir $(WIN_TARGET_DIR) \
+			-- -L $(WIN_LIB_DIR) ); \
 		cp $(WIN_TARGET_DIR)/i686-tcmk-win/release/$$app $(ROOT_DIR)/userland/$$app.exe; \
 	done
 

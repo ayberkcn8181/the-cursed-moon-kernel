@@ -82,6 +82,7 @@ static KNOWN_APPS: &[(&str, &str, &str)] = &[
     // Windows ikilisi: yol .exe ile biter, cekirdek bicimi magic'ten
     // anlar (bkz. vfs::format) ve PE yukleyicisine yonlendirir.
     ("winclock", "/bin/winclock.exe", "winclock"),
+    ("winpad", "/bin/winpad.exe", "winpad"),
 ];
 
 /// Kabuktan gelen adi tam yola ve gorev adina cevirir.

@@ -68,6 +68,12 @@ pub mod sys;
 pub mod nt;
 #[cfg(target_os = "windows")]
 pub mod win32;
+/// Ithal tablosu uzerinden Win32 API (`KERNEL32.dll`, `TCMKGUI.dll`).
+/// `win32` ile ayni islevleri sunar, ama cagrilar elle `int 0x2E` yerine
+/// **IAT** uzerinden gider -- yani derleyicinin urettigi siradan bir
+/// Windows ikilisinin yaptigi gibi.
+#[cfg(target_os = "windows")]
+pub mod winapi;
 
 /// Uygulamanin giris noktasini tanimlar.
 ///

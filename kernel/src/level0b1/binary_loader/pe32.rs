@@ -6,19 +6,33 @@
 //! farki (delta) sifir degildir; bu yuzden **taban yeniden yerlesimi**
 //! (base relocation, `.reloc`) uygulanir.
 //!
-//! Faz 7 kapsami: statik PE32, import tablosu YOK (Faz 7b), ordinal YOK
-//! (Faz 7c). Program NT sistem cagrilarini dogrudan `int 0x2E` ile yapar.
+//! **Ithal tablosu** (Faz 7b) destekleniyor: `KERNEL32.dll` gibi adlar
+//! gomulu bir tablodan cozulur ve her fonksiyon icin surecin adres
+//! uzayina bir thunk yazilir (bkz. `nt_subsystem::dll`). Yani bir program
+//! `int 0x2E` yazmak zorunda degildir; siradan bir Windows ikilisi gibi
+//! `WriteConsoleA` cagirabilir.
+//!
+//! Ordinal ile ithal (Faz 7c) desteklenmiyor: gomulu tablo ada gore
+//! arama yapar. Ordinal goruldugunde surec baslatilmaz.
 
 use crate::level0a::core::mmu;
+use crate::level0b1::nt_subsystem::dll;
 
 const DOS_MAGIC: u16 = 0x5A4D; // "MZ"
 const PE_SIGNATURE: u32 = 0x0000_4550; // "PE\0\0"
 const MACHINE_I386: u16 = 0x014C;
 const PE32_MAGIC: u16 = 0x010B;
 
+const DIR_IMPORT: usize = 1;
 const DIR_BASERELOC: usize = 5;
 const REL_BASED_ABSOLUTE: u16 = 0;
 const REL_BASED_HIGHLOW: u16 = 3;
+
+/// Ithal edilen fonksiyon adlarinin ust siniri (tanilama icin).
+const NAME_MAX: usize = 64;
+
+/// Ordinal ile ithal isareti (adi degil numarasi verilmis).
+const IMAGE_ORDINAL_FLAG32: u32 = 0x8000_0000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PeError {
@@ -33,6 +47,13 @@ pub enum PeError {
     SectionOutOfBounds,
     SectionOutsideUserMemory,
     RelocationOutOfBounds,
+    ImportOutOfBounds,
+    /// Ithal edilen bir DLL ya da fonksiyon gomulu tabloda yok. Windows
+    /// bu durumda "The procedure entry point X could not be located"
+    /// der ve sureci baslatmaz; TCMK de baslatmaz.
+    UnresolvedImport,
+    /// Thunk'lar icin imajin arkasinda yer kalmadi.
+    ThunkAreaFull,
 }
 
 pub struct LoadedImage {
@@ -129,6 +150,10 @@ pub fn load(image: &[u8]) -> Result<LoadedImage, PeError> {
     }
 
     // --- Taban yeniden yerlesimi ---
+    //
+    // Ithal tablosundan ONCE yapilir: yeniden yerlesim imajin icindeki
+    // mutlak adresleri duzeltir, ithal cozumu ise IAT'ye nihai thunk
+    // adreslerini yazar. Ters sirada IAT girdileri delta ile bozulurdu.
     if delta != 0 {
         let reloc_rva = read_u32(image, opt + 96 + DIR_BASERELOC * 8).unwrap_or(0) as usize;
         let reloc_size = read_u32(image, opt + 96 + DIR_BASERELOC * 8 + 4).unwrap_or(0) as usize;
@@ -137,10 +162,169 @@ pub fn load(image: &[u8]) -> Result<LoadedImage, PeError> {
         }
     }
 
+    // --- Ithal tablosu (Faz 7b) ---
+    //
+    // Thunk'lar imajin arkasina, sayfa hizali bir alana yazilir. `end`
+    // bu alanin sonunu gosterir; kullanici yigini oradan sonra kurulur
+    // (bkz. `process::enter_ring3`), yani thunk alani yigin tarafindan
+    // ezilmez.
+    let mut end = load_base + size_of_image.max(highest);
+    let import_rva = read_u32(image, opt + 96 + DIR_IMPORT * 8).unwrap_or(0) as usize;
+    let import_size = read_u32(image, opt + 96 + DIR_IMPORT * 8 + 4).unwrap_or(0) as usize;
+    if import_rva != 0 && import_size != 0 {
+        let thunks_at = (end + 0xFFF) & !0xFFF;
+        end = resolve_imports(load_base, size_of_image, import_rva, thunks_at)?;
+    }
+
     Ok(LoadedImage {
         entry: load_base as u32 + entry_rva,
-        end: (load_base + highest) as u32,
+        end: end as u32,
     })
+}
+
+/// Ithal tablosunu cozer: her fonksiyon icin bir thunk uretir ve IAT
+/// girdisini oraya yonlendirir. Thunk alaninin sonunu doner.
+///
+/// Diskte `KERNEL32.dll` diye bir dosya olmadigi icin klasik anlamda bir
+/// "DLL yukleme" yoktur; gomulu tablo (bkz. `nt_subsystem::dll`) adi
+/// bir NT servis numarasina cevirir ve yukleyici surecin adres uzayina
+/// o servisi cagiran kucuk bir stub yazar. Program bunu normal bir DLL
+/// girisinden ayirt edemez -- IAT'de gordugu sey yine bir kod adresidir.
+fn resolve_imports(
+    load_base: usize,
+    image_size: usize,
+    import_rva: usize,
+    thunks_at: usize,
+) -> Result<usize, PeError> {
+    let mut next_thunk = thunks_at;
+    let mut descriptor = import_rva;
+
+    loop {
+        // IMAGE_IMPORT_DESCRIPTOR: 20 bayt, sifir girdisiyle biter.
+        if descriptor + 20 > image_size {
+            return Err(PeError::ImportOutOfBounds);
+        }
+        let int_rva = image_u32(load_base, descriptor) as usize;
+        let name_rva = image_u32(load_base, descriptor + 12) as usize;
+        let iat_rva = image_u32(load_base, descriptor + 16) as usize;
+
+        if int_rva == 0 && name_rva == 0 && iat_rva == 0 {
+            break;
+        }
+
+        let mut dll_storage = [0u8; NAME_MAX];
+        let dll_name =
+            image_cstr(load_base, image_size, name_rva, &mut dll_storage).unwrap_or("?");
+
+        // Bazi baglayicilar OriginalFirstThunk'i bos birakir; o zaman ad
+        // dizisi IAT'nin kendisidir (henuz baglanmamis oldugu icin ayni
+        // degerleri tasir).
+        let names_rva = if int_rva != 0 { int_rva } else { iat_rva };
+        if names_rva == 0 || iat_rva == 0 {
+            return Err(PeError::ImportOutOfBounds);
+        }
+
+        let mut index = 0usize;
+        loop {
+            let entry_at = names_rva + index * 4;
+            if entry_at + 4 > image_size {
+                return Err(PeError::ImportOutOfBounds);
+            }
+            let entry = image_u32(load_base, entry_at);
+            if entry == 0 {
+                break;
+            }
+
+            if entry & IMAGE_ORDINAL_FLAG32 != 0 {
+                // Ordinal ile ithal: ad yok, yalnizca numara. Gomulu
+                // tablomuz ada gore arama yaptigi icin desteklenmiyor
+                // (doc S.7'de Faz 7c olarak ayrilmisti).
+                crate::println!(
+                    "[LEVEL-0b1] PE ithal: {} ordinal #{} -- ordinal ile ithal desteklenmiyor.",
+                    dll_name,
+                    entry & 0xFFFF
+                );
+                return Err(PeError::UnresolvedImport);
+            }
+
+            // IMAGE_IMPORT_BY_NAME: u16 hint, ardindan NUL'lu ad.
+            let mut fn_storage = [0u8; NAME_MAX];
+            let function =
+                match image_cstr(load_base, image_size, entry as usize + 2, &mut fn_storage) {
+                    Some(name) => name,
+                    None => return Err(PeError::ImportOutOfBounds),
+                };
+
+            let export = match dll::resolve(dll_name, function) {
+                Some(e) => e,
+                None => {
+                    crate::println!(
+                        "[LEVEL-0b1] PE ithal: {}!{} bulunamadi -- surec baslatilmiyor.",
+                        dll_name,
+                        function
+                    );
+                    return Err(PeError::UnresolvedImport);
+                }
+            };
+
+            if next_thunk + dll::THUNK_SIZE
+                > mmu::USER_MEM_START + mmu::USER_MAP_SIZE
+            {
+                return Err(PeError::ThunkAreaFull);
+            }
+
+            unsafe { dll::emit_thunk(next_thunk, &export) };
+
+            // IAT girdisini thunk'a yonlendir.
+            let slot = iat_rva + index * 4;
+            if slot + 4 > image_size {
+                return Err(PeError::ImportOutOfBounds);
+            }
+            unsafe {
+                ((load_base + slot) as *mut u32).write_unaligned(next_thunk as u32);
+            }
+
+            next_thunk += dll::THUNK_SIZE;
+            index += 1;
+        }
+
+        crate::println!(
+            "[LEVEL-0b1] PE ithal: {} -- {} fonksiyon baglandi.",
+            dll_name,
+            index
+        );
+
+        descriptor += 20;
+    }
+
+    Ok(next_thunk)
+}
+
+/// Yuklenmis imajdan hizalamadan bagimsiz u32 okur.
+fn image_u32(load_base: usize, rva: usize) -> u32 {
+    unsafe { ((load_base + rva) as *const u32).read_unaligned() }
+}
+
+/// Yuklenmis imajdan NUL sonlandirmali ad okur.
+fn image_cstr<'a>(
+    load_base: usize,
+    image_size: usize,
+    rva: usize,
+    storage: &'a mut [u8; NAME_MAX],
+) -> Option<&'a str> {
+    if rva >= image_size {
+        return None;
+    }
+    let mut len = 0usize;
+    while len < NAME_MAX && rva + len < image_size {
+        let byte = unsafe { ((load_base + rva + len) as *const u8).read() };
+        if byte == 0 {
+            return core::str::from_utf8(&storage[..len]).ok();
+        }
+        storage[len] = byte;
+        len += 1;
+    }
+    None
 }
 
 /// `.reloc` bolumunu yurutur. Bloklar zaten bellege kopyalanmis durumdadir,

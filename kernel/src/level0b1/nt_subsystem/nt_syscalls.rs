@@ -51,8 +51,43 @@ pub const NT_USER_FLUSH_WINDOW: u32 = 0x2004;
 pub const NT_USER_GET_MESSAGE: u32 = 0x2005;
 pub const NT_USER_CURSOR_POS: u32 = 0x2006;
 
+// --- Win32 API tablosu (gomulu DLL thunk'lari) -----------------------
+//
+// Bu araligin **cagri sozlesmesi digerlerinden farklidir**: argumanlar
+// registerlerde degil, `EDX`'in gosterdigi yigin blogundadir (bkz.
+// `dll.rs`). Windows'un x86 syscall stub'i da boyle yapar. Kazanci:
+// parametre sayisi uc ile sinirli degildir, yani `CreateFileA`'nin yedi
+// parametresi ve `WriteConsoleA`'nin cikti parametresi desteklenebilir.
+pub const NT_EXIT_PROCESS_W32: u32 = 0x3000;
+pub const NT_SLEEP_MS: u32 = 0x3001;
+pub const NT_GET_TICK_COUNT: u32 = 0x3002;
+pub const NT_WIN32_CLOSE_HANDLE: u32 = 0x3003;
+pub const NT_WRITE_CONSOLE_A: u32 = 0x3004;
+pub const NT_CREATE_FILE_A: u32 = 0x3005;
+pub const NT_READ_FILE_WIN32: u32 = 0x3006;
+
+pub const NT_USER_CREATE_WINDOW_W32: u32 = 0x3010;
+pub const NT_GDI_GET_BITS_W32: u32 = 0x3011;
+pub const NT_USER_CLIENT_RECT_W32: u32 = 0x3012;
+pub const NT_USER_WINDOW_RECT_W32: u32 = 0x3013;
+pub const NT_USER_FLUSH_WINDOW_W32: u32 = 0x3014;
+pub const NT_USER_GET_MESSAGE_W32: u32 = 0x3015;
+pub const NT_USER_CURSOR_POS_W32: u32 = 0x3016;
+
 /// win32k araligi burada baslar.
 const WIN32K_BASE: u32 = 0x2000;
+
+/// Win32 API araligi (yigin argumanli) burada baslar.
+const WIN32_API_BASE: u32 = 0x3000;
+
+/// Win32'nin `BOOL`'u.
+const WIN32_TRUE: usize = 1;
+const WIN32_FALSE: usize = 0;
+
+/// `CreateFileA`'nin dwCreationDisposition degerleri (Win32 ile ayni).
+const CREATE_NEW: u32 = 1;
+const CREATE_ALWAYS: u32 = 2;
+const OPEN_ALWAYS: u32 = 4;
 
 /// `NtUser*` cagrilarinin "gecersiz tutamac" karsiligi (Windows'ta NULL
 /// HWND'ye denk gelir; 0 gecerli bir pencere kimligi oldugu icin burada
@@ -102,6 +137,13 @@ pub fn dispatch(frame: &mut SyscallFrame) {
             number
         );
         frame.set_return(STATUS_NOT_IMPLEMENTED as usize);
+        return;
+    }
+
+    // Gomulu DLL thunk'larindan gelen Win32 API cagrilari: argumanlar
+    // registerlerde degil, EDX'in gosterdigi yigin blogunda.
+    if number >= WIN32_API_BASE {
+        dispatch_win32_api(frame);
         return;
     }
 
@@ -262,6 +304,222 @@ fn dispatch_win32k(frame: &mut SyscallFrame) {
     };
 
     frame.set_return(value);
+}
+
+/// Gomulu DLL'lerin (`KERNEL32.dll`, `TCMKGUI.dll`) arkasindaki Win32 API
+/// tablosu.
+///
+/// Buradaki cagrilar bir thunk'tan gelir (bkz. `dll.rs`) ve argumanlarini
+/// **cagiranin yigininda** birakir; `EDX` ilk argumani gosterir. Windows'un
+/// x86 syscall stub'i da boyle davranir. Kazanci, `dll.rs`'te anlatildigi
+/// gibi, parametre sayisinin uc ile sinirli olmamasidir -- boylece
+/// `CreateFileA`'nin yedi parametresi ve `WriteConsoleA`'nin **cikti**
+/// parametresi gercek imzalariyla desteklenir.
+///
+/// Donus degeri Win32 sozlesmesine uyar: `BOOL` icin 1/0, tutamac icin
+/// tutamacin kendisi, hata icin `INVALID_HANDLE_VALUE`.
+fn dispatch_win32_api(frame: &mut SyscallFrame) {
+    let number = frame.number();
+    let args = arg_block(frame);
+
+    let value: usize = match number {
+        NT_EXIT_PROCESS_W32 => {
+            // ExitProcess(UINT uExitCode) -- geri donmez.
+            kernel_api::exit_current_task(arg(args, 0).unwrap_or(0));
+        }
+
+        NT_SLEEP_MS => {
+            // Sleep(DWORD dwMilliseconds)
+            let ms = arg(args, 0).unwrap_or(0);
+            if ms > 0 {
+                crate::level0a::core::scheduler::sleep_ticks((ms / 10).max(1));
+            } else {
+                crate::level0a::core::scheduler::yield_now();
+            }
+            WIN32_FALSE
+        }
+
+        NT_GET_TICK_COUNT => {
+            // GetTickCount() -> acilistan beri gecen milisaniye.
+            // PIT 100 Hz oldugu icin cozunurluk 10 ms'dir; Windows'ta da
+            // bu cagri kaba cozunurluklu olmakla bilinir.
+            crate::level0a::pit::ticks() as usize * 10
+        }
+
+        NT_WIN32_CLOSE_HANDLE => {
+            // CloseHandle(HANDLE) -> BOOL
+            match arg(args, 0) {
+                Some(handle) => match kernel_api::close(handle) {
+                    Ok(()) => WIN32_TRUE,
+                    Err(_) => WIN32_FALSE,
+                },
+                None => WIN32_FALSE,
+            }
+        }
+
+        NT_WRITE_CONSOLE_A => {
+            // WriteConsoleA(hOutput, lpBuffer, nChars, lpCharsWritten, lpReserved)
+            match (arg(args, 0), arg(args, 1), arg(args, 2)) {
+                (Some(handle), Some(buffer), Some(count)) => {
+                    match unsafe {
+                        kernel_api::write(handle, buffer as *const u8, count as usize)
+                    } {
+                        Ok(written) => {
+                            // Cikti parametresi istege baglidir; NULL degilse
+                            // doldurulur (Win32 sozlesmesi).
+                            store_out(args, 3, written as u32);
+                            WIN32_TRUE
+                        }
+                        Err(_) => WIN32_FALSE,
+                    }
+                }
+                _ => WIN32_FALSE,
+            }
+        }
+
+        NT_CREATE_FILE_A => {
+            // CreateFileA(lpFileName, dwDesiredAccess, dwShareMode,
+            //             lpSecurityAttributes, dwCreationDisposition,
+            //             dwFlagsAndAttributes, hTemplateFile)
+            //
+            // TCMK'de paylasim kipi, guvenlik tanimlayicisi ve oznitelikler
+            // yok sayilir; anlam tasiyan iki parametre ad ve dispositiondir.
+            let mut storage = [0u8; PATH_MAX];
+            let disposition = arg(args, 4).unwrap_or(0);
+            let create = matches!(disposition, CREATE_NEW | CREATE_ALWAYS | OPEN_ALWAYS);
+            match arg(args, 0) {
+                Some(name) => match unsafe { copy_user_cstr(name as usize, &mut storage) } {
+                    Some(path) => match kernel_api::open(path, create) {
+                        Ok(handle) => handle,
+                        Err(_) => INVALID_HANDLE_VALUE,
+                    },
+                    None => INVALID_HANDLE_VALUE,
+                },
+                None => INVALID_HANDLE_VALUE,
+            }
+        }
+
+        NT_READ_FILE_WIN32 => {
+            // ReadFile(hFile, lpBuffer, nBytes, lpBytesRead, lpOverlapped)
+            match (arg(args, 0), arg(args, 1), arg(args, 2)) {
+                (Some(handle), Some(buffer), Some(count)) => {
+                    match unsafe { kernel_api::read(handle, buffer as *mut u8, count as usize) } {
+                        Ok(read) => {
+                            store_out(args, 3, read as u32);
+                            WIN32_TRUE
+                        }
+                        Err(_) => WIN32_FALSE,
+                    }
+                }
+                _ => WIN32_FALSE,
+            }
+        }
+
+        // --- TCMKGUI.dll: pencere cagrilari ---
+        NT_USER_CREATE_WINDOW_W32 => {
+            // TcmkCreateWindow(lpTitle, x, y, cx, cy) -> HWND
+            //
+            // win32k tarafindaki karsiligindan farki, olculerin tek
+            // kelimeye paketlenmemis olmasi: DLL cagrisinda parametreler
+            // yiginda oldugu icin paketlemeye gerek yok.
+            let mut storage = [0u8; PATH_MAX];
+            let title = match arg(args, 0) {
+                Some(p) => unsafe { copy_user_cstr(p as usize, &mut storage) }.unwrap_or("app"),
+                None => "app",
+            };
+            let x = arg(args, 1).unwrap_or(0) as usize;
+            let y = arg(args, 2).unwrap_or(0) as usize;
+            let cx = arg(args, 3).unwrap_or(0) as usize;
+            let cy = arg(args, 4).unwrap_or(0) as usize;
+            match gui_api::create_window(title, x, y, cx, cy) {
+                Ok(id) => id,
+                Err(_) => INVALID_HANDLE_VALUE,
+            }
+        }
+
+        NT_GDI_GET_BITS_W32 => match arg(args, 0) {
+            Some(h) => gui_api::window_buffer(h as usize).unwrap_or(0),
+            None => 0,
+        },
+
+        NT_USER_CLIENT_RECT_W32 => match arg(args, 0) {
+            Some(h) => gui_api::window_size(h as usize).unwrap_or(0),
+            None => 0,
+        },
+
+        NT_USER_WINDOW_RECT_W32 => match arg(args, 0) {
+            Some(h) => gui_api::window_pos(h as usize).unwrap_or(INVALID_HANDLE_VALUE),
+            None => INVALID_HANDLE_VALUE,
+        },
+
+        NT_USER_FLUSH_WINDOW_W32 => {
+            crate::level0a::core::scheduler::yield_now();
+            WIN32_TRUE
+        }
+
+        NT_USER_GET_MESSAGE_W32 => match arg(args, 0) {
+            Some(h) if (h as usize) < wm::MAX_WINDOWS => gui_api::poll_key(h as usize) as usize,
+            _ => 0,
+        },
+
+        NT_USER_CURSOR_POS_W32 => gui_api::mouse_state(),
+
+        _ => {
+            crate::println!(
+                "[LEVEL-0b1] NT: desteklenmeyen Win32 API servisi {:#x}.",
+                number
+            );
+            INVALID_HANDLE_VALUE
+        }
+    };
+
+    frame.set_return(value);
+}
+
+/// Thunk'in biraktigi arguman blogunun adresi (i386'da EDX).
+#[cfg(target_arch = "x86")]
+fn arg_block(frame: &SyscallFrame) -> usize {
+    frame.edx as usize
+}
+
+#[cfg(target_arch = "x86_64")]
+fn arg_block(frame: &SyscallFrame) -> usize {
+    frame.rdx as usize
+}
+
+/// Arguman blogundan `index`. kelimeyi okur.
+///
+/// POSIX/NT tarafindakiyle ayni guvenlik kurali: kullanici alanindan gelen
+/// her adres once `mmu::is_user_accessible` ile dogrulanir. Bir uygulama
+/// bozuk bir EDX ile gelirse cagri sessizce basarisiz olur, cekirdek
+/// gecersiz bellek okumaz.
+fn arg(block: usize, index: usize) -> Option<u32> {
+    if block == 0 {
+        return None;
+    }
+    let addr = block + index * 4;
+    // Kelime iki sayfaya yayilamaz varsayimi yapilmaz: her iki uc da
+    // ayri ayri dogrulanir.
+    if !mmu::is_user_accessible(addr) || !mmu::is_user_accessible(addr + 3) {
+        return None;
+    }
+    Some(unsafe { (addr as *const u32).read_unaligned() })
+}
+
+/// Cikti parametresini doldurur (`lpNumberOfBytesWritten` gibi).
+///
+/// Win32'de bu isaretciler NULL olabilir; NULL ise yazilmaz. Isaretci
+/// gecersizse de yazilmaz -- cagri yine de basarili sayilir, cunku asil
+/// is (yazma/okuma) yapilmistir.
+fn store_out(block: usize, index: usize, value: u32) {
+    let Some(ptr) = arg(block, index) else {
+        return;
+    };
+    let addr = ptr as usize;
+    if addr == 0 || !mmu::is_user_accessible(addr) || !mmu::is_user_accessible(addr + 3) {
+        return;
+    }
+    unsafe { (addr as *mut u32).write_unaligned(value) };
 }
 
 /// NT cagrilarinin "cikti" degerini (handle, okunan bayt sayisi) cagirana

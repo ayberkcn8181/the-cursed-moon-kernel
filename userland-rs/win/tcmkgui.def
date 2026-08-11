@@ -1,0 +1,17 @@
+; TCMK'nin goruntu DLL'i -- win32k cagrilarinin kullanici modundaki yuzu
+; (Windows'ta bu rolu USER32/GDI32 oynar).
+;
+; Adlar bilerek `Tcmk` onekli: bunlar Win32'nin kendi imzalari DEGILDIR.
+; `CreateWindowExA` 12 parametre alir ve bir pencere sinifi/WndProc
+; bekler; TCMK'de pencere sinifi yoktur. Gercek adi farkli bir imzayla
+; ihrac etmek yaniltici olurdu, o yuzden yalnizca KERNEL32.dll gercek
+; Win32 adlarini ve gercek imzalarini kullanir.
+LIBRARY TCMKGUI.dll
+EXPORTS
+TcmkCreateWindow@20
+TcmkGetWindowBits@4
+TcmkGetClientRect@4
+TcmkGetWindowRect@4
+TcmkUpdateWindow@4
+TcmkGetMessage@4
+TcmkGetCursorPos@0
