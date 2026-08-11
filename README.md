@@ -37,7 +37,8 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 9 | **Kalici depolama**: ATA PIO, MBR, TCMKFS (yazilabilir) | ✅ (i386) |
 | — | **Kendi onyukleyicisi** + diske kurulum (`install`) | ✅ (i386) |
 | 8 | **`execve`** (surec kendi yerine program yukler) | ✅ (i386) |
-| 8+ | fork + sinyaller, musl/busybox | ⏳ yapilmadi |
+| 8 | **`fork`** (adres uzayi kopyasi + iki kez donen cagri) | ✅ (i386) |
+| 8+ | sinyaller, musl/busybox | ⏳ yapilmadi |
 
 ## Grafiksel Alfa
 
@@ -63,7 +64,7 @@ Ekranda gorunenler:
   | bellek/disk | `mem` `disk` `df` `format onayla` `sync` `install onayla` |
   | dosya | `ls` `cat <yol>` `save <yol> <metin>` `cp <kaynak> <hedef>` `rm <yol>` |
   | uygulama/pencere | `apps` `run <ad>` `win` `focus <id>` `mouse` |
-  | uygulamalar (ELF) | `paint` `plasma` `notes` `menu` `crash` `hog` `spin` |
+  | uygulamalar (ELF) | `paint` `plasma` `notes` `menu` `twins` `crash` `hog` `spin` |
   | uygulamalar (PE32) | `winclock` (ham `int 0x2E`) `winpad` (IAT) |
   | diger | `echo <metin>` `clear` `help` |
 - **Sistem Gunlugu** -- cekirdek kaydinin canli goruntusu (konsol halka
@@ -828,6 +829,56 @@ Adres uzayi bu arada dogal olarak birakilip sifirdan kuruluyor -- zaten
 execve'nin istedigi sey. Surec basina adres uzayi olmadan bu temiz
 olmazdi: eski imajin kalintilari yeni programin altinda kalirdi.
 
+## `fork`: tek cagri, iki donus
+
+![fork](docs/screenshot-fork.png)
+
+`run twins` **tek** bir program baslatir. Program `fork()` cagirir ve o
+noktadan sonra iki surec olur; ekrandaki iki pencere ayni ikilinin iki
+ayri kopyasidir.
+
+```
+[LEVEL-0b1] fork: gorev #4 -> #5 (eip=0x00c018ba, 128 sayfa kopyalandi)
+[twins] fork dondu: 5 -- ben ebeveyn
+[twins] fork dondu: 0 -- ben cocuk
+```
+
+### Neden diger cagrilardan farkli
+
+Butun syscall'lar "bir sey yap, don" kalibindadir. `fork` **iki kez
+doner**: ebeveynde cocugun kimligiyle, cocukta sifirla. Bunun icin cagri
+anindaki Ring 3 baglaminin eksiksiz yakalanip ikinci bir gorevde
+canlandirilmasi gerekir.
+
+Baglam `pusha` blogunun hemen ustunde durur: CPU kesme girisinde EIP, CS,
+EFLAGS ve -- ayricalik degistigi icin -- kullanicinin ESP/SS'ini iter.
+`SyscallFrame::user_context` bu duzeni okur. Cocuk icin `eax` sifirlanir;
+"hangisiyim?" sorusunun cevabi budur.
+
+**Sadece EIP/ESP yetmez.** Derleyici `int 0x80` sonrasinda
+EBX/ESI/EDI/EBP'nin korundugunu varsayar, dolayisiyla cocuk bunlari
+ebeveyninkiyle ayni gormezse syscall'dan sonraki ilk erisimde coker. Bu
+yuzden Ring 3'e donus icin **butun** genel registerlari yukleyen ayri bir
+giris yazildi (`arch_enter_user_mode_regs`).
+
+### Bellek gercekten kopyalaniyor mu?
+
+Ekrandaki iki sayac bunun kanitidir. Ikisi de `fork`'tan **once** 1000'e
+kuruldu; sonra ebeveyn 1'er, cocuk 7'ser artiriyor. Goruntudeki degerler
+1087 ve 1609: ikisi de 87 kare cizmis, ama **kendi** kopyalarini
+artirmis. Bellek paylasilsaydi tek bir sayac gorunurdu.
+
+Kopyalama sanal adresler uzerinden yapilamaz -- kaynak ve hedef ayni
+sanal adreste (0x00C00000) ama farkli CR3'lerde durur, yani ikisi ayni
+anda gorunmez. Bunun yerine **fiziksel** adresler kullanilir: cerceve
+havuzu cekirdegin identity haritasinin icinde oldugu icin her iki
+cerceveye de dogrudan yazilabilir, CR3 degistirmeye ya da gecici pencere
+eslemeye gerek kalmaz.
+
+Cocuk kendi cekirdek yiginini `scheduler::spawn`'dan alir; ebeveyninkini
+paylasmasi, ikisi ayni anda syscall yaptiginda birbirinin cercevesini
+ezmek demek olurdu.
+
 ## Notes: yaz, kaydet, kapat, ac
 
 Ring 3 uygulamasi metnini kendi ciziyor, POSIX `open(O_CREAT)`/`write` ile
@@ -1152,9 +1203,15 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
   esit; oncelik, gercek zamanli sinif ve `nice` yok.
 - **GUI yalnizca i386'da.** x86_64 cekirdegi calisir ve framebuffer'i
   eslerse de GUI uygulamalari su an yalnizca ELF32 olarak uretiliyor.
-- **`fork` yok.** `execve` var ama sureci kopyalamak (fork) yok; her surec
-  bos bir adres uzayinda dogar. `fork` icin adres uzayi kopyalama
-  (ya da copy-on-write) gerekiyor.
+- **`fork` copy-on-write degil.** Sayfalar cagri aninda tamamen
+  kopyalanir; COW icin sayfalari salt okunur isaretleyip page fault'ta
+  ayirmak gerekir. Dogruluk degil, maliyet farki.
+- **`fork` sonrasi fd tablosu ve program break paylasilir.** Ikisi de su
+  an cekirdekte global; surec basina tasinmalari ayri bir adim. Yani
+  cocugun `close`'u ebeveyni de etkiler.
+- **Sinyal yok.** `kill` bir gorevi sonlandirir ama POSIX sinyalleri
+  (`SIGTERM`, isleyiciler) yok; `wait`/`waitpid` de yok -- ebeveyn
+  cocugunun bitisini bekleyemez.
 - **Surec basina 512 KiB eslenir**, talep uzerine sayfalama yok.
 - **TCMKFS duz bir isim uzayidir**, gercek dizin agaci degil: `/home/x`
   bir yol degil, dosyanin **adidir**. Azami 64 dosya, dosya basina 160 KiB

@@ -334,6 +334,75 @@ pub unsafe fn map_user_frames(cr3: usize, vaddr: usize, phys: usize, len: usize)
     true
 }
 
+/// Bir adres uzayinin kullanici bolgesini **icerigiyle birlikte**
+/// kopyalar (`fork`).
+///
+/// Kopyalama sanal adresler uzerinden yapilamaz: kaynak ve hedef ayni
+/// sanal adreste (0x00C00000) ama farkli CR3'lerde durur, yani ikisi ayni
+/// anda gorunmez. Bunun yerine **fiziksel** adresler kullanilir --
+/// cerceve havuzu cekirdegin identity haritasinin icinde oldugu icin
+/// (bkz. `frames`) her iki cerceveye de dogrudan yazilabilir. CR3
+/// degistirmek ya da gecici pencere esleme gerekmez.
+///
+/// Kopyalanan sey ebeveynin yalnizca **var olan** sayfalaridir; hic
+/// dokunulmamis sayfalar cocukta da yoktur.
+///
+/// Not: bu **tam kopyadir**, copy-on-write degil. COW icin sayfalari salt
+/// okunur isaretleyip page fault'ta ayirmak gerekir; hata isleyicisi
+/// bunun icin ayri bir asamadir. Tam kopya, `fork` semantigi acisindan
+/// dogru sonucu verir -- yalnizca daha pahalidir.
+///
+/// # Safety
+/// `src_cr3` bu modulun urettigi bir adres uzayi olmalidir.
+pub unsafe fn clone_user_space(src_cr3: usize) -> Option<usize> {
+    if src_cr3 == 0 || src_cr3 == kernel_cr3() {
+        return None;
+    }
+
+    let dst_cr3 = create_user_space()?;
+
+    let src_pd = src_cr3 as *const u32;
+    let src_pde = src_pd.add(USER_PDE).read();
+    if src_pde & PTE_PRESENT == 0 {
+        // Ebeveynin hic kullanici sayfasi yok; bos uzay dogru sonuctur.
+        return Some(dst_cr3);
+    }
+    let src_pt = (src_pde & !0xFFF) as *const u32;
+
+    for i in 0..ENTRIES {
+        let entry = src_pt.add(i).read();
+        if entry & PTE_PRESENT == 0 {
+            continue;
+        }
+
+        let vaddr = (USER_PDE << 22) | (i << 12);
+        let dst_entry = match user_pte(dst_cr3, vaddr) {
+            Some(e) => e,
+            None => {
+                destroy_user_space(dst_cr3);
+                return None;
+            }
+        };
+
+        let frame = match frames::alloc() {
+            Some(f) => f,
+            None => {
+                destroy_user_space(dst_cr3);
+                return None;
+            }
+        };
+
+        core::ptr::copy_nonoverlapping(
+            (entry & !0xFFF) as *const u8,
+            frame as *mut u8,
+            PAGE_SIZE,
+        );
+        dst_entry.write(frame as u32 | PTE_PRESENT | PTE_WRITABLE | PTE_USER);
+    }
+
+    Some(dst_cr3)
+}
+
 /// Bir surecin kullandigi kullanici sayfasi sayisi (kabuk raporu icin).
 pub fn user_pages(cr3: usize) -> usize {
     if cr3 == 0 || cr3 == kernel_cr3() {

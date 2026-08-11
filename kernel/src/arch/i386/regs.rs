@@ -59,4 +59,55 @@ impl SyscallFrame {
     pub fn set_return(&mut self, value: usize) {
         self.eax = value as u32;
     }
+
+    /// Cagiranin **tam** Ring 3 baglami (registerlar + EIP/ESP/EFLAGS).
+    ///
+    /// `pusha` blogunun hemen ustunde CPU'nun kesme girisinde ittigi
+    /// cerceve durur: EIP, CS, EFLAGS ve -- ayricalik degistigi icin --
+    /// kullanicinin ESP/SS'i. Duzen `syscall_entry`'de sabitlenmistir
+    /// (`pusha` + `push esp`), bu yuzden `pusha` blogundan 32 bayt
+    /// ileride guvenle okunabilir.
+    ///
+    /// `fork` bunu ister: cocuk, ebeveynin durdugu **tam** noktadan
+    /// devam etmelidir; yalnizca EIP/ESP yetmez, cunku derleyici
+    /// `int 0x80` sonrasinda EBX/ESI/EDI/EBP'nin korundugunu varsayar.
+    ///
+    /// # Safety
+    /// Yalnizca **Ring 3'ten** gelen bir syscall cercevesi icin
+    /// gecerlidir. Ring 0'dan gelen bir kesmede CPU SS/ESP itmez ve
+    /// okunan degerler anlamsiz olur.
+    pub unsafe fn user_context(&self) -> UserContext {
+        let iret = (self as *const SyscallFrame as *const u32).add(8);
+        UserContext {
+            edi: self.edi,
+            esi: self.esi,
+            ebp: self.ebp,
+            ebx: self.ebx,
+            edx: self.edx,
+            ecx: self.ecx,
+            eax: self.eax,
+            eip: iret.read(),
+            eflags: iret.add(2).read(),
+            esp: iret.add(3).read(),
+        }
+    }
+}
+
+/// Bir Ring 3 baglaminin tamami -- `arch_enter_user_mode_regs` bunu
+/// oldugu gibi geri yukleyip `iretd` ile Ring 3'e doner.
+///
+/// Alan sirasi assembly ile **birebir** eslesmelidir (bkz. `usermode.rs`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct UserContext {
+    pub edi: u32,
+    pub esi: u32,
+    pub ebp: u32,
+    pub ebx: u32,
+    pub edx: u32,
+    pub ecx: u32,
+    pub eax: u32,
+    pub eip: u32,
+    pub esp: u32,
+    pub eflags: u32,
 }

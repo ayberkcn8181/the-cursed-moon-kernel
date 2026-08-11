@@ -9,6 +9,7 @@ use core::arch::asm;
 
 // --- Linux (i386) numaralari ---
 pub const SYS_EXIT: usize = 1;
+pub const SYS_FORK: usize = 2;
 pub const SYS_READ: usize = 3;
 pub const SYS_WRITE: usize = 4;
 pub const SYS_OPEN: usize = 5;
@@ -149,4 +150,15 @@ pub fn execve(path: &str) -> isize {
 /// hizina baglidir (100 Hz -> 10 ms).
 pub fn sleep_ms(ms: usize) {
     unsafe { syscall1(SYS_SLEEP, ms) };
+}
+
+/// Sureci ikiye ayirir.
+///
+/// **Tek cagri, iki donus**: ebeveynde cocugun gorev kimligi, cocukta
+/// `0`. Cocuk, ebeveynin bellegi kopyalanmis olarak bu satirdan devam
+/// eder -- yani `fork()`'tan sonraki kod iki kez calisir.
+///
+/// Kaynak yoksa negatif deger doner (`-EAGAIN`).
+pub fn fork() -> isize {
+    unsafe { syscall0(SYS_FORK) as isize }
 }

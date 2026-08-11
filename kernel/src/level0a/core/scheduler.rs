@@ -441,6 +441,22 @@ pub fn set_current_address_space(cr3: usize) {
     }
 }
 
+/// Baska bir gorevin adres uzayini kaydeder.
+///
+/// `fork` icin gerekir: cocugun uzayi ebeveyn tarafindan, cocuk daha hic
+/// calismadan kurulur. Baglam degisimi CR3'u buradan yukler.
+// Yalnizca `fork` kullanir, o da i386'da derlenir.
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
+pub fn set_address_space(index: usize, cr3: usize) {
+    if index >= MAX_TASKS {
+        return;
+    }
+    unsafe {
+        let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+        (*tasks.add(index)).address_space = cr3;
+    }
+}
+
 /// Gorevin adres uzayi (kabuk raporu icin).
 pub fn address_space_of(index: usize) -> usize {
     if index >= MAX_TASKS {

@@ -79,6 +79,7 @@ static KNOWN_APPS: &[(&str, &str, &str)] = &[
     ("spin", "/bin/spin", "spin"),
     ("notes", "/bin/notes", "notes"),
     ("menu", "/bin/menu", "menu"),
+    ("twins", "/bin/twins", "twins"),
     // Windows ikilisi: yol .exe ile biter, cekirdek bicimi magic'ten
     // anlar (bkz. vfs::format) ve PE yukleyicisine yonlendirir.
     ("winclock", "/bin/winclock.exe", "winclock"),

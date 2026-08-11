@@ -14,6 +14,8 @@
 
 use core::arch::global_asm;
 
+use crate::arch::i386::regs::UserContext;
+
 global_asm!(
     r#"
 .section .text
@@ -46,6 +48,51 @@ arch_enter_user_mode:
     push eax                /* EIP    */
     iretd
 
+/* `fork` sonrasi cocugu ebeveynin durdugu tam noktadan baslatir.
+ *
+ * `arch_enter_user_mode`'dan farki, YALNIZCA EIP/ESP degil butun genel
+ * registerlari da yuklemesidir: derleyici `int 0x80` sonrasinda
+ * EBX/ESI/EDI/EBP'nin korundugunu varsayar, dolayisiyla cocuk bunlari
+ * ebeveyninkiyle ayni gormezse syscall'dan sonraki ilk erisimde coker.
+ *
+ * Alan sirasi `regs::UserContext` ile birebir aynidir. */
+.global arch_enter_user_mode_regs
+.type arch_enter_user_mode_regs, @function
+arch_enter_user_mode_regs:
+    mov eax, [esp + 4]      /* &UserContext */
+    mov edx, [esp + 8]      /* &resume_slot */
+
+    push ebp
+    push ebx
+    push esi
+    push edi
+    pushfd
+    mov [edx], esp          /* cekirdek baglamini sakla */
+
+    /* Ring 3 veri segmentleri */
+    mov bx, 0x23
+    mov ds, bx
+    mov es, bx
+    mov fs, bx
+    mov gs, bx
+
+    /* iret cercevesi: SS, ESP, EFLAGS, CS, EIP */
+    push 0x23
+    push [eax + 32]         /* esp    */
+    push [eax + 36]         /* eflags */
+    push 0x1B
+    push [eax + 28]         /* eip    */
+
+    /* Genel registerlar; EAX en sonda cunku taban isaretcisi odur. */
+    mov edi, [eax + 0]
+    mov esi, [eax + 4]
+    mov ebp, [eax + 8]
+    mov ebx, [eax + 12]
+    mov edx, [eax + 16]
+    mov ecx, [eax + 20]
+    mov eax, [eax + 24]
+    iretd
+
 .global arch_return_from_user
 .type arch_return_from_user, @function
 arch_return_from_user:
@@ -73,6 +120,9 @@ extern "C" {
     /// donus `arch_return_from_user` uzerinden gerceklesir.
     fn arch_enter_user_mode(entry: usize, user_stack_top: usize, resume_slot: *mut usize);
 
+    /// Tam bir Ring 3 baglamini geri yukleyerek Ring 3'e gecer (`fork`).
+    fn arch_enter_user_mode_regs(context: *const UserContext, resume_slot: *mut usize);
+
     /// `enter_user_mode`'un cagrildigi noktaya geri doner.
     fn arch_return_from_user(resume_slot: *mut usize) -> !;
 }
@@ -96,6 +146,20 @@ pub unsafe fn run_user_program(entry: usize, user_stack_top: usize) {
 
     scheduler::set_current_in_user_mode(true);
     arch_enter_user_mode(entry, user_stack_top, scheduler::current_resume_slot());
+    scheduler::set_current_in_user_mode(false);
+}
+
+/// `fork` edilmis bir cocugu ebeveynin baglamiyla Ring 3'te surdurur;
+/// cocuk `sys_exit` cagirdiginda buraya doner.
+///
+/// # Safety
+/// `context`, Ring 3'ten alinmis gecerli bir baglam olmalidir ve cagiran
+/// gorevin adres uzayi o baglamin gectigi uzay olmalidir.
+pub unsafe fn resume_user_context(context: &UserContext) {
+    use crate::level0a::core::scheduler;
+
+    scheduler::set_current_in_user_mode(true);
+    arch_enter_user_mode_regs(context as *const UserContext, scheduler::current_resume_slot());
     scheduler::set_current_in_user_mode(false);
 }
 

@@ -11,6 +11,7 @@
 //!    5 = sys_open    (EBX = path, ECX = flags, EDX = mode)
 //!    6 = sys_close   (EBX = fd)
 //!   45 = sys_brk     (EBX = yeni break, 0 ise mevcut break dondurulur)
+//!    2 = sys_fork    (argumansiz; ebeveyne cocuk id, cocuga 0 doner)
 
 use crate::arch::cpu::regs::SyscallFrame;
 use crate::level0a::core::mmu;
@@ -45,6 +46,7 @@ pub use x86_64_numbers::*;
 #[cfg(target_arch = "x86")]
 mod i386_numbers {
     pub const SYS_EXIT: u32 = 1;
+    pub const SYS_FORK: u32 = 2;
     pub const SYS_READ: u32 = 3;
     pub const SYS_WRITE: u32 = 4;
     pub const SYS_OPEN: u32 = 5;
@@ -69,6 +71,10 @@ const ENOENT: i32 = 2;
 const EMFILE: i32 = 24;
 const EINVAL: i32 = 22;
 const ENOSYS: i32 = 38;
+/// Kaynak gecici olarak yok -- `fork` icin gorev tablosu ya da cerceve
+/// havuzu dolu demektir (Linux `fork` da bu kodu dondurur).
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
+const EAGAIN: i32 = 11;
 
 /// Kullanici alanindan gelen yol adinin en fazla uzunlugu.
 const PATH_MAX: usize = 128;
@@ -127,6 +133,20 @@ pub fn dispatch(frame: &mut SyscallFrame) {
             // donusum yapilmadan dogrudan yazilir.
             frame.set_return(kernel_api::brk(arg1));
             return;
+        }
+
+        #[cfg(target_arch = "x86")]
+        SYS_FORK => {
+            // Tek cagri, iki donus: ebeveyn cocugun kimligini alir,
+            // cocuk 0 alir (bkz. `level0b1::fork`).
+            match unsafe { crate::level0b1::fork::fork(frame) } {
+                Ok(child) => {
+                    frame.set_return(child);
+                    return;
+                }
+                Err(crate::level0b1::fork::ForkError::NotUserProcess) => -EINVAL,
+                Err(crate::level0b1::fork::ForkError::OutOfResources) => -EAGAIN,
+            }
         }
 
         // --- GUI cagrilari: adres/durum dondururler, errno degil ---
