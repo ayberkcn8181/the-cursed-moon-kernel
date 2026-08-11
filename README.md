@@ -25,6 +25,7 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 3 | Level-0b1 ELF32 yukleyici + Ring 3 userland (TSS/iret) | ✅ |
 | 5 | POSIX dosya cagrilari + VFS/RAMFS + FD tablosu + brk | ✅ |
 | 7 | **Windows NT/PE**: PE32 yukleyici + reloc + `int 0x2E` | ✅ (i386) |
+| 7b | **Derlenmis PE32 GUI uygulamasi** + `win32k` cagri tablosu | ✅ (i386) |
 | 4 | **x86_64 portu**: Long Mode, 4 seviyeli sayfalama, ELF64, `syscall` | ✅ |
 | 13 | **Framebuffer/grafik**: 1024x768x32, bitmap font, cift tampon | ✅ (i386) |
 | 14 | **Pencere yoneticisi**: kompozitor, fare, surukleme, GUI syscall'lari | ✅ (i386) |
@@ -60,7 +61,8 @@ Ekranda gorunenler:
   | bellek/disk | `mem` `disk` `df` `format onayla` `sync` `install onayla` |
   | dosya | `ls` `cat <yol>` `save <yol> <metin>` `cp <kaynak> <hedef>` `rm <yol>` |
   | uygulama/pencere | `apps` `run <ad>` `win` `focus <id>` `mouse` |
-  | uygulamalar | `paint` `plasma` `notes` `menu` `crash` `hog` `spin` |
+  | uygulamalar (ELF) | `paint` `plasma` `notes` `menu` `crash` `hog` `spin` |
+  | uygulamalar (PE32) | `winclock` |
   | diger | `echo <metin>` `clear` `help` |
 - **Sistem Gunlugu** -- cekirdek kaydinin canli goruntusu (konsol halka
   tamponu her karede pencereye cizilir).
@@ -89,6 +91,11 @@ POSIX/NT'de karsiligi olmayan islevler icin `0x500+` araligi ayrildi:
 Pencere tamponu **yalnizca sahibinin** adres uzayina eslenir (bkz. "Surec
 basina adres uzayi"); uygulama piksellerini kendisi yazar, cekirdek
 yalnizca kompozisyon yapar.
+
+Windows uygulamalari ayni islevlere `int 0x2E` uzerinden, `NtUser*`/
+`NtGdi*` adlariyla ve 0x2000 araligindan ulasir (bkz. "win32k: pencere
+cagrilari icin ayri tablo"). Iki tablo da altta ayni `gui_api`'ye baglanir,
+yani PE ve ELF uygulamalari **ayni pencere yoneticisini** paylasir.
 
 ## Desteklenen mimariler
 
@@ -294,6 +301,77 @@ PE ikilisinin `ImageBase`'i 0x00400000, cekirdek onu 0x00300000'e
 yukluyor; IP'nin 0x00301014 olmasi taban yeniden yerlesiminin (`.reloc`)
 gercekten uygulandigini gosterir.
 
+### Derlenmis bir Windows uygulamasi: `winclock.exe`
+
+Yukaridaki `hello.exe` elle kodlanmis, tek bolumlu bir PE'dir --
+yukleyicinin dogrulugunu kanitlar ama "Windows uygulamasi yazilabiliyor"
+demez. Bu yuzden TCMK artik **gercek bir derleyiciyle uretilmis** PE32
+GUI uygulamasi da tasiyor:
+
+```
+make userland-win     # -> userland/winclock.exe
+```
+
+`rust-lld`'nin `msvc-lld` kipi COFF/PE uretebildigi icin bunun icin
+**Windows arac zinciri gerekmez**: `targets/i686-tcmk-win.json` hedefi
+`/subsystem:console`, `/base:0x00400000` ve `/fixed:no` ile linkler.
+Sonuc, `file` komutunun tanidigi sahici bir ikilidir:
+
+```
+winclock.exe: PE32 executable (console) Intel 80386, for MS Windows, 4 sections
+  .text  vaddr=0x1000   .rdata vaddr=0x3000
+  .eh_fram vaddr=0x4000 .reloc vaddr=0x5000  (104 bayt, derleyici uretimi)
+```
+
+`.reloc` bolumunun **derleyici tarafindan** uretilmis olmasi onemli:
+yukleyicinin yeniden yerlesim motoru artik elle yazilmis bir tabloyla
+degil, gercek bir linker'in ciktisiyla sinaniyor.
+
+![PE32 ve ELF32 yan yana](docs/screenshot-pe32.png)
+
+Ekranda solda ELF32 uygulamalari (Paint, Plasma, Shell), sagda PE32
+uygulamasi. Sistem gunlugunde iki yukleyici arka arkaya gorunur:
+
+```
+[LEVEL-0b1] Pe32  entry=0x00c0249b  user_stack=0x00c08000
+[LEVEL-0b1] Elf32 entry=0x00c0144d  user_stack=0x00c04000
+```
+
+Windows uygulamasi burada bir uyumluluk katmaninin konugu degil,
+cekirdegin **birinci sinif surecidir**: kendi adres uzayi (`ps` ciktisinda
+kendi CR3'u), kendi pencere tamponu ve zamanlayicida esit hakki vardir.
+
+### win32k: pencere cagrilari icin ayri tablo
+
+Windows'ta sistem cagrilari tek bir tabloda degildir -- cekirdek
+yurutucusu (`ntoskrnl`, `Nt*`) ile pencere/cizim cagrilari
+(`win32k.sys`, `NtUser*`/`NtGdi*`) ayrilir ve **donus sozlesmeleri de
+farklidir**. TCMK bu ayrimi korur:
+
+| Aralik | Tablo | Donus | Ornekler |
+|---|---|---|---|
+| 0x1000+ | yurutucu | NTSTATUS | `NtCreateFile` `NtWriteFile` `NtQuerySystemTime` `NtDelayExecution` |
+| 0x2000+ | win32k | tutamac/deger | `NtUserCreateWindowEx` `NtGdiGetBits` `NtUserGetMessage` |
+
+Yani pencere acan cagri NTSTATUS degil **HWND** dondurur -- bir Windows
+programcisinin bekledigi anlam degismez. Iki tablo da altta Level-0a'nin
+ayni `gui_api`/`kernel_api`'sine baglanir; POSIX tarafiyla paylasilan sey
+tam olarak burasidir.
+
+`winclock.exe` diske de yazar ve bunu yalnizca NT cagrilariyla yapar
+(`NtCreateFile(FILE_CREATE)` -> `NtWriteFile` -> `NtClose`). Yazdigi
+dosya, makine kapatilip yeniden acildiktan sonra kabuktan okunabiliyor:
+
+```
+tcmk> ls
+  disk  /clock.txt                18 bayt  2026-08-11 00:37
+tcmk> cat /clock.txt
+26-08-11 00:37:15
+```
+
+TCMKFS dosyanin hangi ABI'den geldigini bilmez; Level-0b1'de ayrisan iki
+dunya Level-0a'da tek bir dosya sisteminde bulusur.
+
 ## Level-1: Rust userland (`userland-rs/`)
 
 Ring 3 uygulamalari artik **Rust ile yaziliyor**. `userland-rs` ayri bir
@@ -338,11 +416,36 @@ cargo rustc --release --bin paint -- -C link-arg=--image-base=0x00C00000
 `rust-lld` `ET_EXEC`/`EM_386` uretir; Level-0b1'in ELF32 yukleyicisi bu
 ikilileri hicbir degisiklik olmadan yukler.
 
+### Tek kutuphane, iki ABI
+
+`tcmk` kutuphanesi hem ELF hem PE uygulamalarina hizmet eder; hangi
+tarafta oldugunu **hedef** belirler (`lib.rs` icinde `cfg(target_os)`):
+
+| | ELF (`i686-tcmk`) | PE (`i686-tcmk-win`) |
+|---|---|---|
+| sistem cagrisi | `int 0x80` -- `sys` | `int 0x2E` -- `nt` |
+| pencere | `gui::Window` | `win32::Hwnd` |
+| konsol | `io::Stdout` | `win32::Console` |
+| cikis | `sys_exit` | `NtTerminateProcess` |
+| **cizim** | `canvas::Canvas` | `canvas::Canvas` |
+
+Son satir kasitli: cizim kodu **ortaktir**. `Window` da `Hwnd` de ayni
+`Canvas`'a `Deref` eder, yani `win.text(...)`, `win.fill(...)`,
+`win.glyph_scaled(...)` iki tarafta ayni fonksiyonlardir. Bir uygulamayi
+Windows ikilisi olarak derlemek cizim kodunun tek satirini degistirmez --
+ayrisma yalnizca pencere acan ve olay okuyan cagrilarda olur, ki bu da
+zaten Level-0b1'in var olma sebebidir.
+
+Kaynak duzeni bu ayrimi yansitir: `src/bin/` ELF uygulamalari (kendiliginden
+bulunur), `src/win/` PE uygulamalari (Cargo.toml'da bildirilir).
+
 ### Userland ikililerini yeniden uretme
 
 ```
-make userland          # Rust uygulamalari + PE32/ELF64 (elle uretilenler)
-make userland-rust     # yalnizca Rust uygulamalari
+make userland          # hepsi
+make userland-rust     # ELF uygulamalari (src/bin/)
+make userland-win      # PE32 uygulamalari (src/win/)
+make userland-legacy   # elle uretilen en kucuk PE32/ELF64
 python3 tools/gen_font.py   # 8x16 bitmap fontu yeniden uret
 ```
 

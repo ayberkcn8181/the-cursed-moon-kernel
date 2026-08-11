@@ -33,6 +33,7 @@ fn main() {
         None => return,
     };
 
+    let width = win.width();
     let mut color = 0usize;
     let mut brush: isize = 3;
 
@@ -70,7 +71,7 @@ fn main() {
                     win.disc(lx as isize, ly as isize, brush, PALETTE[color]);
                 } else {
                     // Serit uzerine tiklamak rengi secer.
-                    let slot = lx * PALETTE.len() / win.width();
+                    let slot = lx * PALETTE.len() / width;
                     color = core::cmp::min(slot, PALETTE.len() - 1);
                     draw_palette(&mut win, color);
                 }

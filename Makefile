@@ -31,7 +31,7 @@ TARGET_JSON := $(ROOT_DIR)/targets/$(RUST_TARGET).json
 KERNEL_ELF := $(TARGET_DIR)/$(RUST_TARGET)/$(CARGO_OUT_DIR)/tcmk-kernel
 
 .DEFAULT_GOAL := all
-.PHONY: all iso run disk run-disk info clean bootloader userland userland-rust userland-legacy
+.PHONY: all iso run disk run-disk info clean bootloader userland userland-rust userland-win userland-legacy
 
 # Cekirdek 1. asamayi include_bytes! ile gomdugu icin onyukleyici
 # cekirdekten ONCE uretilmelidir.
@@ -97,7 +97,16 @@ USER_BASE := 0x00C00000
 
 USER_APPS := hello paint plasma crash hog spin notes menu
 
-userland: userland-rust userland-legacy
+# Windows (PE32) uygulamalari. Ayni kaynak agacindan, ayni `tcmk`
+# kutuphanesiyle, yalnizca **baska bir hedefle** derlenir: rust-lld
+# `msvc-lld` kipinde dogrudan PE32 uretir, yani Windows arac zinciri
+# gerekmez. Taban 0x00400000 (Windows gelenegi) oldugu icin cekirdek
+# imaji yuklerken taban yeniden yerlesimi uygular -- gercek bir Windows
+# programinda oldugu gibi.
+WIN_TARGET_DIR := $(TARGET_DIR)/userland-win
+WIN_APPS := winclock
+
+userland: userland-rust userland-win userland-legacy
 
 userland-rust:
 	@mkdir -p $(ROOT_DIR)/userland
@@ -110,13 +119,24 @@ userland-rust:
 		cp $(USERLAND_TARGET_DIR)/i686-tcmk/release/$$app $(ROOT_DIR)/userland/$$app.elf; \
 	done
 
-# Elle uretilen ikililer:
-#   * PE32  -- Rust'in i686-pc-windows hedefi bir Windows toolchain'i
-#              gerektirir; TCMK'nin arac zinciri bilerek Rust + GRUB + QEMU
-#              ile sinirli tutulmustur (bkz. README).
-#   * ELF64 -- Rust userland'i su an yalnizca i386 slot modelini destekler;
-#              x86_64 tarafinda cekirdek ELF64 yukleyicisi bu ikiliyle
-#              dogrulanir.
+userland-win:
+	@mkdir -p $(ROOT_DIR)/userland
+	@set -e; for app in $(WIN_APPS); do \
+		echo "  [userland] $$app.exe (PE32, taban 0x00400000)"; \
+		( cd $(USERLAND_DIR) && cargo rustc --release --bin $$app \
+			--target $(ROOT_DIR)/targets/i686-tcmk-win.json \
+			--target-dir $(WIN_TARGET_DIR) ); \
+		cp $(WIN_TARGET_DIR)/i686-tcmk-win/release/$$app $(ROOT_DIR)/userland/$$app.exe; \
+	done
+
+# Elle (Python ile) uretilen ikililer. Ikisi de yukleyicilerin **en dar
+# yolunu** sinar: derleyicinin urettigi zengin ikililerin aksine burada
+# ne oldugu bayt bayt bilinir, yani bir sorun ciktiginda hatanin
+# yukleyicide mi ikilide mi oldugu tartisilmaz.
+#   * PE32  -- import tablosuz, tek bolumlu, elle kodlanmis en kucuk PE.
+#              Derlenmis PE icin bkz. `userland-win` (winclock.exe).
+#   * ELF64 -- Rust userland'i su an yalnizca i386'yi hedefler; x86_64
+#              tarafinda cekirdek ELF64 yukleyicisi bu ikiliyle dogrulanir.
 userland-legacy:
 	python3 $(ROOT_DIR)/tools/gen_pe_hello.py $(ROOT_DIR)/userland/hello.exe
 	python3 $(ROOT_DIR)/tools/gen_hello_elf64.py $(ROOT_DIR)/userland/hello64.elf

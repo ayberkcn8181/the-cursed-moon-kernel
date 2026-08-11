@@ -39,8 +39,16 @@ const BOOT_MAGIC: u32 = 0x36D7_6289;
 static HELLO_ELF: &[u8] = include_bytes!("../../userland/hello.elf");
 
 /// Windows (PE32, i386) kullanici programi -- `tools/gen_pe_hello.py`.
+/// Elle kodlanmis en kucuk PE: yukleyicinin dar yolunu sinar.
 #[cfg(target_arch = "x86")]
 static HELLO_EXE: &[u8] = include_bytes!("../../userland/hello.exe");
+
+/// **Derlenmis** Windows uygulamasi: Rust kaynagindan `rust-lld` ile
+/// uretilmis, ImageBase 0x00400000'li, `.reloc` bolumu olan gercek bir
+/// PE32 GUI programi. ELF uygulamalariyla ayni pencere yoneticisinde
+/// kosar; tek farki cekirdege `int 0x2E`/NT ile girmesidir.
+#[cfg(target_arch = "x86")]
+static WINCLOCK_EXE: &[u8] = include_bytes!("../../userland/winclock.exe");
 
 /// Ring 3 GUI uygulamalari -- `tools/gen_gui_app.py`.
 #[cfg(target_arch = "x86")]
@@ -81,6 +89,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/spin", SPIN_ELF),
     ("/bin/notes", NOTES_ELF),
     ("/bin/menu", MENU_ELF),
+    ("/bin/winclock.exe", WINCLOCK_EXE),
     ("/boot/msg.txt", BOOT_MSG),
 ];
 

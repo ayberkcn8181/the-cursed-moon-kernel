@@ -25,25 +25,49 @@
 //! }
 //! ```
 //!
+//! ## Tek kutuphane, iki ABI
+//!
+//! Ayni kaynak hem **ELF** hem **PE** olarak derlenir; hangi tarafta
+//! oldugunu hedef belirler:
+//!
+//! | | ELF (`i686-tcmk`) | PE (`i686-tcmk-win`) |
+//! |---|---|---|
+//! | sistem cagrisi | `int 0x80` (`sys`) | `int 0x2E` (`nt`) |
+//! | pencere | `gui::Window` | `win32::Hwnd` |
+//! | cikis | `sys_exit` | `NtTerminateProcess` |
+//! | cizim | `canvas::Canvas` | `canvas::Canvas` |
+//!
+//! Son satir onemli: cizim kodu **ortaktir**. Iki uygulama arasindaki
+//! tek gercek fark, cekirdege hangi kapidan girdikleridir -- ki bu da
+//! zaten Level-0b1'in var olma sebebidir.
+//!
 //! ## Baglama modeli
 //!
-//! Cekirdekte henuz **surec basina adres uzayi yok** (doc Faz 9+): tum
-//! Ring 3 uygulamalari ayni 2 MiB'lik kullanici bolgesini paylasir. Bu
-//! yuzden her uygulama kendi "slot"una linklenir; slot tabani
-//! `--image-base` ile derleme aninda verilir (bkz. Makefile'daki
-//! `userland` hedefi). Ayni tabana linklenen iki uygulama birbirinin
-//! kodunu ezerdi.
-//!
-//! Su an yalnizca i386 (ELF32) hedefi desteklenir; x86_64 userland'i
-//! cekirdek tarafinda ELF64 yukleyicisiyle zaten calisiyor, Rust'a
-//! tasinmasi ayri bir adimdir.
+//! Her surec kendi adres uzayini aldigi icin (bkz. `core/mmu_i386.rs`)
+//! tum uygulamalar ayni tabana linklenir. ELF tarafinda taban
+//! `--image-base` ile dogrudan kullanici bolgesidir; PE tarafinda ise
+//! Windows'un gelenegi olan `0x00400000` kullanilir ve cekirdek imaji
+//! **taban yeniden yerlesimi** ile tasir (bkz. `binary_loader/pe32.rs`).
+//! Yani PE ikilisi gercek bir Windows programi gibi gorunur.
 
 #![no_std]
 
+pub mod canvas;
 pub mod font;
+
+// --- Linux/POSIX tarafi (ELF ikilisi) ---
+#[cfg(not(target_os = "windows"))]
 pub mod gui;
+#[cfg(not(target_os = "windows"))]
 pub mod io;
+#[cfg(not(target_os = "windows"))]
 pub mod sys;
+
+// --- Windows/NT tarafi (PE ikilisi) ---
+#[cfg(target_os = "windows")]
+pub mod nt;
+#[cfg(target_os = "windows")]
+pub mod win32;
 
 /// Uygulamanin giris noktasini tanimlar.
 ///
@@ -59,9 +83,23 @@ macro_rules! entry {
             // Tip kontrolu: $main gercekten `fn()` olmali.
             let main: fn() = $main;
             main();
-            $crate::sys::exit(0)
+            $crate::exit_process(0)
         }
     };
+}
+
+/// Sureci sonlandirir -- hangi ABI ile derlendiyse onun yoluyla.
+///
+/// `entry!` ve panik isleyicisi bunu kullanir, boylece uygulama kodunun
+/// hangi ikili bicimde derlendigini bilmesi gerekmez.
+#[cfg(not(target_os = "windows"))]
+pub fn exit_process(code: i32) -> ! {
+    sys::exit(code)
+}
+
+#[cfg(target_os = "windows")]
+pub fn exit_process(code: i32) -> ! {
+    nt::terminate_process(code as u32)
 }
 
 /// Panik: mesaji stdout'a yazip 101 ile cikar (Rust'in geleneksel panik
@@ -70,10 +108,14 @@ macro_rules! entry {
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     use core::fmt::Write;
+
+    #[cfg(not(target_os = "windows"))]
     let mut out = io::Stdout;
+    #[cfg(target_os = "windows")]
+    let mut out = win32::Console;
     let _ = writeln!(out, "[tcmk] uygulama panigi: {}", info.message());
     if let Some(loc) = info.location() {
         let _ = writeln!(out, "[tcmk]   {}:{}", loc.file(), loc.line());
     }
-    sys::exit(101)
+    exit_process(101)
 }

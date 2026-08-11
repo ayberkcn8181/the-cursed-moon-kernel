@@ -8,6 +8,14 @@ edition = "2021"
 name = "tcmk"
 path = "src/lib.rs"
 
+# `src/bin/` kendiliginden ELF uygulamalarini tanimlar. Windows (PE32)
+# uygulamalari `src/win/` altindadir ve ayrica bildirilir: yalnizca
+# `i686-tcmk-win` hedefiyle derlenirler, cunku `tcmk::win32` modulu
+# yalnizca o hedefte vardir (bkz. lib.rs).
+[[bin]]
+name = "winclock"
+path = "src/win/clock.rs"
+
 [profile.dev]
 panic = "abort"
 opt-level = 1

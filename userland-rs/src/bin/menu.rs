@@ -60,10 +60,11 @@ fn draw(win: &mut Window, selected: usize) {
     win.clear(BG);
     win.text(6, 4, "calistirmak icin numaraya bas:", ACCENT);
 
+    let width = win.width();
     for (i, (key, _, label)) in ENTRIES.iter().enumerate() {
         let y = 26 + i * CELL_H;
         if i == selected {
-            win.fill(2, y - 3, win.width() - 4, CELL_H, SEL);
+            win.fill(2, y - 3, width - 4, CELL_H, SEL);
         }
         win.glyph(8, y, *key, ACCENT);
         win.glyph(16, y, b')', ACCENT);

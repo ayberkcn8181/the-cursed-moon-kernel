@@ -178,10 +178,10 @@ fn draw(win: &mut Window, buffer: &Buffer, status: &str) {
     );
 
     // Alt bilgi cubugu.
-    let h = win.height();
-    win.fill(0, h - 34, win.width(), 34, 0x000E_1218);
+    let (w, h) = (win.width(), win.height());
+    win.fill(0, h - 34, w, 34, 0x000E_1218);
     win.text(4, h - 32, PATH, ACCENT);
     win.text(4, h - 16, status, WARN);
-    let hint_x = win.width().saturating_sub(9 * CELL_W);
+    let hint_x = w.saturating_sub(9 * CELL_W);
     win.text(hint_x, h - 16, "~ kaydet", FG);
 }
