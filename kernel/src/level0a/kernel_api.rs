@@ -7,7 +7,7 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::level0a::core::{fd, pipe, vfs};
+use crate::level0a::core::{fd, pipe, scheduler, vfs};
 
 /// Standart POSIX tanimlayicilari.
 pub const FD_STDIN: u32 = 0;
@@ -23,36 +23,80 @@ pub enum KernelError {
     NotSupported,
 }
 
-/// Program break (heap sinirı) -- `sys_brk` icin. Kullanici imaji
-/// yuklendiginde `set_program_break` ile baslatilir.
-static PROGRAM_BREAK: AtomicUsize = AtomicUsize::new(0);
-/// Baslangic break'i: heap bunun altina inemez.
-static PROGRAM_BREAK_START: AtomicUsize = AtomicUsize::new(0);
-static PROGRAM_BREAK_LIMIT: AtomicUsize = AtomicUsize::new(0);
+/// Program break (heap siniri) -- **surec basina**.
+///
+/// Uzun sure globaldi; tek kullanici sureci varken sorun degildi. `fork`
+/// ve coklu surec geldikten sonra artik dogru degil: her surecin kendi
+/// adres uzayi var, yani "heap nereye kadar buyudu" sorusunun cevabi da
+/// surece ozeldir. Global birakilsaydi bir uygulamanin `malloc`'u
+/// otekinin break'ini kaydirirdi -- fd tablosunda yasanan hatanin tipki
+/// aynisi.
+struct Break {
+    current: AtomicUsize,
+    /// Baslangic break'i: heap bunun altina inemez.
+    start: AtomicUsize,
+    limit: AtomicUsize,
+}
+
+impl Break {
+    const fn new() -> Self {
+        Break {
+            current: AtomicUsize::new(0),
+            start: AtomicUsize::new(0),
+            limit: AtomicUsize::new(0),
+        }
+    }
+}
+
+static BREAKS: [Break; scheduler::MAX_TASKS] = [
+    Break::new(), Break::new(), Break::new(), Break::new(),
+    Break::new(), Break::new(), Break::new(), Break::new(),
+];
+
+fn current_break() -> &'static Break {
+    &BREAKS[scheduler::current_id() % scheduler::MAX_TASKS]
+}
 
 pub fn set_program_break(start: usize, limit: usize) {
-    PROGRAM_BREAK.store(start, Ordering::Relaxed);
-    PROGRAM_BREAK_START.store(start, Ordering::Relaxed);
-    PROGRAM_BREAK_LIMIT.store(limit, Ordering::Relaxed);
+    let b = current_break();
+    b.current.store(start, Ordering::Relaxed);
+    b.start.store(start, Ordering::Relaxed);
+    b.limit.store(limit, Ordering::Relaxed);
+}
+
+/// Ebeveynin break'ini cocuga kopyalar (`fork`).
+///
+/// Adres uzayi kopyalandigi icin degerler oldugu gibi gecerlidir: cocuk
+/// ayni sanal adreslerde, ayni yere kadar buyumus bir heap gorur.
+pub fn clone_program_break(child: usize) {
+    if child >= scheduler::MAX_TASKS {
+        return;
+    }
+    let parent = current_break();
+    let target = &BREAKS[child];
+    target.current.store(parent.current.load(Ordering::Relaxed), Ordering::Relaxed);
+    target.start.store(parent.start.load(Ordering::Relaxed), Ordering::Relaxed);
+    target.limit.store(parent.limit.load(Ordering::Relaxed), Ordering::Relaxed);
 }
 
 /// `sys_brk` semantigi: 0 verilirse mevcut break dondurulur; gecerli bir
 /// adres verilirse break oraya tasinir. Basarisizlikta break DEGISMEZ ve
 /// eski deger dondurulur (Linux davranisi).
 pub fn brk(requested: usize) -> usize {
-    let current = PROGRAM_BREAK.load(Ordering::Relaxed);
+    let b = current_break();
+    let current = b.current.load(Ordering::Relaxed);
     if requested == 0 {
         return current;
     }
 
-    let floor = PROGRAM_BREAK_START.load(Ordering::Relaxed);
-    let limit = PROGRAM_BREAK_LIMIT.load(Ordering::Relaxed);
+    let floor = b.start.load(Ordering::Relaxed);
+    let limit = b.limit.load(Ordering::Relaxed);
 
     if requested < floor || requested > limit {
         return current;
     }
 
-    PROGRAM_BREAK.store(requested, Ordering::Relaxed);
+    b.current.store(requested, Ordering::Relaxed);
     requested
 }
 
@@ -114,9 +158,32 @@ pub unsafe fn read(fd_num: u32, buf: *mut u8, len: usize) -> Result<usize, Kerne
     if buf.is_null() {
         return Err(KernelError::Fault);
     }
-    // stdin henuz bir cihaza bagli degil (klavye kuyrugu Faz 9+).
+    // stdin = cagiran surecin penceresinin tus kuyrugu.
+    //
+    // POSIX'te klavye bir dosya tanimlayicisidir, pencere kimligi degil;
+    // bu yuzden `read(0, ...)` surecin kendi penceresine baglanir. Bir
+    // GUI uygulamasi ayni tuslara `win_poll_key` ile de ulasabilir --
+    // ikisi ayni kuyrugu okur, yani hangisi once cagirirsa tusu o alir.
+    //
+    // Okuma **bloke etmez**: tus yoksa 0 doner. Boru okumasindaki ile
+    // ayni gerekce -- bloke olan bir surec penceresini de dondurur.
     if fd_num == FD_STDIN {
-        return Ok(0);
+        let owner = scheduler::current_id();
+        let window = match crate::level0a::wm::first_window_of(owner) {
+            Some(w) => w,
+            None => return Ok(0),
+        };
+        let slice = core::slice::from_raw_parts_mut(buf, len);
+        let mut read = 0usize;
+        while read < slice.len() {
+            let key = crate::level0a::gui_api::poll_key(window);
+            if key == 0 {
+                break;
+            }
+            slice[read] = key;
+            read += 1;
+        }
+        return Ok(read);
     }
 
     let entry = fd::get(fd_num as usize).ok_or(KernelError::BadFileDescriptor)?;

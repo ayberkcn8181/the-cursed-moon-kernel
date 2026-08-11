@@ -121,6 +121,22 @@ pub fn close_owned_by(owner: usize) -> usize {
 }
 
 /// Bir gorevin halihazirda kac penceresi var (kullanici slot secimi icin).
+/// Bir gorevin ilk (sistem olmayan) penceresi.
+///
+/// `stdin` icin gerekir: POSIX'te klavye bir **dosya tanimlayicisidir**,
+/// pencere kimligi degil. Surec `read(0, ...)` cagirdiginda cekirdek
+/// "bu gorevin penceresi hangisi" sorusunu cevaplayabilmelidir.
+pub fn first_window_of(owner: usize) -> Option<usize> {
+    let count = WINDOW_COUNT.load(Ordering::Relaxed);
+    unsafe {
+        let windows = core::ptr::addr_of!(WINDOWS) as *const Window;
+        (0..count).find(|i| {
+            let w = &*windows.add(*i);
+            w.used && !w.system && w.owner == owner
+        })
+    }
+}
+
 fn owned_window_count(owner: usize) -> usize {
     let count = WINDOW_COUNT.load(Ordering::Relaxed);
     unsafe {

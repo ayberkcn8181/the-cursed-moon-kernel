@@ -41,6 +41,7 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 8 | **`fork`** (adres uzayi kopyasi + iki kez donen cagri) | ✅ (i386 + x86_64) |
 | 8 | **`waitpid`** (`Waiting` durumu, cikis kodu, `WNOHANG`) | ✅ (i386 + x86_64) |
 | 8 | **`pipe`** + surec basina fd tablosu | ✅ |
+| 8 | **Surec basina program break** (`brk`) + **`read(0)` = klavye** | ✅ |
 | 8+ | sinyaller, musl/busybox | ⏳ yapilmadi |
 
 ## Grafiksel Alfa
@@ -67,7 +68,7 @@ Ekranda gorunenler:
   | bellek/disk | `mem` `disk` `df` `format onayla` `sync` `install onayla` |
   | dosya | `ls` `cat <yol>` `save <yol> <metin>` `cp <kaynak> <hedef>` `rm <yol>` |
   | uygulama/pencere | `apps` `run <ad>` `win` `focus <id>` `mouse` |
-  | uygulamalar (ELF) | `paint` `plasma` `notes` `menu` `twins` `relay` `crash` `hog` `spin` |
+  | uygulamalar (ELF) | `paint` `plasma` `notes` `menu` `twins` `relay` `echo2` `crash` `hog` `spin` |
   | uygulamalar (PE32) | `winclock` (ham `int 0x2E`) `winpad` (IAT) |
   | diger | `echo <metin>` `pipes` `clear` `help` |
 - **Sistem Gunlugu** -- cekirdek kaydinin canli goruntusu (konsol halka
@@ -1050,6 +1051,55 @@ olan bir surec penceresini de dondurur, oysa buradaki uygulamalar kendi
 cizim dongulerini surer. `relay`'in ebeveyni her karede yoklar ve grafik
 akici kalir.
 
+## Standart girdi: `read(0, ...)` gercekten klavye
+
+Bu ana kadar TCMK uygulamalari tuslari **TCMK'ye ozgu** bir cagriyla
+(`win_poll_key`, 0x502) aliyordu. Artik ayni tuslar POSIX'in kendi
+yolundan, `read(0, ...)` ile de okunabiliyor.
+
+Baglanti sudur: her pencerenin bir **sahibi** (gorev kimligi) vardir;
+`read(FD_STDIN)` cagiran gorevin ilk penceresini bulur
+(`wm::first_window_of`) ve o pencerenin tus kuyrugunu bosaltir. Yani
+"standart girdi" = odakli pencereye giden tuslar. Once bu cagri kosulsuz
+`Ok(0)` donuyordu ("stdin henuz bir cihaza bagli degil"); simdi bagli.
+
+`echo2` bunu gosterir: pencere acmak disinda **hicbir** TCMK cagrisi
+kullanmaz, girdiyi `read(0, ...)`, ciktiyi `write(1, ...)` ile yapar --
+yani yazilan metin hem pencerede hem seri konsolda gorunur.
+
+```
+tcmk> run echo2
+tcmk> focus 4          # odagi kabuktan uygulamaya ver
+merhaba stdin          # -> pencerede goruntulenir
+                       # -> seri gunlukte de "merhaba stdin" cikar
+```
+
+![echo2 -- read(0) ile klavye](docs/screenshot-echo2.png)
+
+Sag alttaki sayac gerceklesen `read` cagrisi sayisidir: 13 karakter, 13
+cagri -- kuyruk her karede bosaltildigi icin cagri basina bir tus dusuyor.
+
+Ikisi de aynen x86_64'te de calisir; `sys.rs` cagri numarasini ve
+mekanizmasini (`int 0x80` / `syscall`) `cfg` ile ayirir, geri kalan kod
+tektir.
+
+### Bloke etmeyen `read`
+
+Gercek bir terminalde `read(0)` veri gelene kadar bekler. Burada beklemez:
+o an ne varsa doner, yoksa `0`. Neden borularla ayni: bloke olan bir surec
+kendi penceresini de dondurur. Terminal disiplini de yok -- satir tamponu,
+otomatik yankilama, `termios` yok; yankiyi uygulama kendi yapar (`echo2`
+okudugunu hem ekrana cizer hem `write(1)` ile geri yazar).
+
+### Surec basina program break
+
+Bu isle birlikte `brk` de surec basina tasindi. Onceden tek bir global
+`PROGRAM_BREAK` vardi: iki surec ayni anda `brk` cagirdiginda birinin
+yigin ustu otekinin heap tabanini kaydiriyordu -- fd tablosunda yasanan
+hatanin tipki aynisi. Artik gorev basina bir `Break { current, start,
+limit }` var ve `fork` bunu cocuga **kopyalar** (adres uzayi zaten
+kopyalandigi icin degerler oldugu gibi gecerlidir).
+
 ## Notes: yaz, kaydet, kapat, ac
 
 Ring 3 uygulamasi metnini kendi ciziyor, POSIX `open(O_CREAT)`/`write` ile
@@ -1379,10 +1429,12 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
 - **`fork` copy-on-write degil.** Sayfalar cagri aninda tamamen
   kopyalanir; COW icin sayfalari salt okunur isaretleyip page fault'ta
   ayirmak gerekir. Dogruluk degil, maliyet farki.
-- **`fork` sonrasi program break paylasilir.** `brk` hala global; surec
-  basina tasinmasi ayri bir adim. (fd tablosu artik surec basina.)
 - **Boru okumasi bloke etmez** ve boru sayisi dorttur; `dup`/`dup2` ve
   `select`/`poll` yok.
+- **Standart girdi bloke etmez.** `read(0, ...)` sahibinin penceresinde
+  biriken tuslari **o an ne varsa** dondurur, tus yoksa 0. Bloke eden bir
+  `read` GUI dongusunu de dondururdu; terminal disiplini (satir tamponu,
+  yankilama, `termios`) da yok -- yankiyi uygulama kendi yapar.
 - **Sinyal yok.** `kill` bir gorevi sonlandirir ama POSIX sinyalleri
   (`SIGTERM`, isleyiciler) yok.
 - **`waitpid` yalnizca belirli bir cocugu bekler.** `pid = -1` ("herhangi

@@ -81,6 +81,9 @@ static TWINS_ELF: &[u8] = include_bytes!("../../userland/twins.elf");
 /// pipe gosterimi: ayri adres uzaylarindaki iki surec konusuyor.
 #[cfg(target_arch = "x86")]
 static RELAY_ELF: &[u8] = include_bytes!("../../userland/relay.elf");
+/// stdin gosterimi: klavyeyi `read(0)` ile, POSIX yolundan okur.
+#[cfg(target_arch = "x86")]
+static ECHO2_ELF: &[u8] = include_bytes!("../../userland/echo2.elf");
 
 /// Linux (ELF64, x86_64) kullanici programi -- `tools/gen_hello_elf64.py`.
 /// Elle kodlanmis en kucuk ELF64: yukleyicinin dar yolunu sinar.
@@ -106,6 +109,8 @@ static RELAY64: &[u8] = include_bytes!("../../userland/relay.elf64");
 static MENU64: &[u8] = include_bytes!("../../userland/menu.elf64");
 #[cfg(target_arch = "x86_64")]
 static CRASH64: &[u8] = include_bytes!("../../userland/crash.elf64");
+#[cfg(target_arch = "x86_64")]
+static ECHO2_64: &[u8] = include_bytes!("../../userland/echo2.elf64");
 
 /// Kullanici programlarinin VFS uzerinden okudugu test dosyasi.
 static BOOT_MSG: &[u8] = b"/boot/msg.txt: VFS uzerinden okundu (RAMFS).\n";
@@ -124,6 +129,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/menu", MENU_ELF),
     ("/bin/twins", TWINS_ELF),
     ("/bin/relay", RELAY_ELF),
+    ("/bin/echo2", ECHO2_ELF),
     ("/bin/winclock.exe", WINCLOCK_EXE),
     ("/bin/winpad.exe", WINPAD_EXE),
     ("/boot/msg.txt", BOOT_MSG),
@@ -140,6 +146,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/relay", RELAY64),
     ("/bin/menu", MENU64),
     ("/bin/crash", CRASH64),
+    ("/bin/echo2", ECHO2_64),
     ("/boot/msg.txt", BOOT_MSG),
 ];
 

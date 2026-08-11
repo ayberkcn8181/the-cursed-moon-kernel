@@ -26,9 +26,8 @@
 //! * **Copy-on-write yok.** Sayfalar hemen kopyalanir. COW, sayfalari
 //!   salt okunur isaretleyip page fault'ta ayirmayi gerektirir; dogruluk
 //!   acisindan fark yoktur, yalnizca maliyet farkidir.
-//! * **Program break paylasilir.** `kernel_api`'deki break hala
-//!   globaldir; surec basina tasinmasi ayri bir adimdir. (Dosya
-//!   tanimlayicilari artik kopyalaniyor -- bkz. `core::fd::clone_into`.)
+//! * (Dosya tanimlayicilari ve program break **kopyalanir** -- bkz.
+//!   `core::fd::clone_into` ve `kernel_api::clone_program_break`.)
 //! * **Pencere miras alinmaz.** Pencereler gorev kimligine bagli
 //!   (`wm::close_owned_by`); cocuk kendi penceresini acmalidir.
 
@@ -89,6 +88,10 @@ pub unsafe fn fork(frame: &SyscallFrame) -> Result<usize, ForkError> {
     // Tanimlayicilar POSIX'in dedigi gibi **kopyalanir**: cocuk ayni
     // nesnelere bakan kendi tablosunu alir.
     crate::level0a::core::fd::clone_into(child);
+
+    // Program break de kopyalanir: adres uzayi kopyalandigi icin degerler
+    // oldugu gibi gecerlidir.
+    crate::level0a::kernel_api::clone_program_break(child);
 
     scheduler::set_address_space(child, child_space);
 
