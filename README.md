@@ -33,7 +33,7 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 13 | **Framebuffer/grafik**: 1024x768x32, bitmap font, cift tampon | ✅ (i386) |
 | 14 | **Pencere yoneticisi**: kompozitor, fare, surukleme, GUI syscall'lari | ✅ (i386) |
 | 6 | AArch64 portu (EL1/EL0, GIC, `svc #0`) | ⏳ yapilmadi |
-| 8 | **Surec basina adres uzayi** (cerceve ayirici + CR3 degisimi) | ✅ (i386) |
+| 8 | **Surec basina adres uzayi** (cerceve ayirici + CR3 degisimi) | ✅ (i386 + x86_64) |
 | 8 | **Preemptive zamanlama** + uyku durumu (`sleep`) | ✅ |
 | 9 | **Kalici depolama**: ATA PIO, MBR, TCMKFS (yazilabilir) | ✅ (i386) |
 | — | **Kendi onyukleyicisi** + diske kurulum (`install`) | ✅ (i386) |
@@ -140,6 +140,32 @@ bir hataya yol acmisti, o yuzden userland'de de ayri tutuluyor.
 Ekrandaki Plasma bir **ELF64** ikilisidir, Ring 3'te kosar ve cizim
 cagrilarini `syscall` ile yapar. Onceki durum yalnizca elle kodlanmis bir
 "hello" idi; artik i386'daki uygulamalarin aynisi calisiyor.
+
+### x86_64'te surec basina adres uzayi
+
+![x86_64 iki surec](docs/screenshot-x86_64-multiproc.png)
+
+Artik x86_64'te de her surec kendi adres uzayini alir; iki uygulama ayni
+anda kosabilir:
+
+```
+tcmk> ps
+  id durum      ad         cagri  adres-uzayi
+   2 uyuyor     plasma       735  0x01000000 (187 sayfa)
+   3 uyuyor     paint        647  0x01085000 (191 sayfa)
+```
+
+Fikir i386'nin aynisi, bir seviye daha derinde: surec kendi
+PML4/PDPT/PD ucusunu alir, **cekirdek girdileri kopyalanir** (heap,
+cerceve havuzu ve LAPIC her uzayda gorunur kalir) ve yalnizca kullanici
+bolgesini kaplayan PD girdileri surecin kendi sayfa tablolarina
+yonlendirilir.
+
+Kullanici bolgesi neden **iki** PD girdisi tutar: bir PD girdisi 2 MiB
+kapsar. Program imaji 0x00C00000'da durur, ama pencere piksel tamponlari
+0x00D00000'dan baslayip dort yuvayla 0x00F00000'a uzanir -- yani ikinci
+girdiye tasar. i386'da bir PDE 4 MiB kapsadigi icin bu sorun hic
+cikmamisti.
 
 Ortak katmanlar (`level0a`, `level0b1`, `level0b2`) **tek bir kod tabanidir**;
 mimariye ozel her sey `arch/<arch>/`, `level0a/gdt/<arch>.rs`,
@@ -1317,12 +1343,9 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
 
 - **Zamanlama round-robin ve onceliksiz.** Preemption var ama gorevler
   esit; oncelik, gercek zamanli sinif ve `nice` yok.
-- **x86_64'te surec basina adres uzayi yok.** Paylasimli tek uzay modeli
-  surdugu icin ayni anda **tek** Ring 3 uygulamasi calisabilir: butun
-  imajlar ayni sanal adrese yuklenir, ikincisi birincinin kodunun uzerine
-  yazardi. Cekirdek bunu sessizce bozmak yerine acikca reddeder
-  (`bu mimaride ayni anda tek uygulama calisabilir`). `fork`/`waitpid` de
-  ayni sebeple yalnizca i386'dadir.
+- **`fork`/`waitpid` yalnizca i386'da.** Adres uzayi **kopyalama**
+  (`clone_user_space`) henuz yalnizca i386'da var; x86_64'te surec basina
+  uzay var ama kopyalanmiyor.
 - **`fork` copy-on-write degil.** Sayfalar cagri aninda tamamen
   kopyalanir; COW icin sayfalari salt okunur isaretleyip page fault'ta
   ayirmak gerekir. Dogruluk degil, maliyet farki.

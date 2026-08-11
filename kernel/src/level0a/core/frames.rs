@@ -1,7 +1,3 @@
-// x86_64 portu tek adres uzayinda calistigi icin (bkz. `mmu_x86_64`)
-// cerceve ayiricisini kullanmaz; orada bu modul bilerek olu kod olur.
-#![cfg_attr(target_arch = "x86_64", allow(dead_code))]
-
 //! Fiziksel cerceve (page frame) ayiricisi.
 //!
 //! `kmalloc` bir **bump** ayiricidir: serbest birakma yoktur, cunku

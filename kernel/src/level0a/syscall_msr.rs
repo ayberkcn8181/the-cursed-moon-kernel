@@ -25,6 +25,12 @@ static KERNEL_RSP: AtomicUsize = AtomicUsize::new(0);
 
 #[no_mangle]
 static mut SYSCALL_KERNEL_RSP: usize = 0;
+/// Yalnizca giris dizisinde kullanilan **kazima alani**.
+///
+/// Kullanici RSP'si burada BIRAKILAMAZ: tek bir global oldugu icin ikinci
+/// bir surec syscall yaptiginda birincinin degerini ezerdi. `syscall`
+/// SFMASK ile IF'i temizledigi icin asagidaki uc komutluk pencere
+/// kesilemez; deger hemen goreve ait cekirdek yiginina itilir.
 #[no_mangle]
 static mut SYSCALL_USER_RSP: usize = 0;
 
@@ -61,15 +67,26 @@ pub fn set_kernel_stack(kernel_stack_top: usize) {
 // gecer, sonra `SyscallFrame` duzenini kurar. `syscall` RCX'e donus RIP'ini,
 // R11'e RFLAGS'i koydugundan `sysretq` bu ikisini geri ister -- cerceve
 // ikisini de koruyup geri yukler.
+//
+// Kullanici RSP'si **cekirdek yiginina itilir**, global bir degiskende
+// birakilmaz. Onceki hali tek surecle dogru calisiyordu ama ikincisi
+// geldiginde bozuluyordu: bir gorev syscall icinde CPU'yu birakiyor
+// (`win_flush` -> `yield`), bu arada oteki gorev syscall yapip global
+// degeri eziyor, ilki dondugunde BASKA bir surecin yigin isaretcisiyle
+// devam ediyordu. Belirtisi, calisan uygulamanin yerel degiskenlerinin
+// sessizce bozulmasiydi.
 global_asm!(
     r#"
 .section .text
 .global syscall_instruction_entry
 .type syscall_instruction_entry, @function
 syscall_instruction_entry:
-    /* Kullanici RSP'sini sakla, cekirdek yiginina gec */
+    /* Kullanici RSP'sini sakla, cekirdek yiginina gec, sonra kullanici
+       RSP'sini bu GOREVE AIT yigina it (global kalirsa surecler
+       birbirinin degerini ezer). */
     mov [rip + SYSCALL_USER_RSP], rsp
     mov rsp, [rip + SYSCALL_KERNEL_RSP]
+    push qword ptr [rip + SYSCALL_USER_RSP]
 
     /* SyscallFrame duzeni (idt/x86_64.rs ile ayni sira) */
     push rax
@@ -107,8 +124,10 @@ syscall_instruction_entry:
     pop rbx
     pop rax
 
-    /* Kullanici yiginina don ve Ring 3'e geri dus */
-    mov rsp, [rip + SYSCALL_USER_RSP]
+    /* Kullanici yiginina don ve Ring 3'e geri dus. Deger bu gorevin
+       kendi cekirdek yiginindan gelir, yani baska bir surec araya
+       girmis olsa bile dogrudur. */
+    pop rsp
     sysretq
 "#
 );
