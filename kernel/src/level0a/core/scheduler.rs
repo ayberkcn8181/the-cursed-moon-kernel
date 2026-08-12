@@ -29,6 +29,13 @@ pub enum TaskState {
     /// **baska bir gorevin durumuyla** uyanir.
     ///
     Waiting,
+    /// Bir aygit kesmesi bekliyor (`TaskState::IoWait`).
+    ///
+    /// `Blocked`'tan farki uyanma kaynagidir: zaman degil, **donanim**.
+    /// Ayri bir durum olmasi sart -- yoksa "5 tik sonra uyan" ile
+    /// "disk hazir olunca uyan" ayni yuvayi paylasir ve biri otekini
+    /// yanlislikla uyandirir.
+    IoWait,
     Terminated,
 }
 
@@ -82,6 +89,7 @@ static TASK_COUNT: AtomicUsize = AtomicUsize::new(0);
 static NEED_RESCHED: AtomicBool = AtomicBool::new(false);
 static SWITCHES: AtomicUsize = AtomicUsize::new(0);
 /// Zorla baglam degisimi (preemption) sayaci.
+static IO_WAITS: AtomicUsize = AtomicUsize::new(0);
 static PREEMPTIONS: AtomicUsize = AtomicUsize::new(0);
 /// Sifirdan buyukse zamanlayici kesmesi baglam degistirmez.
 static PREEMPT_LOCK: AtomicUsize = AtomicUsize::new(0);
@@ -140,16 +148,23 @@ pub fn on_timer_tick() {
 
 /// Bolunemez bir is boyunca zorla baglam degisimini kapatir.
 ///
-/// Gerekli oldugu tek yer su an disk: ATA komutlari (surucu secimi ->
-/// LBA -> komut -> veri) bir butundur; ortasinda baska bir gorev ikinci
-/// bir komut baslatirsa denetleyicinin durumu bozulur. Kesmeleri
-/// kapatmak da ise yarardi ama 2 MiB'lik bir okuma boyunca kesmesiz
-/// kalmak saati ve girdiyi dondururdu; burada yalnizca **baglam degisimi**
-/// ertelenir, kesmeler islenmeye devam eder.
+/// Bir donem tek kullanicisi ATA surucusuydu: komut dizisi (surucu
+/// secimi -> LBA -> komut -> veri) bir butundur ve ortasinda baska bir
+/// gorev ikinci bir komut baslatirsa denetleyicinin durumu bozulur.
+///
+/// O kullanim **kaldirildi**. "Kimse calismasin" demek, korunmasi gereken
+/// sey yalnizca *bir aygit* iken fazla genis bir cozumdu; artik surucu
+/// kendi aygit kilidini tutuyor (bkz. `drivers::ata::DeviceLock`) ve
+/// disk calisirken diger gorevler serbestce kosuyor.
+///
+/// Primitif yine de duruyor: kesmelerin acik kalmasi gereken ama baglam
+/// degisiminin olmemesi gereken isler icin dogru arac budur.
+#[allow(dead_code)]
 pub fn preempt_disable() {
     PREEMPT_LOCK.fetch_add(1, Ordering::Relaxed);
 }
 
+#[allow(dead_code)]
 pub fn preempt_enable() {
     PREEMPT_LOCK.fetch_sub(1, Ordering::Relaxed);
 }
@@ -347,6 +362,87 @@ pub fn sleep_ticks(ticks: u32) {
         let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
         (*tasks.add(current)).state = TaskState::Running;
     });
+}
+
+/// Calisan gorevi bir aygit kesmesi gelene kadar askiya alir.
+///
+/// `sleep_ticks` ile ayni kalip, tek farki uyanma kosulu: burada
+/// `wake_io_waiters` (yani bir kesme isleyicisi) gorevi `Ready` yapana
+/// kadar beklenir.
+///
+/// `ready` kapanisi, uyumadan **once** kosulu bir kez daha denetler:
+/// kesme, gorev `IoWait`'e gecmeden hemen once gelmis olabilir ve o
+/// uyandirma kaybolursa surec sonsuza kadar beklerdi (klasik "kacirilmis
+/// uyandirma" yarisi).
+pub fn wait_for_io(ready: impl Fn() -> bool, timeout_ticks: u32) -> bool {
+    // Olcum: kac kez gercekten uyunuldu. Sayacin sifirdan buyuk olmasi,
+    // disk beklemesinin CPU'yu bosa harcamadiginin dogrudan kanitidir.
+    let current = CURRENT.load(Ordering::Relaxed);
+    if current == 0 {
+        // Idle baglami: uyunacak baska gorev yok, yoklamaya dusulur.
+        return ready();
+    }
+
+    let deadline = crate::level0a::pit::ticks().wrapping_add(timeout_ticks);
+    loop {
+        let armed = crate::arch::cpu::without_interrupts(|| unsafe {
+            if ready() {
+                return false;
+            }
+            let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+            (*tasks.add(current)).state = TaskState::IoWait;
+            IO_WAITS.fetch_add(1, Ordering::Relaxed);
+            true
+        });
+        if !armed {
+            return true;
+        }
+
+        yield_now();
+
+        if ready() {
+            break;
+        }
+        // Kesme hic gelmezse (kayip IRQ, arizali aygit) sistem burada
+        // takilip kalmaz: sure dolunca cagirana yoklama yolu birakilir.
+        if crate::level0a::pit::ticks().wrapping_sub(deadline) < 0x8000_0000 {
+            crate::arch::cpu::without_interrupts(|| unsafe {
+                let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+                (*tasks.add(current)).state = TaskState::Running;
+            });
+            return false;
+        }
+    }
+
+    crate::arch::cpu::without_interrupts(|| unsafe {
+        let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+        (*tasks.add(current)).state = TaskState::Running;
+    });
+    true
+}
+
+/// Kac kez bir gorev aygit kesmesi bekleyerek uyudu.
+pub fn io_waits() -> usize {
+    IO_WAITS.load(Ordering::Relaxed)
+}
+
+/// Aygit kesmesi bekleyen butun gorevleri hazir yapar.
+///
+/// Kesme baglamindan cagrilir; bu yuzden kilit almaz ve gorev
+/// degistirmez -- yalnizca durum alanina dokunur.
+pub fn wake_io_waiters() -> usize {
+    let count = TASK_COUNT.load(Ordering::Relaxed);
+    let mut woken = 0;
+    unsafe {
+        let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+        for i in 0..count {
+            if (*tasks.add(i)).state == TaskState::IoWait {
+                (*tasks.add(i)).state = TaskState::Ready;
+                woken += 1;
+            }
+        }
+    }
+    woken
 }
 
 /// Kac gorev su an uyuyor (kabuk raporu icin).

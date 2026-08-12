@@ -38,6 +38,7 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 8 | **Preemptive zamanlama** + uyku durumu (`sleep`) | ✅ |
 | 9 | **Kalici depolama**: ATA PIO, MBR, TCMKFS (yazilabilir) | ✅ (i386) |
 | 9b | **TCMKFS dizinleri** (gercek agac, `mkdir`/`rmdir`) | ✅ |
+| 9c | **IRQ14**: disk kesmeyle bekler (`TaskState::IoWait`) | ✅ |
 | — | **Kendi onyukleyicisi** + diske kurulum (`install`) | ✅ (i386) |
 | 8 | **`execve`** (surec kendi yerine program yukler) | ✅ (i386 + x86_64) |
 | 8 | **`fork`** (adres uzayi kopyasi + iki kez donen cagri) | ✅ (i386 + x86_64) |
@@ -119,7 +120,7 @@ yani PE ve ELF uygulamalari **ayni pencere yoneticisini** paylasir.
 | Ring 3 uygulamalari | Rust (ELF32) + Rust (PE32) | Rust (ELF64) + Rust (PE32+) |
 | DLL thunk gelenegi | `__stdcall` (`ret imm16`) | Win64 (golge alan) |
 | Surec modeli | fork / execve / waitpid / pipe | fork / execve / waitpid / pipe |
-| Kesme denetleyici | PIC 8259A | PIC 8259A (APIC ileride) |
+| Kesme denetleyici | PIC 8259A (slave 0x70) | PIC 8259A (slave 0x70) |
 
 ```
 make ARCH=i386   run
@@ -893,6 +894,58 @@ Dosya basina 40 **dogrudan** blok isaretcisi -> azami 160 KiB. Inode
 tablosu ve bitmap bellekte onbelleklenir, degisiklikler aninda diske
 yazilir (write-through), her yazmadan sonra ATA cache-flush verilir.
 
+### IRQ14: disk artik kesmeyle bekliyor
+
+Surucu bugune kadar **yoklamali**ydi: bir sektor icin durum registeri
+milyonlarca kez okunuyordu ve o sure boyunca CPU baska hicbir is
+yapmiyordu.
+
+Bunun sebebi tembellik degil, bir **vektor catismasiydi**. Alisilmis PIC
+yerlesiminde (master 0x20, slave 0x28) IRQ14 vektor 46'ya duser -- ve 46,
+TCMK'de `int 0x2E`nin, yani **Windows NT sistem cagrisinin** yeridir. Ayni
+IDT girdisini paylasamazlar.
+
+Ilk akla gelen "NT vektorunu tasi"dir, ama 0x2E bir tercih degil **ABI**:
+Windows ikilileri onu bekler. Tasinabilir olan taraf PIC'ti, bu yuzden
+slave denetleyici 0x70'e alindi:
+
+| hat | eski vektor | yeni vektor |
+|---|---|---|
+| IRQ0 (PIT) | 32 | 32 |
+| IRQ1 (klavye) | 33 | 33 |
+| IRQ12 (fare) | 44 | **116** |
+| IRQ14 (ATA) | 46 (catisiyordu) | **118** |
+| `int 0x2E` (NT) | 46 | 46 (artik yalniz) |
+
+Bekleme yolu icin zamanlayiciya ucuncu bir engelleme durumu eklendi:
+`TaskState::IoWait`. `Blocked`'tan farki uyanma kaynagidir -- zaman degil,
+donanim. Ayri olmasi sart: yoksa "5 tik sonra uyan" ile "disk hazir olunca
+uyan" ayni yuvayi paylasir ve biri otekini yanlislikla uyandirir.
+
+Iki incelik:
+
+* **Kacirilmis uyandirma.** Kesme, gorev `IoWait`'e gecmeden hemen once
+  gelebilir. `wait_for_io` bu yuzden uyumadan once kosulu kesmeler kapaliyken
+  bir kez daha denetler; aksi halde surec sonsuza kadar beklerdi.
+* **Kesme hic gelmezse.** Sure dolunca yoklama yoluna dusulur. Yani kesme
+  bir **hizlandirici**dir, tek dogruluk kaynagi degil; arizali bir aygit
+  sistemi kilitlemez.
+
+Iki yer bilerek yoklamada kaldi: acilis (zamanlayici henuz yok) ve **idle
+gorevi** -- ki o gorev ayni zamanda masaustu dongusudur, uyutmak ekrani
+dondururdu. Kabuktan verilen disk komutlari bu yola duser.
+
+```
+tcmk> df
+tcmkfs: 4 / 63488 KiB kullanimda
+bos blok: 15871 / 15872  (blok 4096 bayt)
+dosya: 2 / 64  (isim uzayinda 17)  blok yazimi: 1  IRQ14: 202  io beklemesi: 1
+```
+
+Son iki sayi olcumun kendisi: `IRQ14` gelen kesme sayisi, `io beklemesi`
+ise bir gorevin gercekten uyudugu kez sayisi. Ikincisi yalnizca Ring 3
+surecleri icin artar (yukaridaki 1, `notes`in diske yazdigi an).
+
 ### Dizinler (bicim surumu 2)
 
 TCMKFS onceden **duz** bir isim uzayiydi: `/home/x` bir yol degil,
@@ -933,6 +986,12 @@ tcmk> ls /notlar
 `rmdir` bos olmayan dizini reddeder; `rm` dizinleri hic gormez. Ara
 dizinler **kendiliginden yaratilmaz** -- POSIX `open(O_CREAT)` de boyle
 davranir.
+
+`format` yeni bir diskte `/home` ve `/tmp` dizinlerini de yaratir. Duz
+isim uzayi doneminde `/home/notes.txt` gecerli bir **addi**; artik gecerli
+bir **yol** olmasi icin `/home`in var olmasi gerekiyor. `mkfs`in
+`lost+found` yaratmasiyla ayni turden bir kolaylik -- ve mevcut
+uygulamalarin (`notes`) calismaya devam etmesini sagliyor.
 
 Bicim degistigi icin superblock surumu 2'ye cikti ve **surum 1 imajlari
 baglanmaz**: eski inode'larda `parent` alani yoktur ve `name` tam yolu
@@ -1416,17 +1475,19 @@ kalmadiginda sistemi ilerletecek tek akistir. `sleep_ticks`'in dongusu de
 bu garantiye dayanir -- idle her zaman hazir oldugu icin `yield_now`
 mutlaka baska bir goreve gecer.
 
-### Bolunemez isler: `preempt_disable`
+### Bolunemez isler: aygit kilidi
 
 Kesmeleri kapatmak yerine yalnizca **baglam degisimini** erteleyen bir
-sayac var. Su an tek kullanicisi disk: bir ATA komutu (surucu secimi ->
-LBA -> komut -> veri) bir butundur; ortasinda baska bir gorev ikinci bir
-komut baslatirsa denetleyicinin durumu bozulur. Kesmeleri kapatmak da ise
-yarardi ama 2 MiB'lik bir okuma boyunca kesmesiz kalmak saati ve girdiyi
-dondururdu.
+sayac var (`preempt_disable`). Bir donem tek kullanicisi diskti: bir ATA
+komutu (surucu secimi -> LBA -> komut -> veri) bir butundur ve ortasinda
+baska bir gorev ikinci bir komut baslatirsa denetleyicinin durumu bozulur.
 
-`PreemptGuard` `Drop` ile birakilir; boylece `?` ile erken donen her hata
-yolu da kilidi geri verir.
+O kullanim **kaldirildi**. "Kimse calismasin" demek, korunmasi gereken sey
+yalnizca *bir aygit* iken fazla genis bir cozumdu -- ve kesmeyle beklemeyi
+bastan imkansiz kiliyordu. Artik surucu kendi **aygit kilidini** tutuyor
+(`DeviceLock`): yalnizca ATA'ya dokunmak yasak, baska gorevler serbestce
+kosuyor. Kilit `Drop` ile birakiliyor, yani `?` ile erken donen her hata
+yolu da onu geri veriyor.
 
 ## Surec basina adres uzayi
 
@@ -1664,8 +1725,10 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
   derinlik. Dizin agaci gercek, ama `.`/`..` bilesenleri, sembolik
   baglar, izinler ve sahiplik yok; kabugun bir "calisma dizini" kavrami
   da yok -- yollar her zaman mutlaktir.
-- **Disk erisimi yoklamalidir** (ATA PIO, IRQ14 baglanmadi): buyuk bir
-  yazma sirasinda sistem o sure boyunca duraklar.
+- **Kabuktan verilen disk komutlari hala yoklamali.** Kabuk idle
+  gorevinde (masaustu dongusu) kosar ve o gorev uyutulamaz -- uyutmak
+  ekrani dondururdu. Ring 3 sureclerinin disk erisimi kesmeyle bekler.
+  Ayrica DMA yok: veri hala `in/out` ile kelime kelime tasinir.
 
 ## Kapsam Disi (sonraki fazlar)
 

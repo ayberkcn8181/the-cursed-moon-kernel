@@ -66,19 +66,26 @@ static mut IDT: [IdtEntry; 256] = [IdtEntry::missing(); 256];
 pub fn init() {
     unsafe {
         install_exception_handlers();
-        IDT[32].set(
+        IDT[crate::level0a::pic::vector(crate::level0a::pic::IRQ_TIMER)].set(
             pit_handler as *const () as u64,
             KERNEL_CODE_SELECTOR,
             GATE_PRESENT_RING0_INT,
         );
-        IDT[33].set(
+        IDT[crate::level0a::pic::vector(crate::level0a::pic::IRQ_KEYBOARD)].set(
             keyboard_handler as *const () as u64,
             KERNEL_CODE_SELECTOR,
             GATE_PRESENT_RING0_INT,
         );
-        // IRQ12 = PS/2 fare (PIC remap sonrasi vektor 44).
-        IDT[44].set(
+        // IRQ12 = PS/2 fare, IRQ14 = birincil ATA. Vektorler `pic::vector`
+        // ile hesaplanir; slave denetleyici 0x70'e alindigi icin bunlar 44
+        // degil 116/118'dir (gerekce: `pic.rs`).
+        IDT[crate::level0a::pic::vector(crate::level0a::pic::IRQ_MOUSE)].set(
             mouse_handler as *const () as u64,
+            KERNEL_CODE_SELECTOR,
+            GATE_PRESENT_RING0_INT,
+        );
+        IDT[crate::level0a::pic::vector(crate::level0a::pic::IRQ_ATA_PRIMARY)].set(
+            ata_handler as *const () as u64,
             KERNEL_CODE_SELECTOR,
             GATE_PRESENT_RING0_INT,
         );
@@ -201,7 +208,7 @@ extern "x86-interrupt" fn pit_handler(_frame: InterruptStackFrame) {
     crate::level0a::pit::on_tick();
     // EOI baglam degisiminden ONCE: gorevi burada birakirsak PIC hala
     // hizmet bekliyor olur ve bir daha IRQ0 gelmez.
-    crate::level0a::pic::send_eoi(0);
+    crate::level0a::pic::send_eoi(crate::level0a::pic::IRQ_TIMER);
 
     // --- PREEMPTION ---
     // Zaman dilimi dolduysa gorev kendi istegi olmadan birakilir. Baglam
@@ -213,12 +220,18 @@ extern "x86-interrupt" fn pit_handler(_frame: InterruptStackFrame) {
 
 extern "x86-interrupt" fn keyboard_handler(_frame: InterruptStackFrame) {
     crate::level0a::keyboard::on_irq();
-    crate::level0a::pic::send_eoi(1);
+    crate::level0a::pic::send_eoi(crate::level0a::pic::IRQ_KEYBOARD);
 }
 
 extern "x86-interrupt" fn mouse_handler(_frame: InterruptStackFrame) {
     crate::level0a::input::on_mouse_irq();
-    crate::level0a::pic::send_eoi(12);
+    crate::level0a::pic::send_eoi(crate::level0a::pic::IRQ_MOUSE);
+}
+
+/// IRQ14 -- birincil ATA kanali "veri hazir / komut bitti" der.
+extern "x86-interrupt" fn ata_handler(_frame: InterruptStackFrame) {
+    crate::level0a::drivers::ata::on_irq();
+    crate::level0a::pic::send_eoi(crate::level0a::pic::IRQ_ATA_PRIMARY);
 }
 
 // x86_64'te `pusha` yoktur; registerlar `SyscallFrame` alan sirasina

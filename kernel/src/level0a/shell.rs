@@ -279,6 +279,7 @@ fn state_name(state: scheduler::TaskState) -> &'static str {
         scheduler::TaskState::Running => "calisiyor",
         scheduler::TaskState::Blocked => "uyuyor",
         scheduler::TaskState::Waiting => "bekliyor",
+        scheduler::TaskState::IoWait => "disk",
         scheduler::TaskState::Terminated => "bitti",
     }
 }
@@ -843,6 +844,10 @@ fn execute(line: &str) {
                 write_str(")");
                 write_str("  blok yazimi: ");
                 write_num(tcmkfs::block_writes() as usize);
+                write_str("  IRQ14: ");
+                write_num(ata::irq_count() as usize);
+                write_str("  io beklemesi: ");
+                write_num(scheduler::io_waits());
                 newline();
             }
         }

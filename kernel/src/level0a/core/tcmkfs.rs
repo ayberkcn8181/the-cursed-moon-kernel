@@ -396,6 +396,16 @@ pub fn format(label: &str) -> Result<(), FsError> {
     write_super(&sb)?;
 
     MOUNTED.store(true, Ordering::Relaxed);
+
+    // Iskelet dizinler. Duz isim uzayi doneminde `/home/notes.txt` gecerli
+    // bir **addi**; artik gecerli bir **yol** olmasi icin `/home`in var
+    // olmasi gerekiyor. Yeni bicimlendirilmis bir diskin bunlari hazir
+    // sunmasi, `mkfs`in `lost+found` yaratmasiyla ayni turden bir kolaylik
+    // -- ve mevcut uygulamalarin (notes) calismaya devam etmesini saglar.
+    for dir in ["/home", "/tmp"] {
+        mkdir(dir)?;
+    }
+
     Ok(())
 }
 
