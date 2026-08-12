@@ -81,6 +81,33 @@ define need_rust_src
 @command -v cargo >/dev/null 2>&1 || { \
 	echo ""; echo "HATA: 'cargo' bulunamadi."; \
 	echo "  kurulum:  https://rustup.rs"; echo ""; exit 1; }
+@cargo --version 2>/dev/null | grep -q nightly || { \
+	echo ""; \
+	echo "HATA: cargo NIGHTLY degil."; \
+	echo "  bulunan:  $$(cargo --version 2>&1 | head -1)"; \
+	echo "  konum:    $$(command -v cargo)"; \
+	echo ""; \
+	echo "  Bu cekirdek stable ile derlenemez: ozel JSON hedefleri,"; \
+	echo "  -Z build-std ve abi_x86_interrupt gibi kararsiz ozellikler"; \
+	echo "  kullanir. Bunlarin hicbirinin stable karsiligi yoktur."; \
+	echo ""; \
+	echo "  Depodaki rust-toolchain.toml nightly'yi zaten secer, AMA bunu"; \
+	echo "  yalnizca rustup uygular. Dagitim paketinden gelen cargo"; \
+	echo "  (Arch'ta 'rust', Debian'da 'cargo') o dosyayi yok sayar."; \
+	echo ""; \
+	if command -v rustup >/dev/null 2>&1; then \
+		echo "  rustup KURULU ama cargo baska yerden geliyor."; \
+		echo "  Muhtemel neden: PATH'te dagitim cargo'su once."; \
+		echo "    rustup toolchain install nightly --component rust-src,llvm-tools"; \
+		echo "    export PATH=\"\$$HOME/.cargo/bin:\$$PATH\"    # rustup shim'i one al"; \
+		echo "  Arch'ta dagitim paketini kaldirmak da cozer: sudo pacman -Rs rust"; \
+	else \
+		echo "  rustup KURULU DEGIL. Kurulumu:"; \
+		echo "    Arch:   sudo pacman -S rustup && sudo pacman -Rs rust"; \
+		echo "    digeri: https://rustup.rs"; \
+		echo "    sonra:  rustup toolchain install nightly --component rust-src,llvm-tools"; \
+	fi; \
+	echo ""; exit 1; }
 @test -d "$$(rustc --print sysroot)/lib/rustlib/src/rust/library/core" || { \
 	echo ""; \
 	echo "HATA: rust-src bileseni yok."; \
@@ -94,6 +121,7 @@ check:
 	@echo "arac                 gerekli oldugu yer                      durum"
 	@echo "-------------------- --------------------------------------- -----"
 	@printf '%-20s %-39s ' "cargo/rustc" "cekirdek + userland derlemesi"; command -v cargo >/dev/null 2>&1 && echo "var" || echo "YOK"
+	@printf '%-20s %-39s ' "cargo NIGHTLY mi" "kararsiz ozellikler (stable olmaz)"; cargo --version 2>/dev/null | grep -q nightly && echo "var" || echo "YOK"
 	@printf '%-20s %-39s ' "rust-src" "-Z build-std (core, compiler_builtins)"; test -d "$$(rustc --print sysroot 2>/dev/null)/lib/rustlib/src/rust/library/core" && echo "var" || echo "YOK"
 	@printf '%-20s %-39s ' "grub-mkrescue" "make iso / run"; command -v grub-mkrescue >/dev/null 2>&1 && echo "var" || echo "YOK"
 	@printf '%-20s %-39s ' "xorriso" "make iso (grub-mkrescue kullanir)"; command -v xorriso >/dev/null 2>&1 && echo "var" || echo "YOK"

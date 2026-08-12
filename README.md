@@ -249,8 +249,39 @@ uyarir.
 "can't find crate for `core`" olur ve gercek neden hic gorunmez. Bu
 yuzden `make` bunu onceden denetleyip acikca soyler.
 
-`rust-toolchain.toml` nightly'yi otomatik secer, ama bunun icin **rustup**
-gerekir; dagitimin `rustc` paketiyle (rustup'siz) derleme yapilamaz.
+### Nightly sart, ve bunu yalnizca rustup uygular
+
+Cekirdek stable ile **derlenemez**: ozel JSON hedefleri, `-Z build-std`
+ve `abi_x86_interrupt` gibi kararsiz ozellikler kullanir; hicbirinin
+stable karsiligi yoktur.
+
+`rust-toolchain.toml` nightly'yi zaten secer -- ama o dosyayi **yalnizca
+rustup** uygular. Dagitim paketinden gelen cargo (Arch'ta `rust`,
+Debian'da `cargo`) onu yok sayar ve stable ile derlemeye calisir:
+
+```
+error: the `-Z` flag is only accepted on the nightly channel of Cargo,
+       but this is the `stable` channel
+```
+
+En sinsi hali, rustup'in **kurulu oldugu** ama PATH'te dagitim
+cargo'sunun once geldigi durumdur: `rustup` calisir, `rustup toolchain
+list` nightly'yi gosterir, yine de derleme stable ile denenir. Cozum
+PATH sirasi:
+
+```
+export PATH="$HOME/.cargo/bin:$PATH"
+```
+
+Arch'ta dagitim paketini kaldirmak da cozumdur:
+
+```
+sudo pacman -S rustup && sudo pacman -Rs rust
+rustup toolchain install nightly --component rust-src,llvm-tools
+```
+
+`make check` bunu ayri bir satirda gosterir (`cargo NIGHTLY mi`), ve
+derleme hedefleri baslamadan once acikca uyarir.
 
 ### Nightly kaymasi
 
