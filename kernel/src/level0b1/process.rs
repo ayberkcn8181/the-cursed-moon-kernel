@@ -15,7 +15,7 @@ use crate::level0a::kernel_api;
 #[cfg(target_arch = "x86")]
 use crate::level0b1::binary_loader::{elf32, pe32};
 #[cfg(target_arch = "x86_64")]
-use crate::level0b1::binary_loader::elf64;
+use crate::level0b1::binary_loader::{elf64, pe64};
 
 /// Ring 3 yigini icin ayrilan alan (kullanici bolgesinin tepesinde).
 const USER_STACK_SIZE: usize = 8 * 1024;
@@ -30,6 +30,8 @@ pub enum BinaryFormat {
     Pe32,
     #[cfg(target_arch = "x86_64")]
     Elf64,
+    #[cfg(target_arch = "x86_64")]
+    Pe32Plus,
 }
 
 #[derive(Debug)]
@@ -45,6 +47,8 @@ pub enum SpawnError {
     Pe(#[allow(dead_code)] pe32::PeError),
     #[cfg(target_arch = "x86_64")]
     Elf64(#[allow(dead_code)] elf64::Elf64Error),
+    #[cfg(target_arch = "x86_64")]
+    Pe64(#[allow(dead_code)] pe64::PeError),
     OutOfMemory,
     NoRoomForStack,
     NotFound,
@@ -127,7 +131,7 @@ unsafe fn release_space(space: Option<usize>) {
 }
 
 /// Format secimi ve yukleme -- mimariye gore hangi yukleyicilerin mevcut
-/// oldugu degisir (i386: ELF32 + PE32, x86_64: ELF64).
+/// oldugu degisir (i386: ELF32 + PE32, x86_64: ELF64 + PE32+).
 #[cfg(target_arch = "x86")]
 unsafe fn detect_and_load(image: &[u8]) -> Result<Prepared, SpawnError> {
     if pe32::is_pe(image) {
@@ -164,11 +168,35 @@ unsafe fn detect_and_load(image: &[u8]) -> Result<Prepared, SpawnError> {
 
 #[cfg(target_arch = "x86_64")]
 unsafe fn detect_and_load(image: &[u8]) -> Result<Prepared, SpawnError> {
-    // PE32+ (x86_64 Windows) yukleyicisi Faz 7'nin 64-bit ayagidir ve
-    // henuz yok; su an yalnizca ELF64 desteklenir.
+    // i386 tarafiyla ayni oncelik: magic PE ise once PE denenir, o
+    // basarisiz olursa ELF'e dusulur.
+    if pe64::is_pe(image) {
+        crate::println!("[LEVEL-0b1] format: PE32+ (Windows NT alt sistemi, x86_64)");
+        match pe64::load(image) {
+            Ok(img) => {
+                return Ok(Prepared {
+                    entry: img.entry as usize,
+                    end: img.end as usize,
+                    format: BinaryFormat::Pe32Plus,
+                })
+            }
+            Err(pe_err) => {
+                crate::println!(
+                    "[LEVEL-0b1] PE32+ yuklenemedi ({:?}), ELF deneniyor.",
+                    pe_err
+                );
+                let img = elf64::load(image).map_err(|_| SpawnError::Pe64(pe_err))?;
+                return Ok(Prepared {
+                    entry: img.entry,
+                    end: img.end,
+                    format: BinaryFormat::Elf64,
+                });
+            }
+        }
+    }
+
     if !elf64::is_elf64(image) {
-        crate::println!("[LEVEL-0b1] ELF64 imzasi yok -- PE32+ yukleyicisi Faz 7'nin");
-        crate::println!("[LEVEL-0b1] 64-bit ayagidir ve henuz eklenmedi.");
+        crate::println!("[LEVEL-0b1] ne PE ne ELF64 imzasi var -- yine de ELF64 deneniyor.");
     }
     crate::println!("[LEVEL-0b1] format: ELF64 (Linux POSIX alt sistemi)");
     let img = elf64::load(image).map_err(SpawnError::Elf64)?;

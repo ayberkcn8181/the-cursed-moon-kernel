@@ -8,3 +8,5 @@ pub mod pe32;
 
 #[cfg(target_arch = "x86_64")]
 pub mod elf64;
+#[cfg(target_arch = "x86_64")]
+pub mod pe64;

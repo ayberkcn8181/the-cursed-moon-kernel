@@ -1,7 +1,7 @@
 //! Windows NT alt sistemi -- PE ikilileri ve NT syscall ABI'si.
 
-// Gomulu DLL tablosu yalnizca PE yukleyicisi tarafindan kullanilir,
-// o da yalnizca i386'da derlenir (bkz. binary_loader/mod.rs).
-#[cfg(target_arch = "x86")]
+// Gomulu DLL tablosu iki mimarida da gereklidir: PE32 (i386) ve PE32+
+// (x86_64) yukleyicileri ayni ihracat tablosunu kullanir, yalnizca
+// urettikleri thunk'in cagri gelenegi degisir (bkz. dll::emit_thunk).
 pub mod dll;
 pub mod nt_syscalls;

@@ -117,6 +117,15 @@ static ECHO2_64: &[u8] = include_bytes!("../../userland/echo2.elf64");
 #[cfg(target_arch = "x86_64")]
 static SIGDEMO64: &[u8] = include_bytes!("../../userland/sigdemo.elf64");
 
+/// **Windows (PE32+) uygulamalari** -- i386'dakilerle ayni kaynak, ayni
+/// ithal kutuphaneleri; degisen yalnizca hedef. Taban 0x140000000
+/// (64-bit Windows gelenegi) oldugu icin yukleyici DIR64 yeniden
+/// yerlesimini uygulamak zorundadir.
+#[cfg(target_arch = "x86_64")]
+static WINCLOCK_EXE64: &[u8] = include_bytes!("../../userland/winclock.exe64");
+#[cfg(target_arch = "x86_64")]
+static WINPAD_EXE64: &[u8] = include_bytes!("../../userland/winpad.exe64");
+
 /// Kullanici programlarinin VFS uzerinden okudugu test dosyasi.
 static BOOT_MSG: &[u8] = b"/boot/msg.txt: VFS uzerinden okundu (RAMFS).\n";
 
@@ -154,6 +163,8 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/crash", CRASH64),
     ("/bin/echo2", ECHO2_64),
     ("/bin/sigdemo", SIGDEMO64),
+    ("/bin/winclock.exe", WINCLOCK_EXE64),
+    ("/bin/winpad.exe", WINPAD_EXE64),
     ("/boot/msg.txt", BOOT_MSG),
 ];
 

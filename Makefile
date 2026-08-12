@@ -31,7 +31,7 @@ TARGET_JSON := $(ROOT_DIR)/targets/$(RUST_TARGET).json
 KERNEL_ELF := $(TARGET_DIR)/$(RUST_TARGET)/$(CARGO_OUT_DIR)/tcmk-kernel
 
 .DEFAULT_GOAL := all
-.PHONY: all iso run disk run-disk info clean bootloader userland userland-rust userland-x86_64 userland-win userland-legacy
+.PHONY: all iso run disk run-disk info clean bootloader userland userland-rust userland-x86_64 userland-win userland-win64 userland-legacy
 
 # Cekirdek 1. asamayi include_bytes! ile gomdugu icin onyukleyici
 # cekirdekten ONCE uretilmelidir.
@@ -114,7 +114,7 @@ WIN_APPS := winclock winpad
 WIN_LIB_DIR := $(ROOT_DIR)/build/winlib
 WIN_DEFS := kernel32 tcmkgui
 
-userland: userland-rust userland-x86_64 userland-win userland-legacy
+userland: userland-rust userland-x86_64 userland-win userland-win64 userland-legacy
 
 $(WIN_LIB_DIR)/stamp: $(patsubst %,$(USERLAND_DIR)/win/%.def,$(WIN_DEFS))
 	@mkdir -p $(WIN_LIB_DIR)
@@ -171,6 +171,45 @@ userland-win: $(WIN_LIB_DIR)/stamp
 			-- -L $(WIN_LIB_DIR) ); \
 		cp $(WIN_TARGET_DIR)/i686-tcmk-win/release/$$app $(ROOT_DIR)/userland/$$app.exe; \
 	done
+
+# Windows (PE32+) uygulamalari -- ayni kaynak, ayni ithal kutuphaneleri,
+# yalnizca baska bir hedef. Taban 0x140000000 (64-bit Windows gelenegi)
+# kullanici bolgesinin cok uzerindedir, yani yeniden yerlesim burada
+# **zorunludur**: delta negatiftir ve butun DIR64 girdileri duzeltilir.
+WIN64_TARGET_DIR := $(TARGET_DIR)/userland-win64
+WIN64_APPS := winclock winpad
+
+userland-win64: $(WIN_LIB_DIR)/stamp64
+	@mkdir -p $(ROOT_DIR)/userland
+	@set -e; for app in $(WIN64_APPS); do \
+		echo "  [userland] $$app.exe (PE32+, taban 0x140000000)"; \
+		( cd $(USERLAND_DIR) && cargo rustc --release --bin $$app \
+			--target $(ROOT_DIR)/targets/x86_64-tcmk-win.json \
+			--target-dir $(WIN64_TARGET_DIR) \
+			-- -L $(WIN_LIB_DIR)/x64 ); \
+		cp $(WIN64_TARGET_DIR)/x86_64-tcmk-win/release/$$app $(ROOT_DIR)/userland/$$app.exe64; \
+	done
+
+# 64-bit ithal kutuphaneleri: ayni .def dosyalari, `-m i386:x86-64`.
+#
+# Tek fark `@N` suslemelerinin kirpilmasi. Win64'te `__stdcall` diye bir
+# sey yoktur -- yigini her zaman cagiran temizler -- ve `@4` gibi bir ek
+# adin parcasi sayilip cozulemeyen sembol olur. i386 tarafinda bu isi
+# `--kill-at` yapar; llvm-dlltool o bayragi x86-64 hedefinde yok saydigi
+# icin burada .def sed ile suslemesiz hale getirilir. Boylece iki mimari
+# tek bir .def dosyasindan beslenir ve ordinaller birbirinden kaymaz.
+$(WIN_LIB_DIR)/stamp64: $(patsubst %,$(USERLAND_DIR)/win/%.def,$(WIN_DEFS))
+	@mkdir -p $(WIN_LIB_DIR)/x64
+	@set -e; for d in $(WIN_DEFS); do \
+		sed -E 's/^([A-Za-z_][A-Za-z0-9_]*)@[0-9]+/\1/' \
+			$(USERLAND_DIR)/win/$$d.def > $(WIN_LIB_DIR)/x64/$$d.def; \
+		llvm-dlltool -m i386:x86-64 \
+			-d $(WIN_LIB_DIR)/x64/$$d.def \
+			-l $(WIN_LIB_DIR)/x64/$$d.lib; \
+		echo "  [winlib64] $$d.lib"; \
+	done
+	@touch $(USERLAND_DIR)/src/win/*.rs
+	@touch $@
 
 # Elle (Python ile) uretilen ikililer. Ikisi de yukleyicilerin **en dar
 # yolunu** sinar: derleyicinin urettigi zengin ikililerin aksine burada

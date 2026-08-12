@@ -359,7 +359,7 @@ fn dispatch_win32_api(frame: &mut SyscallFrame) {
 
         NT_WRITE_CONSOLE_A => {
             // WriteConsoleA(hOutput, lpBuffer, nChars, lpCharsWritten, lpReserved)
-            match (arg(args, 0), arg(args, 1), arg(args, 2)) {
+            match (arg(args, 0), arg_ptr(args, 1), arg(args, 2)) {
                 (Some(handle), Some(buffer), Some(count)) => {
                     match unsafe {
                         kernel_api::write(handle, buffer as *const u8, count as usize)
@@ -387,8 +387,8 @@ fn dispatch_win32_api(frame: &mut SyscallFrame) {
             let mut storage = [0u8; PATH_MAX];
             let disposition = arg(args, 4).unwrap_or(0);
             let create = matches!(disposition, CREATE_NEW | CREATE_ALWAYS | OPEN_ALWAYS);
-            match arg(args, 0) {
-                Some(name) => match unsafe { copy_user_cstr(name as usize, &mut storage) } {
+            match arg_ptr(args, 0) {
+                Some(name) => match unsafe { copy_user_cstr(name, &mut storage) } {
                     Some(path) => match kernel_api::open(path, create) {
                         Ok(handle) => handle,
                         Err(_) => INVALID_HANDLE_VALUE,
@@ -401,7 +401,7 @@ fn dispatch_win32_api(frame: &mut SyscallFrame) {
 
         NT_READ_FILE_WIN32 => {
             // ReadFile(hFile, lpBuffer, nBytes, lpBytesRead, lpOverlapped)
-            match (arg(args, 0), arg(args, 1), arg(args, 2)) {
+            match (arg(args, 0), arg_ptr(args, 1), arg(args, 2)) {
                 (Some(handle), Some(buffer), Some(count)) => {
                     match unsafe { kernel_api::read(handle, buffer as *mut u8, count as usize) } {
                         Ok(read) => {
@@ -423,8 +423,8 @@ fn dispatch_win32_api(frame: &mut SyscallFrame) {
             // kelimeye paketlenmemis olmasi: DLL cagrisinda parametreler
             // yiginda oldugu icin paketlemeye gerek yok.
             let mut storage = [0u8; PATH_MAX];
-            let title = match arg(args, 0) {
-                Some(p) => unsafe { copy_user_cstr(p as usize, &mut storage) }.unwrap_or("app"),
+            let title = match arg_ptr(args, 0) {
+                Some(p) => unsafe { copy_user_cstr(p, &mut storage) }.unwrap_or("app"),
                 None => "app",
             };
             let x = arg(args, 1).unwrap_or(0) as usize;
@@ -487,23 +487,53 @@ fn arg_block(frame: &SyscallFrame) -> usize {
     frame.rdx as usize
 }
 
-/// Arguman blogundan `index`. kelimeyi okur.
+/// Arguman blogunda bir yuvanin genisligi.
+///
+/// i386 `__stdcall`'da her arguman yigina 4 bayt olarak itilir. Win64'te
+/// ise her arguman **8 bayt** yer kaplar -- bir `DWORD` bile. Bunun
+/// sebebi, x64 thunk'inin register argumanlarini cagiranin ayirdigi
+/// "golge alana" (shadow space) dokmesi ve o alanin 8'er baytlik
+/// yuvalardan olusmasidir (bkz. `dll::emit_thunk`).
+#[cfg(target_arch = "x86")]
+const ARG_SLOT: usize = 4;
+#[cfg(target_arch = "x86_64")]
+const ARG_SLOT: usize = 8;
+
+/// Arguman blogundan `index`. yuvayi **isaretci genisliginde** okur.
 ///
 /// POSIX/NT tarafindakiyle ayni guvenlik kurali: kullanici alanindan gelen
 /// her adres once `mmu::is_user_accessible` ile dogrulanir. Bir uygulama
-/// bozuk bir EDX ile gelirse cagri sessizce basarisiz olur, cekirdek
+/// bozuk bir EDX/RDX ile gelirse cagri sessizce basarisiz olur, cekirdek
 /// gecersiz bellek okumaz.
-fn arg(block: usize, index: usize) -> Option<u32> {
+fn arg_ptr(block: usize, index: usize) -> Option<usize> {
     if block == 0 {
         return None;
     }
-    let addr = block + index * 4;
-    // Kelime iki sayfaya yayilamaz varsayimi yapilmaz: her iki uc da
-    // ayri ayri dogrulanir.
-    if !mmu::is_user_accessible(addr) || !mmu::is_user_accessible(addr + 3) {
+    let addr = block + index * ARG_SLOT;
+    // Yuva iki sayfaya yayilamaz varsayimi yapilmaz: her iki uc da ayri
+    // ayri dogrulanir.
+    if !mmu::is_user_accessible(addr) || !mmu::is_user_accessible(addr + ARG_SLOT - 1) {
         return None;
     }
-    Some(unsafe { (addr as *const u32).read_unaligned() })
+    Some(unsafe {
+        #[cfg(target_arch = "x86")]
+        {
+            (addr as *const u32).read_unaligned() as usize
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            (addr as *const u64).read_unaligned() as usize
+        }
+    })
+}
+
+/// Arguman blogundan bir `DWORD` okur.
+///
+/// Win64'te yuva 8 bayttir ama `DWORD` yalnizca alt 32 biti kullanir --
+/// ust yarisi tanimsizdir. Bu yuzden olcu/bayrak gibi degerler bu yoldan,
+/// isaretciler ise `arg_ptr` ile okunur.
+fn arg(block: usize, index: usize) -> Option<u32> {
+    arg_ptr(block, index).map(|v| v as u32)
 }
 
 /// Cikti parametresini doldurur (`lpNumberOfBytesWritten` gibi).
@@ -512,10 +542,9 @@ fn arg(block: usize, index: usize) -> Option<u32> {
 /// gecersizse de yazilmaz -- cagri yine de basarili sayilir, cunku asil
 /// is (yazma/okuma) yapilmistir.
 fn store_out(block: usize, index: usize, value: u32) {
-    let Some(ptr) = arg(block, index) else {
+    let Some(addr) = arg_ptr(block, index) else {
         return;
     };
-    let addr = ptr as usize;
     if addr == 0 || !mmu::is_user_accessible(addr) || !mmu::is_user_accessible(addr + 3) {
         return;
     }

@@ -28,6 +28,7 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 7b | **Derlenmis PE32 GUI uygulamasi** + `win32k` cagri tablosu | ✅ (i386) |
 | 7b | **Ithal tablosu (IAT)**: `KERNEL32.dll` cozumu + thunk uretimi | ✅ (i386) |
 | 7c | **Ordinal ile ithal** (adsiz ihracatlar) | ✅ (i386) |
+| 7d | **PE32+ (64-bit Windows)**: DIR64 reloc + Win64 thunk | ✅ (x86_64) |
 | 4 | **x86_64 portu**: Long Mode, 4 seviyeli sayfalama, ELF64, `syscall` | ✅ |
 | 4b | **x86_64 Rust userland**: ayni kaynak, `syscall` ABI, GUI | ✅ |
 | 13 | **Framebuffer/grafik**: 1024x768x32, bitmap font, cift tampon | ✅ (i386) |
@@ -70,7 +71,7 @@ Ekranda gorunenler:
   | dosya | `ls` `cat <yol>` `save <yol> <metin>` `cp <kaynak> <hedef>` `rm <yol>` |
   | uygulama/pencere | `apps` `run <ad>` `win` `focus <id>` `mouse` |
   | uygulamalar (ELF) | `paint` `plasma` `notes` `menu` `twins` `relay` `echo2` `sigdemo` `crash` `hog` `spin` |
-  | uygulamalar (PE32) | `winclock` (ham `int 0x2E`) `winpad` (IAT) |
+  | uygulamalar (PE) | `winclock` (ham `int 0x2E`) `winpad` (IAT) -- i386'da PE32, x86_64'te PE32+ |
   | diger | `echo <metin>` `pipes` `clear` `help` |
 - **Sistem Gunlugu** -- cekirdek kaydinin canli goruntusu (konsol halka
   tamponu her karede pencereye cizilir).
@@ -112,9 +113,10 @@ yani PE ve ELF uygulamalari **ayni pencere yoneticisini** paylasir.
 | Boot | Multiboot1 | Multiboot2 + Long Mode gecisi |
 | Sayfalama | 2 seviye, 4 KiB, 4 MiB identity | 4 seviye, 2 MiB huge + 4 KiB split, 1 GiB identity |
 | Linux syscall | `int 0x80` | `syscall` komutu (MSR: EFER/STAR/LSTAR/SFMASK) |
-| Windows syscall | `int 0x2E` | — (PE32+ Faz 7'nin 64-bit ayagi) |
-| Ikili formatlar | ELF32 + PE32 | ELF64 |
-| Ring 3 uygulamalari | Rust (ELF32) + Rust (PE32) | Rust (ELF64) |
+| Windows syscall | `int 0x2E` | `int 0x2E` (ayni vektor) |
+| Ikili formatlar | ELF32 + PE32 | ELF64 + PE32+ |
+| Ring 3 uygulamalari | Rust (ELF32) + Rust (PE32) | Rust (ELF64) + Rust (PE32+) |
+| DLL thunk gelenegi | `__stdcall` (`ret imm16`) | Win64 (golge alan) |
 | Surec modeli | fork / execve / waitpid / pipe | fork / execve / waitpid / pipe |
 | Kesme denetleyici | PIC 8259A | PIC 8259A (APIC ileride) |
 
@@ -399,7 +401,8 @@ demez. Bu yuzden TCMK artik **gercek bir derleyiciyle uretilmis** PE32
 GUI uygulamasi da tasiyor:
 
 ```
-make userland-win     # -> userland/winclock.exe
+make userland-win     # -> userland/winclock.exe   (PE32)
+make userland-win64   # -> userland/winclock.exe64 (PE32+)
 ```
 
 `rust-lld`'nin `msvc-lld` kipi COFF/PE uretebildigi icin bunun icin
@@ -562,6 +565,82 @@ KERNEL32.dll
 Ekranin alt cubugundaki calisma suresi bu cagriyla geliyor -- yani
 ordinal yolu yalnizca cozulmuyor, gercekten kullaniliyor.
 
+### PE32+ : ayni ikili, 64 bit
+
+`make ARCH=x86_64` ile ayni iki uygulama **PE32+** olarak da derlenir ve
+ayni cekirdek tarafindan yuklenir:
+
+![winclock, PE32+](docs/screenshot-winclock64.png)
+
+Bicim adi "PE32+"tir, "PE64" degil: dosya duzeni buyuk olcude aynidir,
+degisen yalnizca isaretci genisligine bagli alanlardir.
+
+| | PE32 | PE32+ |
+|---|---|---|
+| optional header magic | `0x010B` | `0x020B` |
+| `BaseOfData` alani | var | **yok** |
+| `ImageBase` | u32 | u64 |
+| veri dizinleri nerede | `opt+96` | `opt+112` |
+| yeniden yerlesim turu | `HIGHLOW` (3) | `DIR64` (10) |
+| ordinal isareti | `1 << 31` | `1 << 63` |
+| IAT yuvasi | 4 bayt | 8 bayt |
+
+`BaseOfData`'nin kaybolmasiyla `ImageBase`'in 8 bayta cikmasi birbirini
+goturur; dizinlere kadar olan fark tam 16 bayttir. Bu sayiyi yanlis
+almak **sessiz** bir hatadir: dizin RVA'lari sifir gorunur, program
+ithalsiz sanilir ve ilk `call [IAT]`'te cakar.
+
+Taban 0x140000000 secilir (64-bit Windows gelenegi) -- kullanici
+bolgesinin cok uzerinde, yani yeniden yerlesim burada **zorunludur** ve
+her derlemede sinanir.
+
+#### Win64 thunk: golge alan hilesi
+
+Ithal edilen fonksiyonlar icin uretilen thunk'ta i386 ile gercek bir
+ayrim var. Win64'te ilk dort arguman registerdadir (RCX, RDX, R8, R9);
+cekirdegin "argumanlar tek blokta" sozlesmesi boylece bozulur -- ta ki
+Win64'un kendi kurali kullanilana kadar:
+
+> Cagiran, register argumanlari icin de yiginda 32 baytlik yer (**golge
+> alan**) ayirmak zorundadir.
+
+O alan tam olarak register argumanlarinin dokulecegi yerdir ve besinci
+argumanin hemen oncesindedir. Dort registeri oraya dokmek butun
+argumanlari kesintisiz tek bir diziye cevirir:
+
+```asm
+    mov [rsp+8],  rcx        ; arg1  \
+    mov [rsp+16], rdx        ; arg2   |  golge alan -- cagiran ayirdi
+    mov [rsp+24], r8         ; arg3   |
+    mov [rsp+32], r9         ; arg4  /
+    mov eax, <servis>
+    lea rdx, [rsp+8]         ; arg5, arg6... zaten [rsp+40]'tan devam eder
+    int 0x2E
+    ret                      ; Win64: yigini CAGIRAN temizler
+```
+
+Bunun dogrulugu `winpad`'in kaydetme yolunda sinaniyor: `CreateFileA`
+**yedi** parametre alir, yani son ucu golge alanin otesinden gelir.
+Diske yazilan not geri okunabiliyorsa thunk butun listeyi dogru
+tasimistir:
+
+```
+tcmk> cat /winpad.txt
+pe32 plus calisiyor
+```
+
+#### Yakalanan hata: yanlis servis numarasi
+
+Bu is sirasinda gomulu tabloda gercek bir hata cikti: `ExitProcess`,
+0x3000 araligindaki `NT_EXIT_PROCESS_W32` yerine 0x1000 araligindaki
+`NtTerminateProcess`'e baglanmisti. Ikisinin **cagri sozlesmesi
+farklidir** -- ilki cikis kodunu thunk'in kurdugu yigin blogundan,
+ikincisi ECX/RCX'ten okur. Sonuc: IAT uzerinden `ExitProcess(0)` cagiran
+bir program, o an ECX'te ne varsa onunla cikiyordu (pratikte bir
+isaretci: `cikis kodu 12595365`). Iki mimaride de ayni sekilde
+gorulduyse de belirtisi yalnizca cikis kodundaydi, bu yuzden uzun sure
+fark edilmemisti.
+
 ## Level-1: Rust userland (`userland-rs/`)
 
 Ring 3 uygulamalari artik **Rust ile yaziliyor**. `userland-rs` ayri bir
@@ -638,8 +717,10 @@ bulunur), `src/win/` PE uygulamalari (Cargo.toml'da bildirilir).
 
 ```
 make userland          # hepsi
-make userland-rust     # ELF uygulamalari (src/bin/)
+make userland-rust     # ELF32 uygulamalari (src/bin/)
+make userland-x86_64   # ayni kaynak, ELF64
 make userland-win      # PE32 uygulamalari (src/win/)
+make userland-win64    # ayni kaynak, PE32+
 make userland-legacy   # elle uretilen en kucuk PE32/ELF64
 python3 tools/gen_font.py   # 8x16 bitmap fontu yeniden uret
 ```
@@ -1503,10 +1584,10 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
 
 - **Zamanlama round-robin ve onceliksiz.** Preemption var ama gorevler
   esit; oncelik, gercek zamanli sinif ve `nice` yok.
-- **PE (Windows) ikilileri yalnizca i386'da.** PE32 yukleyicisi, NT
-  cevirmeni ve gomulu DLL'ler i386'ya ozgudur; PE32+ (64-bit) yukleyici
-  yapilmadi. Geri kalan her sey -- surec modeli, GUI, dosya sistemi --
-  iki mimaride de ayni.
+- **PE ikililerinde `.reloc` zorunlu.** Yukleyici imaji her zaman
+  kullanici bolgesinin basina koyar; `/fixed:no` ile linklenmemis, yani
+  yeniden yerlesim tablosu tasimayan bir ikili yuklenemez. Windows'ta bu
+  ikilinin tercih ettigi tabana bagli olarak calisabilirdi.
 - **`fork` copy-on-write degil.** Sayfalar cagri aninda tamamen
   kopyalanir; COW icin sayfalari salt okunur isaretleyip page fault'ta
   ayirmak gerekir. Dogruluk degil, maliyet farki.

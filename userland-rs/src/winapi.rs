@@ -36,7 +36,7 @@ pub const CREATE_ALWAYS: Dword = 2;
 pub const OPEN_EXISTING: Dword = 3;
 
 #[link(name = "kernel32")]
-extern "stdcall" {
+extern "system" {
     pub fn ExitProcess(exit_code: Dword) -> !;
     pub fn Sleep(milliseconds: Dword);
     pub fn GetTickCount() -> Dword;
@@ -70,7 +70,7 @@ extern "stdcall" {
 }
 
 #[link(name = "tcmkgui")]
-extern "stdcall" {
+extern "system" {
     pub fn TcmkCreateWindow(title: *const u8, x: Dword, y: Dword, cx: Dword, cy: Dword) -> Hwnd;
     pub fn TcmkGetWindowBits(window: Hwnd) -> *mut u32;
     /// (genislik << 16) | yukseklik

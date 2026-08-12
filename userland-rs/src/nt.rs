@@ -49,6 +49,7 @@ pub const STD_ERROR_HANDLE: usize = 2;
 /// EBX, x86-32'de LLVM tarafindan rezerve edilebildigi icin inline asm'de
 /// dogrudan `in("ebx")` kullanilamaz; deger genel bir registerdan tasinir.
 /// `nostack` bu yuzden **verilemez** (bkz. `sys.rs`'teki ayni tuzak).
+#[cfg(target_arch = "x86")]
 macro_rules! int2e {
     ($n:expr, $a1:expr, $a2:expr, $a3:expr) => {{
         let ret: usize;
@@ -61,6 +62,30 @@ macro_rules! int2e {
             inlateout("eax") $n => ret,
             in("ecx") $a2,
             inlateout("edx") $a3 => _,
+        );
+        ret
+    }};
+}
+
+/// x86_64'te ayni cagri, ayni kesme vektoru (`int 0x2E`) -- degisen
+/// yalnizca register genisligi ve arguman registerleri.
+///
+/// Arguman siralamasi POSIX tarafiyla ayni tutulur (RDI/RSI/RDX), cunku
+/// cekirdekteki `SyscallFrame::args()` iki ABI icin de ayni yeri okur.
+/// Windows'un kendi x64 syscall stub'i RCX/R10 kullanir; TCMK'de o
+/// gelenek yalnizca **gomulu DLL thunk'larinda** gecerlidir (bkz.
+/// `nt_subsystem::dll::emit_thunk`), ki orada da argumanlar zaten
+/// registerde degil golge alandadir.
+#[cfg(target_arch = "x86_64")]
+macro_rules! int2e {
+    ($n:expr, $a1:expr, $a2:expr, $a3:expr) => {{
+        let ret: usize;
+        asm!(
+            "int 0x2E",
+            inlateout("rax") $n => ret,
+            in("rdi") $a1,
+            in("rsi") $a2,
+            inlateout("rdx") $a3 => _,
         );
         ret
     }};
@@ -84,6 +109,7 @@ pub unsafe fn syscall3(n: usize, a1: usize, a2: usize, a3: usize) -> usize {
 ///
 /// # Safety
 /// Bkz. [`syscall3`].
+#[cfg(target_arch = "x86")]
 #[inline(always)]
 pub unsafe fn syscall3_out(n: usize, a1: usize, a2: usize, a3: usize) -> (usize, usize) {
     let status: usize;
@@ -97,6 +123,25 @@ pub unsafe fn syscall3_out(n: usize, a1: usize, a2: usize, a3: usize) -> (usize,
         inlateout("eax") n => status,
         in("ecx") a2,
         inlateout("edx") a3 => out,
+    );
+    (status, out)
+}
+
+/// Bkz. i386 surumu; cikti degeri x86_64'te RDX'tir.
+///
+/// # Safety
+/// Bkz. [`syscall3`].
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+pub unsafe fn syscall3_out(n: usize, a1: usize, a2: usize, a3: usize) -> (usize, usize) {
+    let status: usize;
+    let out: usize;
+    asm!(
+        "int 0x2E",
+        inlateout("rax") n => status,
+        in("rdi") a1,
+        in("rsi") a2,
+        inlateout("rdx") a3 => out,
     );
     (status, out)
 }

@@ -47,6 +47,12 @@ pub struct Export {
     pub service: u32,
     /// stdcall geregi thunk'in yigindan temizleyecegi bayt sayisi
     /// (parametre sayisi x 4).
+    ///
+    /// Yalnizca i386'da anlamlidir: Win64'te yigini her zaman **cagiran**
+    /// temizler, yani `ret imm16` diye bir sey yoktur. Alan yine de tek
+    /// tabloda tutulur -- iki mimari icin ayri ihracat listeleri tutmak,
+    /// ordinallerin birbirinden kaymasi demek olurdu.
+    #[cfg_attr(target_arch = "x86_64", allow(dead_code))]
     pub stack_bytes: u16,
 }
 
@@ -65,7 +71,12 @@ static KERNEL32: &[Export] = &[
     Export {
         name: "ExitProcess",
         ordinal: 1,
-        service: nt::NT_TERMINATE_PROCESS,
+        // 0x3000 araligi -- yigin argumanli. Burada 0x1000 araligindaki
+        // `NtTerminateProcess` yazmak, thunk'in kurdugu arguman blogunu
+        // hic okumayan ve cikis kodunu ECX'ten bekleyen bir isleyiciye
+        // dusmek demektir: surec, o an ECX'te ne varsa onunla (genellikle
+        // bir isaretciyle) cikar.
+        service: nt::NT_EXIT_PROCESS_W32,
         stack_bytes: 4,
     },
     Export {
@@ -201,9 +212,13 @@ fn eq_ignore_case(a: &str, b: &str) -> bool {
 }
 
 /// Bir thunk'in kapladigi bayt (asagidaki `emit_thunk` ile ayni olmali).
+/// Bir thunk'in kapladigi bayt (hizalama dolgusu dahil).
+#[cfg(target_arch = "x86")]
 pub const THUNK_SIZE: usize = 16;
+#[cfg(target_arch = "x86_64")]
+pub const THUNK_SIZE: usize = 48;
 
-/// Verilen adrese tek bir thunk yazar.
+/// Verilen adrese tek bir thunk yazar (i386, `__stdcall`).
 ///
 /// ```text
 ///   B8 xx xx xx xx     mov eax, service
@@ -216,6 +231,7 @@ pub const THUNK_SIZE: usize = 16;
 /// # Safety
 /// `at`, en az `THUNK_SIZE` bayt yazilabilir ve **kullanici tarafindan
 /// yurutulebilir** olmalidir; cagiran bunu saglar.
+#[cfg(target_arch = "x86")]
 pub unsafe fn emit_thunk(at: usize, export: &Export) {
     let code = at as *mut u8;
 
@@ -242,4 +258,68 @@ pub unsafe fn emit_thunk(at: usize, export: &Export) {
         code.add(14).write(0xCC);
     }
     code.add(15).write(0xCC); // hizalama dolgusu (int3)
+}
+
+/// Verilen adrese tek bir thunk yazar (x86_64, Win64 cagri gelenegi).
+///
+/// ## Neden i386'dakinden bambaska
+///
+/// Win64'te ilk dort arguman **registerdadir** (RCX, RDX, R8, R9);
+/// besinciden itibarasi yigina gider. Cekirdegin "argumanlar tek bir
+/// blokta" sozlesmesi bozulur -- ta ki Win64'un kendi kuralini
+/// kullanana kadar:
+///
+/// > Cagiran, register argumanlari icin de yiginda **32 baytlik yer**
+/// > (golge alan / shadow space) ayirmak zorundadir.
+///
+/// Bu alan tam olarak register argumanlarinin doküleceği yerdir ve
+/// besinci argumanin hemen oncesindedir. Yani dort registeri oraya
+/// dokmek, butun argumanlari **kesintisiz tek bir dizi** haline getirir:
+///
+/// ```text
+///   [rsp+8]  arg1 (RCX'ten)   \
+///   [rsp+16] arg2 (RDX'ten)    |  golge alan -- cagiran ayirdi
+///   [rsp+24] arg3 (R8'den)     |
+///   [rsp+32] arg4 (R9'dan)    /
+///   [rsp+40] arg5             \  cagiranin yigina ittikleri
+///   [rsp+48] arg6              /
+/// ```
+///
+/// Uretilen kod:
+///
+/// ```text
+///   48 89 4C 24 08     mov [rsp+8], rcx
+///   48 89 54 24 10     mov [rsp+16], rdx
+///   4C 89 44 24 18     mov [rsp+24], r8
+///   4C 89 4C 24 20     mov [rsp+32], r9
+///   B8 xx xx xx xx     mov eax, service
+///   48 8D 54 24 08     lea rdx, [rsp+8]
+///   CD 2E              int 0x2E
+///   C3                 ret
+/// ```
+///
+/// `stack_bytes` kullanilmaz: Win64'te yigini **her zaman cagiran**
+/// temizler, yani `ret imm16` diye bir sey yoktur.
+///
+/// # Safety
+/// Bkz. i386 surumu.
+#[cfg(target_arch = "x86_64")]
+pub unsafe fn emit_thunk(at: usize, export: &Export) {
+    const CODE: [u8; 33] = [
+        0x48, 0x89, 0x4C, 0x24, 0x08, // mov [rsp+8], rcx
+        0x48, 0x89, 0x54, 0x24, 0x10, // mov [rsp+16], rdx
+        0x4C, 0x89, 0x44, 0x24, 0x18, // mov [rsp+24], r8
+        0x4C, 0x89, 0x4C, 0x24, 0x20, // mov [rsp+32], r9
+        0xB8, 0x00, 0x00, 0x00, 0x00, // mov eax, service (21..25 doldurulur)
+        0x48, 0x8D, 0x54, 0x24, 0x08, // lea rdx, [rsp+8]
+        0xCD, 0x2E, // int 0x2E
+        0xC3, // ret
+    ];
+
+    let code = at as *mut u8;
+    core::ptr::copy_nonoverlapping(CODE.as_ptr(), code, CODE.len());
+    (code.add(21) as *mut u32).write_unaligned(export.service);
+    // Kalani int3 ile doldur: bir hata yuzunden buraya dallanilirsa
+    // sessizce ilerlemek yerine yakalanabilir bir istisna olussun.
+    core::ptr::write_bytes(code.add(CODE.len()), 0xCC, THUNK_SIZE - CODE.len());
 }

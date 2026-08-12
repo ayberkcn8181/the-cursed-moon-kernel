@@ -1,4 +1,8 @@
-//! `winclock` -- bir **Windows PE32 uygulamasi**.
+//! `winclock` -- bir **Windows PE uygulamasi**.
+//!
+//! Ayni kaynak iki bicime derlenir: i386'da PE32 (`ImageBase
+//! 0x00400000`), x86_64'te PE32+ (`ImageBase 0x140000000`). Ekranda
+//! gorunen etiketler hangi bicimin kostugunu soyler.
 //!
 //! Bu program TCMK'nin varlik sebebini tek ekranda gosterir: Rust ile
 //! yazilmis, `rust-lld` tarafindan gercek bir PE32 ikilisine linklenmis,
@@ -25,6 +29,28 @@ tcmk::entry!(main);
 const BG: u32 = 0x0009_1526;
 const PANEL: u32 = 0x0012_2438;
 const FG: u32 = 0x00D8_E4F0;
+// Bicime bagli etiketler. Ayni kaynagin iki hedefte derlendigini
+// ekranda da gostermek icin ayri tutulur.
+#[cfg(target_pointer_width = "32")]
+const FORMAT_TITLE: &str = "Saat -- PE32 (NT)";
+#[cfg(target_pointer_width = "64")]
+const FORMAT_TITLE: &str = "Saat -- PE32+ (NT)";
+
+#[cfg(target_pointer_width = "32")]
+const FORMAT_BANNER: &str = "[winclock] PE32 uygulamasi basladi, NT cagrilari kullaniliyor.\n";
+#[cfg(target_pointer_width = "64")]
+const FORMAT_BANNER: &str = "[winclock] PE32+ uygulamasi basladi, NT cagrilari kullaniliyor.\n";
+
+#[cfg(target_pointer_width = "32")]
+const FORMAT_LINE: &str = "PE32 . int 0x2E . NtUser*";
+#[cfg(target_pointer_width = "64")]
+const FORMAT_LINE: &str = "PE32+ . int 0x2E . NtUser*";
+
+#[cfg(target_pointer_width = "32")]
+const FORMAT_BASE: &str = "ImageBase 0x00400000 + reloc";
+#[cfg(target_pointer_width = "64")]
+const FORMAT_BASE: &str = "ImageBase 0x140000000 + DIR64";
+
 const ACCENT: u32 = 0x0046_C8FF;
 const WARN: u32 = 0x00FF_C24A;
 const OK: u32 = 0x0072_E08A;
@@ -32,7 +58,7 @@ const OK: u32 = 0x0072_E08A;
 const SAVE_PATH: &str = "/clock.txt";
 
 fn main() {
-    let mut win = match Hwnd::create("Saat -- PE32 (NT)", 560, 430, 300, 150) {
+    let mut win = match Hwnd::create(FORMAT_TITLE, 560, 430, 300, 150) {
         Some(w) => w,
         None => return,
     };
@@ -41,7 +67,7 @@ fn main() {
     let mut console = win32::Console;
     let _ = core::fmt::Write::write_str(
         &mut console,
-        "[winclock] PE32 uygulamasi basladi, NT cagrilari kullaniliyor.\n",
+        FORMAT_BANNER,
     );
 
     let mut status: &str = "s = kaydet, q = cik";
@@ -88,8 +114,8 @@ fn main() {
         let _ = draw_pair_small(&mut win, cx, 70, now.day);
 
         // Kimlik satiri: bu pencerenin arkasinda bir PE var.
-        win.text(10, 90, "PE32 . int 0x2E . NtUser*", ACCENT);
-        win.text(10, 106, "ImageBase 0x00400000 + reloc", FG);
+        win.text(10, 90, FORMAT_LINE, ACCENT);
+        win.text(10, 106, FORMAT_BASE, FG);
         win.text(10, 126, status, status_color);
 
         // Saniye cubugu -- saatin gercekten aktigini gorunur kilar.
