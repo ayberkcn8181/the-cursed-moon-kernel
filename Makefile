@@ -33,19 +33,21 @@ endif
 #   error: `.json` target specs require -Zjson-target-spec to be added
 #          to the cargo invocation
 #
-# Bayrak, onu istemeyen eski nightly'lerde de kabul edilir; yine de
-# korumali kullanilir, cunku bir gun kararli hale gelip -Z listesinden
-# cikabilir -- o zaman bilinmeyen bayrak olur ve derlemeyi kirardi.
-# `rust-toolchain.toml` sabit bir tarih degil `nightly` dedigi icin arac
-# zinciri zamanla kayar; bu tur farklar bu yuzden calisma aninda olculur.
+# Bayrak KOSULSUZ verilir. Onceki surumde "cargo bunu taniyor mu"
+# denetimi vardi; iyi niyetliydi ama kirilgan cikti -- denetimin kendisi
+# bayrakla ilgisiz nedenlerle basarisiz olabiliyor ve o zaman bayrak hic
+# eklenmiyordu, yani hatayi cozmesi gereken kod sessizce devre disi
+# kaliyordu. Bir denetim, olcmesi gereken seyden daha kirilgan ise
+# zarari faydasindan cok olur.
 #
-# Denetimin iki inceligi var:
-#   * `--version` KULLANILAMAZ: cargo onu -Z bayraklarini dogrulamadan
-#     yanitlar, yani denetim her zaman gecerdi ve hicbir sey olcmezdi.
-#   * `locate-project` bir manifest ister, bu yuzden depo kokunde degil
-#     `kernel/` icinde calistirilir; aksi halde bayrakla ilgisiz bir
-#     nedenle (Cargo.toml yok) basarisiz olur ve bayrak hic eklenmezdi.
-JSON_TARGET_FLAG := $(shell cd $(KERNEL_DIR) && cargo -Zjson-target-spec locate-project >/dev/null 2>&1 && echo -Zjson-target-spec)
+# Bayragi taniyan ama zorunlu kilmayan nightly'ler onu sorunsuz kabul
+# eder, yani tek risk bir gun kararli hale gelip -Z listesinden
+# cikmasidir. O gun geldiginde kapatmak icin:
+#
+#   make JSON_TARGET_FLAG=
+#
+# `?=` oldugu icin ortam degiskeni ya da komut satiri her zaman kazanir.
+JSON_TARGET_FLAG ?= -Zjson-target-spec
 
 TARGET_JSON := $(ROOT_DIR)/targets/$(RUST_TARGET).json
 KERNEL_ELF := $(TARGET_DIR)/$(RUST_TARGET)/$(CARGO_OUT_DIR)/tcmk-kernel
@@ -318,6 +320,8 @@ info:
 	@echo "GRUB komutu = $(GRUB_CMD)"
 	@echo "QEMU        = $(QEMU)"
 	@echo "Kernel ELF  = $(KERNEL_ELF)"
+	@echo "cargo -Z    = $(JSON_TARGET_FLAG)"
+	@echo "cargo       = $(shell cargo --version 2>&1 | head -1)"
 	@echo "ISO         = $(ISO)"
 
 clean:

@@ -252,6 +252,28 @@ yuzden `make` bunu onceden denetleyip acikca soyler.
 `rust-toolchain.toml` nightly'yi otomatik secer, ama bunun icin **rustup**
 gerekir; dagitimin `rustc` paketiyle (rustup'siz) derleme yapilamaz.
 
+### Nightly kaymasi
+
+Kanal sabit bir tarih degil `nightly` oldugu icin arac zinciri zamanla
+degisir ve kararsiz ozellikler kural degistirebilir. Simdiye kadar
+yasanan bir ornek: JSON hedef tanimlari 2026 ortasinda acik bir bayrak
+istemeye basladi.
+
+```
+error: `.json` target specs require -Zjson-target-spec to be added
+       to the cargo invocation
+```
+
+Makefile bu bayragi zaten veriyor. Bir gun kararli hale gelip `-Z`
+listesinden cikarsa kapatmak icin:
+
+```
+make JSON_TARGET_FLAG=
+```
+
+`make info` hangi bayragin ve hangi cargo surumunun kullanildigini
+yazar -- bu tur bir sorunda ilk bakilacak yer orasidir.
+
 ### Derlenmis ikililer depoda hazir gelir
 
 `userland/*.elf`, `*.elf64` ve `*.exe` surumlenmis durumda; cekirdek
