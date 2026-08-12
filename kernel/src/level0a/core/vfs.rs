@@ -112,15 +112,21 @@ pub fn mount_disk_files() -> usize {
     }
 
     let mut added = 0;
+    let mut buf = [0u8; tcmkfs::PATH_MAX];
     for inode in 0..tcmkfs::MAX_INODES {
-        let name = match tcmkfs::entry_name(inode) {
-            Some(n) if !n.is_empty() => n,
-            _ => continue,
-        };
-        if lookup(name).is_some() {
+        // Yalnizca dosyalar isim uzayina girer: VFS'in dizin kavrami yok,
+        // agac diskte yasar ve yollar `path_of` ile duzlestirilir.
+        if tcmkfs::entry_kind(inode) != Some(tcmkfs::KIND_FILE) {
             continue;
         }
-        if attach_disk_node(name, inode, tcmkfs::entry_size(inode).unwrap_or(0)).is_some() {
+        let path = match tcmkfs::path_of(inode, &mut buf) {
+            Some(p) if !p.is_empty() => p,
+            _ => continue,
+        };
+        if lookup(path).is_some() {
+            continue;
+        }
+        if attach_disk_node(path, inode, tcmkfs::entry_size(inode).unwrap_or(0)).is_some() {
             added += 1;
         }
     }
@@ -284,6 +290,19 @@ pub fn create_file(path: &str) -> Result<usize, tcmkfs::FsError> {
     }
     let inode = tcmkfs::create(path)?;
     attach_disk_node(path, inode, 0).ok_or(tcmkfs::FsError::TooManyFiles)
+}
+
+/// Diskte yeni bir dizin olusturur.
+///
+/// Dizinler VFS isim uzayina girmez -- agac diskte yasar; VFS yalnizca
+/// dosyalarin **tam yollarini** tutar (bkz. `mount_disk_files`).
+pub fn mkdir(path: &str) -> Result<(), tcmkfs::FsError> {
+    tcmkfs::mkdir(path).map(|_| ())
+}
+
+/// Bos bir dizini siler.
+pub fn rmdir(path: &str) -> Result<(), tcmkfs::FsError> {
+    tcmkfs::rmdir(path)
 }
 
 /// Diskteki bir dosyayi siler.

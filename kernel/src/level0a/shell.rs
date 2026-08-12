@@ -257,6 +257,21 @@ fn write_sig_list(mask: u32, width: usize) {
     }
 }
 
+/// `path`, `prefix` dizininin altinda mi?
+///
+/// Salt metin karsilastirmasi yeterli: VFS yollari `path_of` ile
+/// kanonik uretiliyor, yani ".." ya da tekrarli egik cizgi icermiyorlar.
+fn path_under(path: &str, prefix: &str) -> bool {
+    if prefix.is_empty() || prefix == "/" {
+        return true;
+    }
+    match path.strip_prefix(prefix) {
+        // "/notlar" ile "/notlar2/x" karismasin diye ayirici sart.
+        Some(rest) => rest.starts_with('/'),
+        None => false,
+    }
+}
+
 fn state_name(state: scheduler::TaskState) -> &'static str {
     match state {
         scheduler::TaskState::Unused => "bos",
@@ -294,7 +309,8 @@ fn execute(line: &str) {
             write_line("bellek / disk:");
             write_line("  mem  disk  df  format onayla  sync  install");
             write_line("dosya:");
-            write_line("  ls  cat <yol>  save <yol> <metin>  cp <kaynak> <hedef>  rm <yol>");
+            write_line("  ls [dizin]  cat <yol>  save <yol> <metin>  cp <kaynak> <hedef>  rm <yol>");
+            write_line("  mkdir <yol>  rmdir <yol>");
             write_line("uygulama / pencere:");
             write_line("  apps  run <ad>  win  focus <id>  mouse");
             write_line("diger:");
@@ -654,8 +670,38 @@ fn execute(line: &str) {
             newline();
         }
         "ls" => {
+            // Argumansiz: her sey. Argumanla: yalnizca o dizinin altindaki
+            // yollar. Once diskteki dizinler listelenir -- VFS'in dizin
+            // kavrami olmadigi icin onlari TCMKFS'e sormak gerekir.
+            let prefix = if arg.is_empty() { "/" } else { arg.trim_end_matches('/') };
+            let mut dirs = 0usize;
+            if tcmkfs::mounted() {
+                if let Some(dir) = tcmkfs::resolve(if prefix.is_empty() { "/" } else { prefix }) {
+                    let mut buf = [0u8; tcmkfs::PATH_MAX];
+                    for i in 0..tcmkfs::MAX_INODES {
+                        if tcmkfs::entry_kind(i) != Some(tcmkfs::KIND_DIR)
+                            || i == tcmkfs::ROOT_INODE
+                            || tcmkfs::parent_of(i) != Some(dir)
+                        {
+                            continue;
+                        }
+                        if let Some(path) = tcmkfs::path_of(i, &mut buf) {
+                            write_str("  ");
+                            write_padded("dizin", 6);
+                            write_padded(path, 22);
+                            newline();
+                            dirs += 1;
+                        }
+                    }
+                }
+            }
+            let mut files = 0usize;
             for i in 0..vfs::node_count() {
                 if let Some(path) = vfs::path_of(i) {
+                    if !arg.is_empty() && !path_under(path, prefix) {
+                        continue;
+                    }
+                    files += 1;
                     write_str("  ");
                     write_padded(
                         match vfs::source(i) {
@@ -688,8 +734,40 @@ fn execute(line: &str) {
                 }
             }
             write_str(" toplam ");
-            write_num(vfs::file_count());
-            write_line(" dosya");
+            write_num(files);
+            write_str(" dosya");
+            if dirs > 0 {
+                write_str(", ");
+                write_num(dirs);
+                write_str(" dizin");
+            }
+            newline();
+        }
+        "mkdir" => {
+            if arg.is_empty() {
+                write_line("kullanim: mkdir <yol>   (ust dizin onceden var olmali)");
+            } else {
+                match vfs::mkdir(arg) {
+                    Ok(()) => {
+                        write_str("dizin olusturuldu: ");
+                        write_line(arg);
+                    }
+                    Err(e) => write_line(tcmkfs::error_name(e)),
+                }
+            }
+        }
+        "rmdir" => {
+            if arg.is_empty() {
+                write_line("kullanim: rmdir <yol>   (dizin bos olmali)");
+            } else {
+                match vfs::rmdir(arg) {
+                    Ok(()) => {
+                        write_str("dizin silindi: ");
+                        write_line(arg);
+                    }
+                    Err(e) => write_line(tcmkfs::error_name(e)),
+                }
+            }
         }
         "disk" => {
             if !block::available() {
@@ -760,6 +838,9 @@ fn execute(line: &str) {
                 write_num(tcmkfs::file_count());
                 write_str(" / ");
                 write_num(tcmkfs::MAX_INODES);
+                write_str("  (isim uzayinda ");
+                write_num(vfs::file_count());
+                write_str(")");
                 write_str("  blok yazimi: ");
                 write_num(tcmkfs::block_writes() as usize);
                 newline();

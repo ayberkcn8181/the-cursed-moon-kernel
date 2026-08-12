@@ -46,7 +46,13 @@ use crate::level0a::drivers::partition;
 
 /// "TCMK" (little-endian).
 pub const MAGIC: u32 = 0x4B4D_4354;
-pub const VERSION: u32 = 1;
+/// Disk bicimi surumu.
+///
+/// 2 = **dizinler**. Inode'a `parent` alani eklendi ve `name` artik tam
+/// yolu degil tek bir **bileseni** tasiyor; kok dizin 0 numarali
+/// inode'dur. Surum 1 imajlari bu yuzden baglanmaz -- yeniden
+/// bicimlendirme gerekir.
+pub const VERSION: u32 = 2;
 
 pub const BLOCK_SIZE: usize = 4096;
 const SECTORS_PER_BLOCK: u32 = (BLOCK_SIZE / SECTOR_SIZE) as u32;
@@ -83,6 +89,16 @@ pub const MAX_NAME: usize = 64;
 
 pub const KIND_FREE: u32 = 0;
 pub const KIND_FILE: u32 = 1;
+pub const KIND_DIR: u32 = 2;
+
+/// Kok dizin her zaman 0 numarali inode'dur; `format` onu kurar.
+pub const ROOT_INODE: usize = 0;
+
+/// Bir yolun tasiyabilecegi en fazla bilesen (`/a/b/c` -> 3).
+pub const MAX_DEPTH: usize = 8;
+
+/// `path_of`'un yazdigi tam yol icin gereken tampon boyu.
+pub const PATH_MAX: usize = MAX_DEPTH * (MAX_NAME + 1) + 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FsError {
@@ -97,6 +113,14 @@ pub enum FsError {
     FileTooLarge,
     NotFound,
     Exists,
+    /// Disk bicimi surumu bu cekirdegin bekledigi degil.
+    BadVersion,
+    /// Yolun bir bileseni dizin degil ya da hic yok.
+    BadPath,
+    /// Dizin bos degil -- silinemez.
+    NotEmpty,
+    /// Yol cok derin (`MAX_DEPTH`).
+    TooDeep,
 }
 
 #[repr(C)]
@@ -122,9 +146,17 @@ struct Inode {
     /// RTC yoksa 0 kalir; listelerde "tarih yok" olarak gosterilir.
     mtime: u32,
     flags: u32,
+    /// Iceren dizinin inode numarasi. Kok kendini gosterir (0).
+    ///
+    /// Dizin agacini **cocuk -> ebeveyn** yonunde tutmak bilincli: bir
+    /// dizinin icerigi sabit boyutlu bir listeye sigmak zorunda kalmaz,
+    /// "bu dizinin cocuklari" sorusu inode tablosunun taranmasiyla
+    /// cevaplanir. 64 inode'luk bir tabloda tarama zaten ucuzdur.
+    parent: u32,
+    /// Yolun **tek bir bileseni** (surum 2 oncesinde tam yoldu).
     name: [u8; MAX_NAME],
     blocks: [u32; DIRECT_BLOCKS],
-    _pad: [u8; INODE_SIZE - 16 - MAX_NAME - DIRECT_BLOCKS * 4],
+    _pad: [u8; INODE_SIZE - 20 - MAX_NAME - DIRECT_BLOCKS * 4],
 }
 
 impl Inode {
@@ -134,9 +166,10 @@ impl Inode {
             size: 0,
             mtime: 0,
             flags: 0,
+            parent: 0,
             name: [0; MAX_NAME],
             blocks: [0; DIRECT_BLOCKS],
-            _pad: [0; INODE_SIZE - 16 - MAX_NAME - DIRECT_BLOCKS * 4],
+            _pad: [0; INODE_SIZE - 20 - MAX_NAME - DIRECT_BLOCKS * 4],
         }
     }
 }
@@ -350,6 +383,14 @@ pub fn format(label: &str) -> Result<(), FsError> {
         sb.label[i] = b;
     }
 
+    // Kok dizin: adi bostur (yol "/" olarak yazilir), ebeveyni kendisidir.
+    // `resolve` yukari yururken burada durur.
+    if let Some(root) = inode_ref(ROOT_INODE) {
+        root.kind = KIND_DIR;
+        root.parent = ROOT_INODE as u32;
+        root.mtime = crate::level0a::drivers::rtc::unix_time();
+    }
+
     flush_inodes()?;
     flush_bitmap()?;
     write_super(&sb)?;
@@ -369,6 +410,11 @@ pub fn mount() -> Result<(), FsError> {
     let sb = read_super()?;
     if sb.magic != MAGIC {
         return Err(FsError::NotFormatted);
+    }
+    // Surum 1 imajlarinda inode'da `parent` yoktur ve `name` tam yolu
+    // tasir; oldugu gibi baglamak dizin agacini rastgele kurardi.
+    if sb.version != VERSION {
+        return Err(FsError::BadVersion);
     }
     // Bolum buyudugunde superblock'taki eski kapasiteye takilmamak icin
     // gercek kapasiteyle sinirlanir.
@@ -427,15 +473,6 @@ fn name_of(inode: &Inode) -> &str {
     core::str::from_utf8(&inode.name[..end]).unwrap_or("")
 }
 
-/// `index`'teki dosyanin adi (statik omurlu: tablo `static`).
-pub fn entry_name(index: usize) -> Option<&'static str> {
-    let inode = inode_ref(index)?;
-    if inode.kind != KIND_FILE {
-        return None;
-    }
-    Some(name_of(inode))
-}
-
 /// Dosyanin son degisiklik ani (Unix zamani); 0 = bilinmiyor.
 pub fn entry_mtime(index: usize) -> Option<u32> {
     let inode = inode_ref(index)?;
@@ -453,15 +490,203 @@ pub fn entry_size(index: usize) -> Option<usize> {
     Some(inode.size as usize)
 }
 
-pub fn lookup(name: &str) -> Option<usize> {
+/// Bir dizinin dogrudan cocugunu adiyla arar.
+///
+/// Tarama yontemi bilincli: dizin icerigi ayri bir blokta tutulmadigi
+/// icin "X dizininin Y adli cocugu" sorusu inode tablosunun taranmasiyla
+/// cevaplanir. 64 inode'da bu, bir dizin blogunu okumaktan ucuzdur --
+/// ve dizin blogunun dolmasi diye bir sinir da olusmaz.
+pub fn child_of(parent: usize, name: &str) -> Option<usize> {
+    if name.is_empty() {
+        return Some(parent);
+    }
     for i in 0..MAX_INODES {
         if let Some(inode) = inode_ref(i) {
-            if inode.kind == KIND_FILE && name_of(inode) == name {
+            if inode.kind != KIND_FREE
+                && inode.parent as usize == parent
+                && i != ROOT_INODE
+                && name_of(inode) == name
+            {
                 return Some(i);
             }
         }
     }
     None
+}
+
+/// Yolu bilesenlerine ayirip kokten yurur.
+///
+/// `/` kok dizini verir. Bos bilesenler (`//`, sondaki `/`) atlanir --
+/// yani `/a/b/` ile `/a/b` ayni seydir, POSIX'te oldugu gibi.
+pub fn resolve(path: &str) -> Option<usize> {
+    let mut current = ROOT_INODE;
+    let mut depth = 0usize;
+    for part in path.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        depth += 1;
+        if depth > MAX_DEPTH {
+            return None;
+        }
+        // Ara bilesenlerin dizin olmasi sart: `/a.txt/b` gecersizdir.
+        if inode_ref(current)?.kind != KIND_DIR {
+            return None;
+        }
+        current = child_of(current, part)?;
+    }
+    Some(current)
+}
+
+/// Yalnizca **dosyalari** dondurur; eski `lookup` sozlesmesi budur.
+pub fn lookup(path: &str) -> Option<usize> {
+    let index = resolve(path)?;
+    if inode_ref(index)?.kind == KIND_FILE {
+        Some(index)
+    } else {
+        None
+    }
+}
+
+/// Yolu "ebeveyn dizin" ve "son bilesen" olarak ayirir.
+fn split_parent(path: &str) -> Result<(usize, &str), FsError> {
+    let trimmed = path.trim_end_matches('/');
+    let (dir, leaf) = match trimmed.rfind('/') {
+        Some(i) => (&trimmed[..i], &trimmed[i + 1..]),
+        // Yol egik cizgi icermiyorsa kokun altindadir.
+        None => ("", trimmed),
+    };
+    if leaf.is_empty() || leaf.len() >= MAX_NAME {
+        return Err(FsError::NameTooLong);
+    }
+    // Derinlik siniri burada bir kez denetlenir; `path_of` de ayni sinira
+    // dayandigi icin asilan bir yol sonradan geri okunamazdi.
+    if trimmed.split('/').filter(|p| !p.is_empty() && *p != ".").count() > MAX_DEPTH {
+        return Err(FsError::TooDeep);
+    }
+    let parent = resolve(if dir.is_empty() { "/" } else { dir })
+        .ok_or(FsError::BadPath)?;
+    if inode_ref(parent).ok_or(FsError::BadPath)?.kind != KIND_DIR {
+        return Err(FsError::BadPath);
+    }
+    Ok((parent, leaf))
+}
+
+/// Inode'un tam yolunu `buf`'a yazar ve dilimini dondurur.
+///
+/// Yol, ebeveyn zinciri **yukari** yuruyerek toplanip ters cevrilir --
+/// dizin agaci asagi dogru saklanmadigi icin tek yol budur.
+pub fn path_of<'a>(index: usize, buf: &'a mut [u8; PATH_MAX]) -> Option<&'a str> {
+    if index == ROOT_INODE {
+        buf[0] = b'/';
+        return core::str::from_utf8(&buf[..1]).ok();
+    }
+
+    // Once bilesenleri kokten uzaga dogru topla (ters sirada).
+    let mut chain = [0usize; MAX_DEPTH];
+    let mut depth = 0usize;
+    let mut current = index;
+    while current != ROOT_INODE {
+        if depth >= MAX_DEPTH {
+            return None;
+        }
+        chain[depth] = current;
+        depth += 1;
+        let parent = inode_ref(current)?.parent as usize;
+        if parent == current {
+            // Kendini gosteren, kok olmayan bir inode: bozuk tablo.
+            return None;
+        }
+        current = parent;
+    }
+
+    let mut len = 0usize;
+    for i in (0..depth).rev() {
+        let name = name_of(inode_ref(chain[i])?);
+        if len + 1 + name.len() >= PATH_MAX {
+            return None;
+        }
+        buf[len] = b'/';
+        len += 1;
+        buf[len..len + name.len()].copy_from_slice(name.as_bytes());
+        len += name.len();
+    }
+    core::str::from_utf8(&buf[..len]).ok()
+}
+
+/// Yeni bir dizin olusturur.
+pub fn mkdir(path: &str) -> Result<usize, FsError> {
+    if !mounted() {
+        return Err(FsError::NotMounted);
+    }
+    if resolve(path).is_some() {
+        return Err(FsError::Exists);
+    }
+    let (parent, leaf) = split_parent(path)?;
+    let index = allocate_inode(parent, leaf, KIND_DIR)?;
+    flush_inodes()?;
+    Ok(index)
+}
+
+/// Bos bir dizini siler.
+pub fn rmdir(path: &str) -> Result<(), FsError> {
+    if !mounted() {
+        return Err(FsError::NotMounted);
+    }
+    let index = resolve(path).ok_or(FsError::NotFound)?;
+    if index == ROOT_INODE {
+        return Err(FsError::BadPath);
+    }
+    if inode_ref(index).ok_or(FsError::NotFound)?.kind != KIND_DIR {
+        return Err(FsError::NotFound);
+    }
+    if (0..MAX_INODES).any(|i| {
+        inode_ref(i).map_or(false, |n| n.kind != KIND_FREE && n.parent as usize == index)
+            && i != index
+    }) {
+        return Err(FsError::NotEmpty);
+    }
+    *inode_ref(index).ok_or(FsError::NotFound)? = Inode::empty();
+    flush_inodes()?;
+    Ok(())
+}
+
+/// Bir inode'un iceren dizini.
+pub fn parent_of(index: usize) -> Option<usize> {
+    let inode = inode_ref(index)?;
+    if inode.kind == KIND_FREE {
+        return None;
+    }
+    Some(inode.parent as usize)
+}
+
+/// Bir inode'un turu.
+pub fn entry_kind(index: usize) -> Option<u32> {
+    let kind = inode_ref(index)?.kind;
+    if kind == KIND_FREE {
+        None
+    } else {
+        Some(kind)
+    }
+}
+
+/// Bos bir inode bulup ad/ebeveyn/tur ile doldurur.
+fn allocate_inode(parent: usize, name: &str, kind: u32) -> Result<usize, FsError> {
+    for i in 0..MAX_INODES {
+        let inode = inode_ref(i).ok_or(FsError::TooManyFiles)?;
+        if inode.kind != KIND_FREE || i == ROOT_INODE {
+            continue;
+        }
+        *inode = Inode::empty();
+        inode.kind = kind;
+        inode.parent = parent as u32;
+        inode.mtime = crate::level0a::drivers::rtc::unix_time();
+        for (j, b) in name.bytes().enumerate() {
+            inode.name[j] = b;
+        }
+        return Ok(i);
+    }
+    Err(FsError::TooManyFiles)
 }
 
 pub fn file_count() -> usize {
@@ -471,32 +696,21 @@ pub fn file_count() -> usize {
 }
 
 /// Yeni bos dosya olusturur ve inode numarasini doner.
-pub fn create(name: &str) -> Result<usize, FsError> {
+///
+/// `path` tam yoldur; iceren dizinin **onceden var olmasi** gerekir
+/// (POSIX `open(O_CREAT)` de boyledir -- ara dizinleri kendiliginden
+/// yaratmaz).
+pub fn create(path: &str) -> Result<usize, FsError> {
     if !mounted() {
         return Err(FsError::NotMounted);
     }
-    if name.is_empty() || name.len() >= MAX_NAME {
-        return Err(FsError::NameTooLong);
-    }
-    if lookup(name).is_some() {
+    if resolve(path).is_some() {
         return Err(FsError::Exists);
     }
-
-    for i in 0..MAX_INODES {
-        let inode = inode_ref(i).ok_or(FsError::TooManyFiles)?;
-        if inode.kind != KIND_FREE {
-            continue;
-        }
-        *inode = Inode::empty();
-        inode.kind = KIND_FILE;
-        inode.mtime = crate::level0a::drivers::rtc::unix_time();
-        for (j, b) in name.bytes().enumerate() {
-            inode.name[j] = b;
-        }
-        flush_inodes()?;
-        return Ok(i);
-    }
-    Err(FsError::TooManyFiles)
+    let (parent, leaf) = split_parent(path)?;
+    let index = allocate_inode(parent, leaf, KIND_FILE)?;
+    flush_inodes()?;
+    Ok(index)
 }
 
 /// Dosyayi ve bloklarini siler.
@@ -505,6 +719,7 @@ pub fn remove(index: usize) -> Result<(), FsError> {
         return Err(FsError::NotMounted);
     }
     let inode = inode_ref(index).ok_or(FsError::NotFound)?;
+    // Dizinler bu yoldan silinmez -- `rmdir` bosluk denetimi yapar.
     if inode.kind != KIND_FILE {
         return Err(FsError::NotFound);
     }
@@ -678,5 +893,9 @@ pub fn error_name(error: FsError) -> &'static str {
         FsError::FileTooLarge => "dosya cok buyuk (azami 160 KiB)",
         FsError::NotFound => "dosya bulunamadi",
         FsError::Exists => "dosya zaten var (salt okunur olabilir)",
+        FsError::BadVersion => "disk bicimi surumu uyumsuz ('format onayla' gerekir)",
+        FsError::BadPath => "yol gecersiz (ara dizin yok ya da dizin degil)",
+        FsError::NotEmpty => "dizin bos degil",
+        FsError::TooDeep => "yol cok derin",
     }
 }

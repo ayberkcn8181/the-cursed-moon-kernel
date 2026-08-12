@@ -37,6 +37,7 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 8 | **Surec basina adres uzayi** (cerceve ayirici + CR3 degisimi) | ✅ (i386 + x86_64) |
 | 8 | **Preemptive zamanlama** + uyku durumu (`sleep`) | ✅ |
 | 9 | **Kalici depolama**: ATA PIO, MBR, TCMKFS (yazilabilir) | ✅ (i386) |
+| 9b | **TCMKFS dizinleri** (gercek agac, `mkdir`/`rmdir`) | ✅ |
 | — | **Kendi onyukleyicisi** + diske kurulum (`install`) | ✅ (i386) |
 | 8 | **`execve`** (surec kendi yerine program yukler) | ✅ (i386 + x86_64) |
 | 8 | **`fork`** (adres uzayi kopyasi + iki kez donen cagri) | ✅ (i386 + x86_64) |
@@ -68,7 +69,7 @@ Ekranda gorunenler:
   | sistem | `ps` `top` `kill <id>` `signal <id> <sinyal>` `sigs` `svc` `health` `uptime` `date` `ver` |
   | Level-0b2 | `load` `ipc` `faults` `stall <sn>` |
   | bellek/disk | `mem` `disk` `df` `format onayla` `sync` `install onayla` |
-  | dosya | `ls` `cat <yol>` `save <yol> <metin>` `cp <kaynak> <hedef>` `rm <yol>` |
+  | dosya | `ls [dizin]` `mkdir <yol>` `rmdir <yol>` `cat <yol>` `save <yol> <metin>` `cp <kaynak> <hedef>` `rm <yol>` |
   | uygulama/pencere | `apps` `run <ad>` `win` `focus <id>` `mouse` |
   | uygulamalar (ELF) | `paint` `plasma` `notes` `menu` `twins` `relay` `echo2` `sigdemo` `crash` `hog` `spin` |
   | uygulamalar (PE) | `winclock` (ham `int 0x2E`) `winpad` (IAT) -- i386'da PE32, x86_64'te PE32+ |
@@ -892,6 +893,57 @@ Dosya basina 40 **dogrudan** blok isaretcisi -> azami 160 KiB. Inode
 tablosu ve bitmap bellekte onbelleklenir, degisiklikler aninda diske
 yazilir (write-through), her yazmadan sonra ATA cache-flush verilir.
 
+### Dizinler (bicim surumu 2)
+
+TCMKFS onceden **duz** bir isim uzayiydi: `/home/x` bir yol degil,
+dosyanin adiydi. Artik gercek bir agac var.
+
+Yontem, dizin icerigini ayri bir blokta tutmak **degil**: her inode
+iceren dizininin numarasini (`parent`) tasir, yani agac **cocuktan
+ebeveyne** dogru saklanir.
+
+```
+inode 0  dizin  ""         parent=0   (kok)
+inode 3  dizin  "notlar"   parent=0
+inode 5  dizin  "2026"     parent=3
+inode 7  dosya  "ocak.txt" parent=5   ->  /notlar/2026/ocak.txt
+```
+
+Kazanci: bir dizinin icerigi sabit boyutlu bir listeye sigmak zorunda
+kalmaz -- "X'in cocuklari" sorusu inode tablosunun taranmasiyla
+cevaplanir ve 64 inode'da bu, bir dizin blogu okumaktan ucuzdur.
+Bedeli: tam yolu uretmek icin ebeveyn zinciri **yukari** yurunur
+(`path_of`), ki VFS'in mount aninda yaptigi da budur.
+
+```
+tcmk> mkdir /notlar
+tcmk> mkdir /notlar/2026
+tcmk> mkdir /yok/olan
+yol gecersiz (ara dizin yok ya da dizin degil)
+tcmk> save /notlar/2026/ocak.txt merhaba dizin
+14 bayt yazildi: /notlar/2026/ocak.txt
+
+tcmk> ls /notlar
+  dizin /notlar/2026
+  disk  /notlar/2026/ocak.txt    14 bayt  2026-08-12 09:18
+  disk  /notlar/kok.txt          12 bayt  2026-08-12 09:18
+ toplam 2 dosya, 1 dizin
+```
+
+`rmdir` bos olmayan dizini reddeder; `rm` dizinleri hic gormez. Ara
+dizinler **kendiliginden yaratilmaz** -- POSIX `open(O_CREAT)` de boyle
+davranir.
+
+Bicim degistigi icin superblock surumu 2'ye cikti ve **surum 1 imajlari
+baglanmaz**: eski inode'larda `parent` alani yoktur ve `name` tam yolu
+tasir, oldugu gibi baglamak agaci rastgele kurardi. `mount` bunu sessizce
+denemek yerine acikca reddeder (`format onayla` gerekir).
+
+VFS tarafinda dizin kavrami **yoktur**: agac diskte yasar, VFS mount
+aninda her dosyanin tam yolunu `path_of` ile duzlestirip isim uzayina
+koyar. Boylece `/bin/paint` gibi RAMFS yollari ile disk yollari ayni
+tabloda, ayni bicimde durur.
+
 ### Duvar saati (CMOS RTC)
 
 PIT sistemin **ne kadar suredir** calistigini olcer; hangi gunde
@@ -1607,9 +1659,11 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
   bir cocuk") ve surec gruplari yok; oksuz kalan gorevler de
   toplanmiyor -- gorev yuvasi surec bitse de tabloda kalir.
 - **Surec basina 512 KiB eslenir**, talep uzerine sayfalama yok.
-- **TCMKFS duz bir isim uzayidir**, gercek dizin agaci degil: `/home/x`
-  bir yol degil, dosyanin **adidir**. Azami 64 dosya, dosya basina 160 KiB
-  (yalnizca dogrudan blok isaretcileri).
+- **TCMKFS'te toplam 64 inode var** (dizinler de sayilir), dosya basina
+  160 KiB (yalnizca dogrudan blok isaretcileri) ve azami 8 seviye
+  derinlik. Dizin agaci gercek, ama `.`/`..` bilesenleri, sembolik
+  baglar, izinler ve sahiplik yok; kabugun bir "calisma dizini" kavrami
+  da yok -- yollar her zaman mutlaktir.
 - **Disk erisimi yoklamalidir** (ATA PIO, IRQ14 baglanmadi): buyuk bir
   yazma sirasinda sistem o sure boyunca duraklar.
 
