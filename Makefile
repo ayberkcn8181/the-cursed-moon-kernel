@@ -31,11 +31,70 @@ TARGET_JSON := $(ROOT_DIR)/targets/$(RUST_TARGET).json
 KERNEL_ELF := $(TARGET_DIR)/$(RUST_TARGET)/$(CARGO_OUT_DIR)/tcmk-kernel
 
 .DEFAULT_GOAL := all
-.PHONY: all iso run disk run-disk info clean bootloader userland userland-rust userland-x86_64 userland-win userland-win64 userland-legacy
+.PHONY: all iso run disk run-disk info check clean bootloader userland userland-rust userland-x86_64 userland-win userland-win64 userland-legacy
+
+# --- Arac denetimi -------------------------------------------------------
+#
+# Eksik bir arac, aksi halde alakasiz gorunen bir hatayla ortaya cikar:
+# `rust-src` yoksa hata "can't find crate for `core`" olur ve gercek neden
+# hic gorunmez. Her hedef YALNIZCA kendi ihtiyacini denetler; cekirdegi
+# derlemek icin QEMU ya da GRUB kurmak gerekmez.
+#
+# $(1) = komut, $(2) = ne ise yarar, $(3) = kurulum ipucu
+define need
+@command -v $(1) >/dev/null 2>&1 || { \
+	echo ""; \
+	echo "HATA: '$(1)' bulunamadi."; \
+	echo "  gereken:  $(2)"; \
+	echo "  kurulum:  $(3)"; \
+	echo ""; \
+	echo "  butun araclarin durumu icin: make check"; \
+	echo ""; \
+	exit 1; }
+endef
+
+# `-Z build-std` cekirdek kutuphanesini KAYNAKTAN derler; kaynak yoksa
+# hata gorunuste crate cozumleme hatasidir.
+define need_rust_src
+@command -v cargo >/dev/null 2>&1 || { \
+	echo ""; echo "HATA: 'cargo' bulunamadi."; \
+	echo "  kurulum:  https://rustup.rs"; echo ""; exit 1; }
+@test -d "$$(rustc --print sysroot)/lib/rustlib/src/rust/library/core" || { \
+	echo ""; \
+	echo "HATA: rust-src bileseni yok."; \
+	echo "  gereken:  -Z build-std, core ve compiler_builtins'i kaynaktan derler"; \
+	echo "  kurulum:  rustup component add rust-src --toolchain nightly"; \
+	echo ""; exit 1; }
+endef
+
+## Butun araclari denetler ve eksikleri listeler.
+check:
+	@echo "arac                 gerekli oldugu yer                      durum"
+	@echo "-------------------- --------------------------------------- -----"
+	@printf '%-20s %-39s ' "cargo/rustc" "cekirdek + userland derlemesi"; command -v cargo >/dev/null 2>&1 && echo "var" || echo "YOK"
+	@printf '%-20s %-39s ' "rust-src" "-Z build-std (core, compiler_builtins)"; test -d "$$(rustc --print sysroot 2>/dev/null)/lib/rustlib/src/rust/library/core" && echo "var" || echo "YOK"
+	@printf '%-20s %-39s ' "grub-mkrescue" "make iso / run"; command -v grub-mkrescue >/dev/null 2>&1 && echo "var" || echo "YOK"
+	@printf '%-20s %-39s ' "xorriso" "make iso (grub-mkrescue kullanir)"; command -v xorriso >/dev/null 2>&1 && echo "var" || echo "YOK"
+	@printf '%-20s %-39s ' "mformat (mtools)" "grub-mkrescue EFI imaji"; command -v mformat >/dev/null 2>&1 && echo "var" || echo "YOK"
+	@printf '%-20s %-39s ' "llvm-dlltool" "make userland-win (PE ithal .lib)"; command -v llvm-dlltool >/dev/null 2>&1 && echo "var" || echo "YOK"
+	@printf '%-20s %-39s ' "python3" "make disk / userland-legacy"; command -v python3 >/dev/null 2>&1 && echo "var" || echo "YOK"
+	@printf '%-20s %-39s ' "qemu-system-i386" "make run (ARCH=i386)"; command -v qemu-system-i386 >/dev/null 2>&1 && echo "var" || echo "YOK"
+	@printf '%-20s %-39s ' "qemu-system-x86_64" "make run (ARCH=x86_64)"; command -v qemu-system-x86_64 >/dev/null 2>&1 && echo "var" || echo "YOK"
+	@echo ""
+	@echo "Debian/Ubuntu icin hepsi:"
+	@echo "  rustup toolchain install nightly --component rust-src,llvm-tools"
+	@echo "  sudo apt install qemu-system-x86 grub-pc-bin grub-common xorriso mtools llvm"
+	@echo ""
+	@echo "NOT: grub-mkrescue Linux'a ozgudur. macOS/Windows'ta 'make' ve"
+	@echo "     'make ARCH=x86_64' calisir, 'make iso' calismaz."
+	@echo ""
+	@echo "Derlenmis ikililer depoda hazir gelir; 'make userland' YALNIZCA"
+	@echo "onlari yeniden uretmek istendiginde gerekir (llvm-dlltool ister)."
 
 # Cekirdek 1. asamayi include_bytes! ile gomdugu icin onyukleyici
 # cekirdekten ONCE uretilmelidir.
 all: bootloader
+	$(call need_rust_src)
 	cd $(KERNEL_DIR) && cargo build $(CARGO_FLAGS) \
 		--target $(TARGET_JSON) --target-dir $(TARGET_DIR)
 
@@ -49,6 +108,7 @@ BOOT_OUT := $(ROOT_DIR)/build/boot
 BOOT_TARGET_DIR := $(TARGET_DIR)/tcmkboot
 
 bootloader:
+	$(call need_rust_src)
 	@mkdir -p $(BOOT_OUT)
 	@set -e; for s in stage1 stage2; do \
 		( cd $(BOOT_DIR) && cargo rustc --release --bin $$s \
@@ -60,6 +120,8 @@ bootloader:
 	done
 
 iso: all
+	$(call need,grub-mkrescue,make iso: onyuklenebilir ISO uretir,sudo apt install grub-pc-bin grub-common)
+	$(call need,xorriso,grub-mkrescue ISO9660 icin bunu cagirir,sudo apt install xorriso)
 	mkdir -p $(ISO_DIR)/boot/grub
 	cp $(KERNEL_ELF) $(ISO_DIR)/boot/tcmk-kernel.elf
 	printf 'set timeout=0\nset default=0\n\nmenuentry "The Cursed Moon Kernel ($(ARCH))" {\n    $(GRUB_CMD) /boot/tcmk-kernel.elf\n    boot\n}\n' \
@@ -67,6 +129,7 @@ iso: all
 	grub-mkrescue -o $(ISO) $(ISO_DIR)
 
 run: iso
+	$(call need,$(QEMU),make run: emulatorde calistirir,sudo apt install qemu-system-x86)
 	$(QEMU) -cdrom $(ISO) -serial stdio
 
 # --- Disk imaji -----------------------------------------------------------
@@ -79,11 +142,13 @@ DISK := $(ROOT_DIR)/build/tcmk-disk-$(ARCH).img
 DISK_MIB ?= 64
 
 disk: iso bootloader
+	$(call need,python3,tools/make_disk.py disk imajini kurar,sudo apt install python3)
 	python3 $(ROOT_DIR)/tools/make_disk.py $(ISO) $(DISK) $(DISK_MIB) \
 		$(BOOT_OUT)/stage2.bin $(KERNEL_ELF)
 
 # Diskten acilis (CD yok): kalicilik ancak boyle dogrulanabilir.
 run-disk: disk
+	$(call need,$(QEMU),make run-disk: emulatorde calistirir,sudo apt install qemu-system-x86)
 	$(QEMU) -drive file=$(DISK),format=raw,if=ide -serial stdio
 
 # --- Ring 3 uygulamalari ------------------------------------------------
@@ -117,6 +182,7 @@ WIN_DEFS := kernel32 tcmkgui
 userland: userland-rust userland-x86_64 userland-win userland-win64 userland-legacy
 
 $(WIN_LIB_DIR)/stamp: $(patsubst %,$(USERLAND_DIR)/win/%.def,$(WIN_DEFS))
+	$(call need,llvm-dlltool,PE ithal kutuphanelerini .def dosyasindan uretir,sudo apt install llvm)
 	@mkdir -p $(WIN_LIB_DIR)
 	@set -e; for d in $(WIN_DEFS); do \
 		llvm-dlltool -m i386 --kill-at \
@@ -199,6 +265,7 @@ userland-win64: $(WIN_LIB_DIR)/stamp64
 # icin burada .def sed ile suslemesiz hale getirilir. Boylece iki mimari
 # tek bir .def dosyasindan beslenir ve ordinaller birbirinden kaymaz.
 $(WIN_LIB_DIR)/stamp64: $(patsubst %,$(USERLAND_DIR)/win/%.def,$(WIN_DEFS))
+	$(call need,llvm-dlltool,PE32+ ithal kutuphanelerini .def dosyasindan uretir,sudo apt install llvm)
 	@mkdir -p $(WIN_LIB_DIR)/x64
 	@set -e; for d in $(WIN_DEFS); do \
 		sed -E 's/^([A-Za-z_][A-Za-z0-9_]*)@[0-9]+/\1/' \
@@ -220,6 +287,7 @@ $(WIN_LIB_DIR)/stamp64: $(patsubst %,$(USERLAND_DIR)/win/%.def,$(WIN_DEFS))
 #   * ELF64 -- Rust userland'i su an yalnizca i386'yi hedefler; x86_64
 #              tarafinda cekirdek ELF64 yukleyicisi bu ikiliyle dogrulanir.
 userland-legacy:
+	$(call need,python3,elle uretilen en kucuk PE32/ELF64 ikilileri,sudo apt install python3)
 	python3 $(ROOT_DIR)/tools/gen_pe_hello.py $(ROOT_DIR)/userland/hello.exe
 	python3 $(ROOT_DIR)/tools/gen_hello_elf64.py $(ROOT_DIR)/userland/hello64.elf
 

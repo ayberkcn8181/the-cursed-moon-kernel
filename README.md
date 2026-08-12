@@ -209,17 +209,66 @@ mimariye ozel her sey `arch/<arch>/`, `level0a/gdt/<arch>.rs`,
 
 ## Gereksinimler
 
+Once neyin eksik oldugunu sorun -- `make check` her araci, ne ise
+yaradigini ve durumunu listeler:
+
+```
+$ make check
+arac                 gerekli oldugu yer                      durum
+-------------------- --------------------------------------- -----
+cargo/rustc          cekirdek + userland derlemesi           var
+rust-src             -Z build-std (core, compiler_builtins)  YOK
+grub-mkrescue        make iso / run                          var
+...
+```
+
+Debian/Ubuntu icin hepsi:
+
 ```
 rustup toolchain install nightly --component rust-src,llvm-tools
 sudo apt install qemu-system-x86 grub-pc-bin grub-common xorriso mtools
 sudo apt install llvm            # llvm-dlltool: PE ithal kutuphaneleri
 ```
 
-Windows tarafi icin **hicbir Windows arac zinciri gerekmez**: `rust-lld`
-zaten PE32 uretebiliyor, `llvm-dlltool` da ithal kutuphanelerini
-`.def`'ten olusturuyor.
+Her hedef **yalnizca kendi ihtiyacini** denetler: cekirdegi derlemek icin
+QEMU ya da GRUB kurmaniz gerekmez, eksikse yalnizca `make iso`/`make run`
+uyarir.
 
-(`rust-toolchain.toml` bu depoda nightly'yi otomatik secer.)
+### Hangisi ne zaman gerekir
+
+| arac | olmadan calismayan |
+|---|---|
+| `cargo` + **`rust-src`** | her sey (`make`) |
+| `grub-mkrescue`, `xorriso`, `mtools` | `make iso`, `make run` |
+| `qemu-system-i386` / `-x86_64` | `make run`, `make run-disk` |
+| `python3` | `make disk`, `make userland-legacy` |
+| `llvm-dlltool` | `make userland-win`, `make userland-win64` |
+
+**En sik takilan yer `rust-src`.** Cekirdek `-Z build-std` ile `core` ve
+`compiler_builtins`'i **kaynaktan** derler; bilesen yoksa hata
+"can't find crate for `core`" olur ve gercek neden hic gorunmez. Bu
+yuzden `make` bunu onceden denetleyip acikca soyler.
+
+`rust-toolchain.toml` nightly'yi otomatik secer, ama bunun icin **rustup**
+gerekir; dagitimin `rustc` paketiyle (rustup'siz) derleme yapilamaz.
+
+### Derlenmis ikililer depoda hazir gelir
+
+`userland/*.elf`, `*.elf64` ve `*.exe` surumlenmis durumda; cekirdek
+onlari `include_bytes!` ile gomer. Yani **`make userland` calistirmaniz
+gerekmez** -- yalnizca uygulama kaynagini degistirdiyseniz gerekir, ve o
+zaman `llvm-dlltool` istenir.
+
+### Platform
+
+`make` ve `make ARCH=x86_64` (cekirdek derlemesi) Rust'in calistigi her
+yerde calisir. `make iso` **Linux'a ozgudur**: `grub-mkrescue` macOS ve
+Windows'ta yoktur. macOS/Windows'ta ISO uretmek icin bir Linux konteyneri
+ya da WSL kullanin.
+
+Windows tarafi icin **hicbir Windows arac zinciri gerekmez**: `rust-lld`
+zaten PE32/PE32+ uretebiliyor, `llvm-dlltool` da ithal kutuphanelerini
+`.def`'ten olusturuyor.
 
 ## Derleme / ISO / Calistirma
 
@@ -231,6 +280,7 @@ make bootloader      # iki asamali TCMK onyukleyicisi (duz ikili)
 make disk            # kalici TCMKFS bolumu + onyukleyici olan disk imaji
 make run-disk        # DISKTEN acilis (CD yok) -- kalicilik boyle dogrulanir
 make info            # secili ayarlari yazdirir
+make check           # gereken araclari ve eksikleri listeler
 ```
 
 ## Faz 1 Dogrulama Listesi
