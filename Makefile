@@ -27,6 +27,26 @@ else
   $(error Desteklenmeyen ARCH=$(ARCH). Gecerli: i386, x86_64)
 endif
 
+# JSON hedef tanimlari (`targets/*.json`) kararsiz bir ozelliktir ve
+# 2026 ortasindaki nightly'lerden itibaren ACIK bir bayrak ister:
+#
+#   error: `.json` target specs require -Zjson-target-spec to be added
+#          to the cargo invocation
+#
+# Bayrak, onu istemeyen eski nightly'lerde de kabul edilir; yine de
+# korumali kullanilir, cunku bir gun kararli hale gelip -Z listesinden
+# cikabilir -- o zaman bilinmeyen bayrak olur ve derlemeyi kirardi.
+# `rust-toolchain.toml` sabit bir tarih degil `nightly` dedigi icin arac
+# zinciri zamanla kayar; bu tur farklar bu yuzden calisma aninda olculur.
+#
+# Denetimin iki inceligi var:
+#   * `--version` KULLANILAMAZ: cargo onu -Z bayraklarini dogrulamadan
+#     yanitlar, yani denetim her zaman gecerdi ve hicbir sey olcmezdi.
+#   * `locate-project` bir manifest ister, bu yuzden depo kokunde degil
+#     `kernel/` icinde calistirilir; aksi halde bayrakla ilgisiz bir
+#     nedenle (Cargo.toml yok) basarisiz olur ve bayrak hic eklenmezdi.
+JSON_TARGET_FLAG := $(shell cd $(KERNEL_DIR) && cargo -Zjson-target-spec locate-project >/dev/null 2>&1 && echo -Zjson-target-spec)
+
 TARGET_JSON := $(ROOT_DIR)/targets/$(RUST_TARGET).json
 KERNEL_ELF := $(TARGET_DIR)/$(RUST_TARGET)/$(CARGO_OUT_DIR)/tcmk-kernel
 
@@ -95,7 +115,7 @@ check:
 # cekirdekten ONCE uretilmelidir.
 all: bootloader
 	$(call need_rust_src)
-	cd $(KERNEL_DIR) && cargo build $(CARGO_FLAGS) \
+	cd $(KERNEL_DIR) && cargo $(JSON_TARGET_FLAG) build $(CARGO_FLAGS) \
 		--target $(TARGET_JSON) --target-dir $(TARGET_DIR)
 
 # --- Onyukleyici ---------------------------------------------------------
@@ -111,7 +131,7 @@ bootloader:
 	$(call need_rust_src)
 	@mkdir -p $(BOOT_OUT)
 	@set -e; for s in stage1 stage2; do \
-		( cd $(BOOT_DIR) && cargo rustc --release --bin $$s \
+		( cd $(BOOT_DIR) && cargo $(JSON_TARGET_FLAG) rustc --release --bin $$s \
 			--target $(ROOT_DIR)/targets/i686-tcmk.json \
 			--target-dir $(BOOT_TARGET_DIR) \
 			-- -C link-arg=-T$$s.ld -C link-arg=--oformat=binary ); \
@@ -200,7 +220,7 @@ userland-rust:
 	@mkdir -p $(ROOT_DIR)/userland
 	@set -e; for app in $(USER_APPS); do \
 		echo "  [userland] $$app (taban $(USER_BASE))"; \
-		( cd $(USERLAND_DIR) && cargo rustc --release --bin $$app \
+		( cd $(USERLAND_DIR) && cargo $(JSON_TARGET_FLAG) rustc --release --bin $$app \
 			--target $(ROOT_DIR)/targets/i686-tcmk.json \
 			--target-dir $(USERLAND_TARGET_DIR) \
 			-- -C link-arg=--image-base=$(USER_BASE) ); \
@@ -220,7 +240,7 @@ userland-x86_64:
 	@mkdir -p $(ROOT_DIR)/userland
 	@set -e; for app in $(USER64_APPS); do \
 		echo "  [userland] $$app (ELF64, taban $(USER_BASE))"; \
-		( cd $(USERLAND_DIR) && cargo rustc --release --bin $$app \
+		( cd $(USERLAND_DIR) && cargo $(JSON_TARGET_FLAG) rustc --release --bin $$app \
 			--target $(ROOT_DIR)/targets/x86_64-tcmk.json \
 			--target-dir $(USER64_TARGET_DIR) \
 			-- -C link-arg=--image-base=$(USER_BASE) ); \
@@ -231,7 +251,7 @@ userland-win: $(WIN_LIB_DIR)/stamp
 	@mkdir -p $(ROOT_DIR)/userland
 	@set -e; for app in $(WIN_APPS); do \
 		echo "  [userland] $$app.exe (PE32, taban 0x00400000)"; \
-		( cd $(USERLAND_DIR) && cargo rustc --release --bin $$app \
+		( cd $(USERLAND_DIR) && cargo $(JSON_TARGET_FLAG) rustc --release --bin $$app \
 			--target $(ROOT_DIR)/targets/i686-tcmk-win.json \
 			--target-dir $(WIN_TARGET_DIR) \
 			-- -L $(WIN_LIB_DIR) ); \
@@ -249,7 +269,7 @@ userland-win64: $(WIN_LIB_DIR)/stamp64
 	@mkdir -p $(ROOT_DIR)/userland
 	@set -e; for app in $(WIN64_APPS); do \
 		echo "  [userland] $$app.exe (PE32+, taban 0x140000000)"; \
-		( cd $(USERLAND_DIR) && cargo rustc --release --bin $$app \
+		( cd $(USERLAND_DIR) && cargo $(JSON_TARGET_FLAG) rustc --release --bin $$app \
 			--target $(ROOT_DIR)/targets/x86_64-tcmk-win.json \
 			--target-dir $(WIN64_TARGET_DIR) \
 			-- -L $(WIN_LIB_DIR)/x64 ); \
