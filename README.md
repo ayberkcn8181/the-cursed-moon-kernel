@@ -36,6 +36,7 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 6 | AArch64 portu (EL1/EL0, GIC, `svc #0`) | ⏳ yapilmadi |
 | 8 | **Surec basina adres uzayi** (cerceve ayirici + CR3 degisimi) | ✅ (i386 + x86_64) |
 | 8 | **Preemptive zamanlama** + uyku durumu (`sleep`) | ✅ |
+| 8 | **Oncelik**: `nice`, donem butcesi, `setpriority` | ✅ |
 | 9 | **Kalici depolama**: ATA PIO, MBR, TCMKFS (yazilabilir) | ✅ (i386) |
 | 9b | **TCMKFS dizinleri** (gercek agac, `mkdir`/`rmdir`) | ✅ |
 | 9c | **IRQ14**: disk kesmeyle bekler (`TaskState::IoWait`) | ✅ |
@@ -72,7 +73,7 @@ Ekranda gorunenler:
   | bellek/disk | `mem` `disk` `df` `format onayla` `sync` `install onayla` |
   | dosya | `ls [dizin]` `mkdir <yol>` `rmdir <yol>` `cat <yol>` `save <yol> <metin>` `cp <kaynak> <hedef>` `rm <yol>` |
   | uygulama/pencere | `apps` `run <ad>` `win` `focus <id>` `mouse` |
-  | uygulamalar (ELF) | `paint` `plasma` `notes` `menu` `twins` `relay` `echo2` `sigdemo` `crash` `hog` `spin` |
+  | uygulamalar (ELF) | `paint` `plasma` `notes` `menu` `twins` `relay` `echo2` `sigdemo` `race` `crash` `hog` `spin` |
   | uygulamalar (PE) | `winclock` (ham `int 0x2E`) `winpad` (IAT) -- i386'da PE32, x86_64'te PE32+ |
   | diger | `echo <metin>` `pipes` `clear` `help` |
 - **Sistem Gunlugu** -- cekirdek kaydinin canli goruntusu (konsol halka
@@ -1507,6 +1508,93 @@ tanidigi icin uygulama olmayan bir dosyayi kendisi olusturabiliyor.
 Yazma yalnizca TCMKFS dugumlerinde calisir -- RAMFS dosyalarinin icerigi
 cekirdek imajinin `.rodata`'sindadir.
 
+## Oncelik: `nice` ve donem butcesi
+
+Zamanlama uzun sure **onceliksizdi**: preemption vardi ama butun gorevler
+esitti. Artik POSIX `nice` degeri var (-20 en yuksek, 19 en dusuk) ve
+gorevin CPU payini belirliyor.
+
+```
+tcmk> run race
+tcmk> run race
+tcmk> nice 4 -20
+tcmk> nice 5 19
+```
+
+![oncelik: ps ciktisi](docs/screenshot-nice.png)
+
+`race` ayni programin iki kopyasidir ve **CPU'ya baglidir** (her turda
+sabit miktarda hesap yapar). Esit oncelikle kosarken tur sayaclari ayni
+hizda artar; oncelikler ayrilinca ayrisir. Olcum (esit fazdan sonraki
+~18 saniye):
+
+| | i386 | x86_64 |
+|---|---|---|
+| nice -20 | +1573 tur | +1598 tur |
+| nice 19 | +266 tur | +281 tur |
+| oran | **5.9 : 1** | **5.7 : 1** |
+
+Butce orani nominalde 8:1'dir; olculen degerin altinda kalmasinin sebebi
+masaustu dongusunun kendi payini almasidir (asagi bkz.).
+
+### Nasil calisiyor
+
+Her gorev donem basinda `nice` degerine gore bir **hak** (tik cinsinden
+butce) alir:
+
+```
+nice -20..-10 -> 8 tik      nice 0..4  -> 2 tik  (varsayilan)
+nice  -9..-1  -> 4 tik      nice 5..19 -> 1 tik
+```
+
+Hak iki yerde harcanir: her zamanlayici tikinde **ve** her tur
+degisiminde. Hakki biten gorev, donem yenilenene kadar secilmez; donem,
+"hakki kalan calistirilabilir gorev yok" aninda yenilenir. En dusuk
+oncelik bile en az bir tik aldigi icin hicbir gorev tamamen ac kalmaz.
+
+Kabuktaki `ps` uc yeni sutun gosterir: `nice`, `hak` (donem icinde kalan
+butce) ve `cpu` (gorevin CPU'da gecirdigi toplam tik).
+
+### Olcumun duzelttigi iki yanlis
+
+Tasarimin ilk iki hali **calismadi**, ve ikisini de ancak olcum
+gosterdi -- kod okuyarak degil.
+
+**1. "Oncelik = daha uzun zaman dilimi" yetmiyor.** Ilk surumde `nice`
+yalnizca dilim uzunlugunu belirliyordu. Sonuc: -20 ve 19 ile kosan iki
+surecin sayaclari **tipatip ayni** artti (+385 / +386). Sebep, GUI
+uygulamalarinin her karede `win_flush` ile CPU'yu **gonullu** birakmasi:
+dilimlerini hicbir zaman doldurmuyorlar, yani dilim uzunlugu hicbir sey
+degistirmiyor. Dilim ancak zorla kesilen bir gorev icin anlamlidir.
+Cozum, hakki tur basina da harcamak oldu -- yani oncelik "ne kadar uzun
+kostugu"nu degil "kac kez secildigi"ni belirliyor.
+
+**2. Donem kosulu kosan gorevi saymiyordu.** Ikinci surumde hak
+muhasebesi dogru calisiyordu (`ps`'te hak sutunu 7'ye karsi 0
+gosteriyordu) ama iki surec hala ayni hizda kosuyordu. Sebep: "hakki
+kalan gorev var mi" denetimi yalnizca `Ready` durumundakilere bakiyordu
+-- oysa `pick_next` cagrildigi anda kosan gorevin durumu `Running`'dir.
+Iki gorevli bir sistemde biri kosuyor, oteki hakkini bitirmisse denetim
+"kimsede hak kalmadi" der ve donem **her turda** yenilenirdi. Hakki biten
+gorev aninda yeniden hak kazandigi icin oncelik hicbir sey ifade etmezdi.
+
+### Bilinen sinir: masaustu dongusunun CPU payi
+
+Olcumun yan urunu olarak ortaya cikan bir sey: 0 numarali gorev (idle)
+ayni zamanda **masaustu dongusudur** ve zamanlayici tiklerinin buyuk
+cogunlugunu tuketir (`ps`'te `cpu` sutunu). Kompozitor artik en fazla iki
+tikta bir tam ekran birlestirse de dongu kendisi siki calisir.
+
+Her turda kosulsuz `yield` denendi ve sistemi kilitledi: uygulamalar da
+her karede biraktigi icin saniyede binlerce baglam degisimi olusuyor ve
+is yapmaya zaman kalmiyor (olcum: 151 zamanlayici tikine karsilik 815 bin
+baglam degisimi). Baglam degisimi ucuz degildir -- CR3 dahil butun baglam
+yenilenir.
+
+Dogru cozum masaustunu **ayri bir goreve** tasiyip 0 numarayi gercek bir
+idle yapmaktir (o zaman idle yalnizca baska hicbir sey kosmadiginda
+secilir ve `hlt` edebilir). Ayri bir is olarak duruyor.
+
 ## Preemptive zamanlama
 
 Zamanlayici kesmesi artik gorevi **kendi istegi olmadan** birakiyor.
@@ -1798,8 +1886,11 @@ Kabuktan `faults` komutu istatistikleri gosterir.
 
 Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
 
-- **Zamanlama round-robin ve onceliksiz.** Preemption var ama gorevler
-  esit; oncelik, gercek zamanli sinif ve `nice` yok.
+- **Gercek zamanli sinif yok.** `nice` ve donem butcesi var (yukari
+  bkz.) ama son teslim tarihi garantisi veren bir sinif (`SCHED_FIFO`,
+  `SCHED_DEADLINE` karsiligi) yok. Ayrica masaustu dongusu tiklerin
+  cogunu tuketiyor, bu yuzden olculen oncelik orani nominalin altinda
+  kaliyor.
 - **PE ikililerinde `.reloc` zorunlu.** Yukleyici imaji her zaman
   kullanici bolgesinin basina koyar; `/fixed:no` ile linklenmemis, yani
   yeniden yerlesim tablosu tasimayan bir ikili yuklenemez. Windows'ta bu

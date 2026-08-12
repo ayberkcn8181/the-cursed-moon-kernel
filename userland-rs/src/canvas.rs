@@ -241,6 +241,36 @@ impl Canvas {
         n * font::FONT_WIDTH
     }
 
+    /// Isaretsiz sayiyi buyutulmus olarak cizer ve genisligini doner.
+    ///
+    /// `number` ile ayni mantik, tek fark `glyph_scaled` kullanmasi:
+    /// uzaktan okunmasi gereken sayaclar icin (bkz. `race`).
+    pub fn number_scaled(
+        &mut self,
+        x: usize,
+        y: usize,
+        mut value: usize,
+        color: u32,
+        scale: usize,
+    ) -> usize {
+        let mut digits = [0u8; 20];
+        let mut n = 0;
+        if value == 0 {
+            digits[0] = b'0';
+            n = 1;
+        }
+        while value > 0 {
+            digits[n] = b'0' + (value % 10) as u8;
+            value /= 10;
+            n += 1;
+        }
+        let step = font::FONT_WIDTH * scale;
+        for i in 0..n {
+            self.glyph_scaled(x + i * step, y, digits[n - 1 - i], scale, color);
+        }
+        n * step
+    }
+
     /// Sayiyi sabit genislikte, basina sifir koyarak cizer (saat icin).
     pub fn number_pad(&mut self, x: usize, y: usize, value: usize, digits: usize, color: u32) {
         let mut scale = 1usize;

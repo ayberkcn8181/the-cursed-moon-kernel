@@ -67,6 +67,8 @@ mod i386_numbers {
     /// alanindan gelir -- yani fikir ayni, tasima yolu farkli.
     pub const SYS_SIGNAL: u32 = 48;
     pub const SYS_SIGRETURN: u32 = 119;
+    pub const SYS_GETPRIORITY: u32 = 96;
+    pub const SYS_SETPRIORITY: u32 = 97;
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -88,6 +90,8 @@ mod x86_64_numbers {
     /// kullanir (isleyici, tramplen) -- `sigaction` yapisi kopyalanmaz.
     pub const SYS_SIGNAL: u32 = 13;
     pub const SYS_SIGRETURN: u32 = 15;
+    pub const SYS_GETPRIORITY: u32 = 140;
+    pub const SYS_SETPRIORITY: u32 = 141;
 }
 
 // Linux hata kodlari negatif dondurulur (ornegin -EBADF = -9).
@@ -104,6 +108,9 @@ const EAGAIN: i32 = 11;
 const ECHILD: i32 = 10;
 /// Boyle bir surec yok (`kill` hedefi).
 const ESRCH: i32 = 3;
+
+/// `setpriority`/`getpriority` icin desteklenen tek `which` degeri.
+const PRIO_PROCESS: usize = 0;
 
 /// `waitpid` secenegi: cocuk bitmemisse bloke olma, 0 don.
 const WNOHANG: usize = 1;
@@ -317,13 +324,58 @@ pub fn dispatch(frame: &mut SyscallFrame) {
         SYS_SLEEP => {
             // arg1 = milisaniye. PIT 100 Hz oldugu icin cozunurluk 10 ms;
             // sifirdan buyuk her istek en az bir tik surer.
-            let ticks = ((arg1 as u32) / 10).max(1);
-            crate::level0a::core::scheduler::sleep_ticks(ticks);
+            //
+            // SIFIR ayri ele alinir: "0 ms uyu" demek "bir tik uyu"
+            // olmamali. Onceden oyleydi ve olcumu bozuyordu -- CPU'ya
+            // bagli olmasi gereken bir dongu her karede uykuya gidiyor,
+            // boylece butun gorevler ayni hizda uyanip oncelik farkini
+            // gorunmez kiliyordu. NT tarafindaki `Sleep` zaten boyle
+            // davraniyordu; iki alt sistem artik ayni.
+            if arg1 == 0 {
+                crate::level0a::core::scheduler::yield_now();
+            } else {
+                let ticks = ((arg1 as u32) / 10).max(1);
+                crate::level0a::core::scheduler::sleep_ticks(ticks);
+            }
             frame.set_return(0);
             return;
         }
 
         SYS_GETPID => crate::level0a::core::scheduler::current_id() as i32,
+
+        SYS_SETPRIORITY => {
+            // setpriority(which, who, prio). `which` yalnizca PRIO_PROCESS
+            // olabilir: surec gruplari ve kullanicilar TCMK'de yok.
+            if arg1 != PRIO_PROCESS {
+                -EINVAL
+            } else {
+                let task = if arg2 == 0 {
+                    crate::level0a::core::scheduler::current_id()
+                } else {
+                    arg2
+                };
+                match crate::level0a::core::scheduler::set_nice(task, arg3 as i8) {
+                    Ok(()) => 0,
+                    Err(_) => -ESRCH,
+                }
+            }
+        }
+
+        SYS_GETPRIORITY => {
+            if arg1 != PRIO_PROCESS {
+                -EINVAL
+            } else {
+                let task = if arg2 == 0 {
+                    crate::level0a::core::scheduler::current_id()
+                } else {
+                    arg2
+                };
+                // Linux sozlesmesi: cagri, -20..19 yerine 20-nice doner
+                // (negatif deger hata sayilacagi icin). glibc bunu geri
+                // cevirir; ayni kaliba uyuluyor.
+                20 - crate::level0a::core::scheduler::nice_of(task) as i32
+            }
+        }
 
         SYS_KILL => {
             // arg1 = hedef gorev, arg2 = sinyal.

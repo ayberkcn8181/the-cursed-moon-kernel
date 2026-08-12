@@ -202,6 +202,33 @@ fn write_padded(s: &str, width: usize) {
     }
 }
 
+/// "3 -5" bicimindeki gorev numarasi + isaretli deger (`nice`).
+fn two_signed(arg: &str) -> Option<(usize, i8)> {
+    let arg = arg.trim();
+    let space = arg.find(' ')?;
+    let task = arg[..space].trim().parse_usize()?;
+    let rest = arg[space + 1..].trim();
+    let (negative, digits) = match rest.strip_prefix('-') {
+        Some(d) => (true, d),
+        None => (false, rest.strip_prefix('+').unwrap_or(rest)),
+    };
+    let value = digits.parse_usize()?;
+    if value > 20 {
+        return None;
+    }
+    Some((task, if negative { -(value as i8) } else { value as i8 }))
+}
+
+/// Isaretli sayi yazar (nice negatif olabilir).
+fn write_signed(value: isize) {
+    if value < 0 {
+        put(b'-');
+        write_num((-value) as usize);
+    } else {
+        write_num(value as usize);
+    }
+}
+
 /// "12 34" bicimindeki iki sayiyi ayirir (`signal <gorev> <sinyal>`).
 fn two_numbers(arg: &str) -> Option<(usize, usize)> {
     let arg = arg.trim();
@@ -301,6 +328,7 @@ fn execute(line: &str) {
             write_line("sistem:");
             write_line("  ps  top  kill <id>  svc  health  uptime  date  ver");
             write_line("  signal <id> <sinyal>   sinyal gonder (9=KILL 10=USR1 15=TERM)");
+            write_line("  nice <id> <deger>      oncelik (-20 en yuksek .. 19 en dusuk)");
             write_line("  sigs                   isleyicileri ve bekleyen sinyalleri goster");
             write_line("level-0b2 (merkezi denetleyici):");
             write_line("  load          yuk dengeleyici istatistikleri");
@@ -318,7 +346,7 @@ fn execute(line: &str) {
             write_line("  echo <metin>  pipes  clear  help");
         }
         "ps" => {
-            write_line("  id durum      ad            cagri  adres-uzayi");
+            write_line("  id durum      ad          nice hak   cpu  cagri  adres-uzayi");
             for i in 0..scheduler::task_count() {
                 let state = scheduler::state_of(i);
                 write_str(if i == scheduler::current_id() {
@@ -331,6 +359,18 @@ fn execute(line: &str) {
                 write_padded(state_name(state), 10);
                 put(b' ');
                 write_padded(scheduler::name_of(i), 11);
+                let nice = scheduler::nice_of(i);
+                // Sagdan hizalama icin isaretli deger elle dolgulanir.
+                if nice >= 0 && nice < 10 {
+                    write_str("   ");
+                } else if nice > -10 {
+                    write_str("  ");
+                } else {
+                    put(b' ');
+                }
+                write_signed(nice as isize);
+                write_num_right(scheduler::credits_of(i) as usize, 4);
+                write_num_right(scheduler::cpu_ticks_of(i) as usize, 6);
                 write_num_right(load_balancer::task_total(i) as usize, 7);
                 let space = scheduler::address_space_of(i);
                 if space == 0 {
@@ -577,6 +617,31 @@ fn execute(line: &str) {
                     Err(_) => write_line("boyle bir gorev yok ('ps' ile listeleyin)"),
                 },
                 None => write_line("kullanim: kill <gorev-no>  ('ps' ile listeleyin)"),
+            }
+        }
+        "nice" => {
+            // nice <gorev-no> <deger>
+            //
+            // POSIX geleneginde SAYI BUYUDUKCE oncelik DUSER: "baskalarina
+            // karsi ne kadar nazik oldugun". Ters gorunur ama korunuyor,
+            // cunku `setpriority` cagrisi da ayni yonde calisir.
+            match two_signed(arg) {
+                Some((task, value)) => match scheduler::set_nice(task, value) {
+                    Ok(()) => {
+                        write_str("gorev #");
+                        write_num(task);
+                        write_str(" nice=");
+                        write_signed(value as isize);
+                        write_str("  dilim=");
+                        write_num(scheduler::slice_ticks(value) as usize);
+                        write_line(" tik");
+                    }
+                    Err(e) => write_line(e),
+                },
+                None => {
+                    write_line("kullanim: nice <gorev-no> <deger>   (-20 en yuksek, 19 en dusuk)");
+                    write_line("  dilim: -20..-10=8tik  -9..-1=4tik  0..4=2tik  5..19=1tik");
+                }
             }
         }
         "signal" => {

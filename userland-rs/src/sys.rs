@@ -40,6 +40,8 @@ mod i386_numbers {
     pub const SYS_KILL: usize = 37;
     pub const SYS_SIGNAL: usize = 48;
     pub const SYS_SIGRETURN: usize = 119;
+    pub const SYS_GETPRIORITY: usize = 96;
+    pub const SYS_SETPRIORITY: usize = 97;
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -59,6 +61,8 @@ mod x86_64_numbers {
     /// x86_64'te klasik `signal` yoktur; yerini `rt_sigaction` alir.
     pub const SYS_SIGNAL: usize = 13;
     pub const SYS_SIGRETURN: usize = 15;
+    pub const SYS_GETPRIORITY: usize = 140;
+    pub const SYS_SETPRIORITY: usize = 141;
 }
 
 // --- TCMK'ye ozgu cagrilar (POSIX'te karsiligi yok) ---
@@ -193,6 +197,28 @@ pub fn close(fd: usize) -> isize {
 /// Program break'i okur (0) veya tasir. Basarisizlikta eski deger doner.
 pub fn brk(new: usize) -> usize {
     unsafe { syscall1(SYS_BRK, new) }
+}
+
+/// `setpriority`/`getpriority` icin tek desteklenen `which`.
+pub const PRIO_PROCESS: usize = 0;
+
+/// Surecin oncelik degerini ayarlar.
+///
+/// POSIX geleneginde SAYI BUYUDUKCE oncelik DUSER (-20 en yuksek,
+/// 19 en dusuk): "baskalarina karsi ne kadar nazik oldugun". `pid = 0`
+/// cagiran surec demektir.
+pub fn setpriority(pid: usize, nice: i32) -> isize {
+    unsafe { syscall3(SYS_SETPRIORITY, PRIO_PROCESS, pid, nice as usize) as isize }
+}
+
+/// Surecin oncelik degerini okur.
+///
+/// Cekirdek Linux sozlesmesine uyar ve `20 - nice` doner (negatif deger
+/// hata sayilacagi icin); burada geri cevrilir -- glibc'nin yaptigi da
+/// tam olarak budur.
+pub fn getpriority(pid: usize) -> i32 {
+    let raw = unsafe { syscall2(SYS_GETPRIORITY, PRIO_PROCESS, pid) as isize };
+    20 - raw as i32
 }
 
 /// CPU'yu gonullu olarak birakir.

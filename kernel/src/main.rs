@@ -87,6 +87,9 @@ static ECHO2_ELF: &[u8] = include_bytes!("../../userland/echo2.elf");
 /// Sinyal gosterimi: cekirdek uygulamanin akisini kesip isleyicisini cagirir.
 #[cfg(target_arch = "x86")]
 static SIGDEMO_ELF: &[u8] = include_bytes!("../../userland/sigdemo.elf");
+/// Oncelik gosterimi: iki kopya farkli `nice` ile yarisir.
+#[cfg(target_arch = "x86")]
+static RACE_ELF: &[u8] = include_bytes!("../../userland/race.elf");
 
 /// Linux (ELF64, x86_64) kullanici programi -- `tools/gen_hello_elf64.py`.
 /// Elle kodlanmis en kucuk ELF64: yukleyicinin dar yolunu sinar.
@@ -116,6 +119,8 @@ static CRASH64: &[u8] = include_bytes!("../../userland/crash.elf64");
 static ECHO2_64: &[u8] = include_bytes!("../../userland/echo2.elf64");
 #[cfg(target_arch = "x86_64")]
 static SIGDEMO64: &[u8] = include_bytes!("../../userland/sigdemo.elf64");
+#[cfg(target_arch = "x86_64")]
+static RACE64: &[u8] = include_bytes!("../../userland/race.elf64");
 
 /// **Windows (PE32+) uygulamalari** -- i386'dakilerle ayni kaynak, ayni
 /// ithal kutuphaneleri; degisen yalnizca hedef. Taban 0x140000000
@@ -145,6 +150,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/relay", RELAY_ELF),
     ("/bin/echo2", ECHO2_ELF),
     ("/bin/sigdemo", SIGDEMO_ELF),
+    ("/bin/race", RACE_ELF),
     ("/bin/winclock.exe", WINCLOCK_EXE),
     ("/bin/winpad.exe", WINPAD_EXE),
     ("/boot/msg.txt", BOOT_MSG),
@@ -163,6 +169,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/crash", CRASH64),
     ("/bin/echo2", ECHO2_64),
     ("/bin/sigdemo", SIGDEMO64),
+    ("/bin/race", RACE64),
     ("/bin/winclock.exe", WINCLOCK_EXE64),
     ("/bin/winpad.exe", WINPAD_EXE64),
     ("/boot/msg.txt", BOOT_MSG),
@@ -222,6 +229,9 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info_addr: usize) 
     // Idle gorevi (task 0) ayni zamanda **masaustu dongusudur**:
     // girdiyi isler, pencereleri birlestirir ve State Monitor'u besler.
     let mut last_report_tick = 0u32;
+    /// Kompozitor tavani: en fazla iki tikta bir tam ekran birlestirme.
+    const COMPOSE_INTERVAL_TICKS: u32 = 2;
+    let mut last_compose_tick = 0u32;
 
     loop {
         level0b2::state_monitor::tick();
@@ -229,11 +239,40 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info_addr: usize) 
         // Level-0b2 -> Level-0a mesaj kuyrugu (doc S.10 Faz 4+).
         level0a::messages::drain();
 
+        // Girdi her turda islenir (gecikme fark edilir), ama KOMPOZITOR
+        // sinirlanir.
+        //
+        // Onceden her turda tam ekran birlestiriliyordu ve olcum bunun
+        // bedelini gosterdi: 5151 zamanlayici tikinin 4898'i idle
+        // gorevine, yani kompozitore gidiyordu -- CPU'nun ~%95'i. Ring 3
+        // uygulamalari kalan diliminde bogusuyordu.
+        //
+        // 1024x768x32 bir kareyi saniyede yuzlerce kez uretmenin bir
+        // karsiligi yok; ekran zaten o hizda degismiyor. Iki tiklik
+        // (=20 ms, ~50 kare/sn) bir tavan, gozle fark edilmeyen ama
+        // uygulamalara CPU birakan siniri koyar.
         if level0a::wm::active() {
             level0a::wm::handle_input();
-            level0a::wm::compose();
+            let now = level0a::pit::ticks();
+            if now.wrapping_sub(last_compose_tick) >= COMPOSE_INTERVAL_TICKS {
+                last_compose_tick = now;
+                level0a::wm::compose();
+            }
         }
 
+        // CPU yalnizca zamanlayici istediginde birakilir.
+        //
+        // Her turda kosulsuz birakmak DENENDI ve sistemi kilitledi:
+        // uygulamalar da her karede biraktigi icin iki gorev arasinda
+        // saniyede binlerce baglam degisimi olusuyor, is yapmaya zaman
+        // kalmiyor (olcum: 151 zamanlayici tikine karsilik 815 bin
+        // baglam degisimi). Baglam degisimi ucuz degildir -- CR3 dahil
+        // butun baglam yenilenir.
+        //
+        // Bunun bilinen bedeli: bu gorev tiklerin cogunu tuketiyor
+        // (bkz. README, "masaustu dongusunun CPU payi"). Dogru cozum
+        // masaustunu ayri bir goreve tasiyip 0 numarayi gercek bir idle
+        // yapmaktir; ayri bir is.
         if scheduler::needs_resched() {
             scheduler::yield_now();
         }

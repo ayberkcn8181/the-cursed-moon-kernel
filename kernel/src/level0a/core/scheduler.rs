@@ -16,6 +16,9 @@ use crate::arch::cpu::context::{arch_context_switch, bootstrap_stack};
 use crate::level0a::core::kmalloc;
 
 pub const MAX_TASKS: usize = 8;
+/// Idle gorevi her zaman 0 numaradadir ve ayni zamanda **masaustu
+/// dongusudur** (bkz. `main.rs`); oncelik muhasebesinin disindadir.
+pub const IDLE_TASK: usize = 0;
 pub const TASK_STACK_SIZE: usize = 16 * 1024;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -64,6 +67,21 @@ pub struct Task {
     pub wait_for: usize,
     /// Gorev sonlandiginda birakilan cikis kodu; `waitpid` bunu okur.
     pub exit_code: u32,
+    /// POSIX `nice` degeri: -20 (en yuksek oncelik) .. 19 (en dusuk).
+    ///
+    /// Oncelik, gorevin **zaman diliminin uzunlugunu** belirler; secim
+    /// sirasini degil. Bu ayrim bilincli: sira degistirseydi dusuk
+    /// oncelikli bir gorev, yuksek oncelikli biri kostugu surece hic
+    /// zamanlanmazdi (aclik). Dilim uzunluguyla oynamak ise herkesin
+    /// ilerlemesini garanti ederken CPU payini oranlar.
+    pub nice: i8,
+    /// Bu gorevin dilim icinde kalan tik hakki. Sifirlandiginda
+    /// zamanlayici kesmesi baglam degisimi ister.
+    pub credits: u32,
+    /// Gorevin CPU'da gecirdigi toplam tik. Oncelik gercekten ise
+    /// yariyor mu sorusunun tek dogru cevabi budur -- uygulamanin kendi
+    /// sayaci uyku/G-C ile bozulabilir, bu sayac bozulmaz.
+    pub cpu_ticks: u32,
 }
 
 impl Task {
@@ -78,6 +96,9 @@ impl Task {
             address_space: 0,
             wake_tick: 0,
             wait_for: 0,
+            nice: 0,
+            credits: 0,
+            cpu_ticks: 0,
             exit_code: 0,
         }
     }
@@ -125,6 +146,11 @@ pub fn spawn(name: &'static str, entry: extern "C" fn() -> !) -> Option<usize> {
         let kstack_top = kstack.add(TASK_STACK_SIZE) as usize;
 
         let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+        // Donem hakki BASLANGICTA verilmeli. Sifir birakilirsa gorev,
+        // secimde "hakki yok" diye atlanir ve ilk donem yenilenene kadar
+        // hic kosmaz -- yeni surecin dogar dogmaz ac kalmasi demektir.
+        (*tasks.add(index)).nice = 0;
+        (*tasks.add(index)).credits = slice_ticks(0);
         (*tasks.add(index)).state = TaskState::Ready;
         (*tasks.add(index)).stack_pointer = sp;
         (*tasks.add(index)).name = name;
@@ -142,8 +168,126 @@ pub fn spawn(name: &'static str, entry: extern "C" fn() -> !) -> Option<usize> {
 }
 
 /// PIT kesmesinden cagrilir: zaman dilimi doldu bayragini kaldirir.
+/// Bir gorevin `nice` degerine karsilik gelen **donem hakki** (PIT tik'i).
+///
+/// PIT 100 Hz oldugu icin 1 tik = 10 ms. Varsayilan (`nice = 0`) iki
+/// tiktir; en dusuk oncelik bile **en az bir tik** alir, yani hicbir
+/// gorev tamamen ac kalmaz. En yuksek oncelik en dusugun sekiz kati
+/// CPU'ya kadar cikabilir.
+///
+/// ## Neden "dilim uzunlugu" degil de "donem hakki"
+///
+/// Ilk surumde bu deger yalnizca zaman diliminin uzunluguydu: yuksek
+/// oncelikli gorev daha uzun kesintisiz kosuyordu. Olcum bunun **hicbir
+/// ise yaramadigini** gosterdi -- iki `race` kopyasi -20 ve 19 ile
+/// kosturuldugunda sayaclari tipatip ayni arttir (+385 / +386).
+///
+/// Sebep: GUI uygulamalari her kare sonunda `win_flush` ile CPU'yu
+/// GONULLU birakir, yani dilimlerini hicbir zaman doldurmaz. Dilim
+/// uzunlugu ancak zorla kesilen bir gorev icin anlamlidir; gonullu
+/// birakan iki gorev, dilimleri ne olursa olsun sirayla birer tur alir.
+///
+/// Bu yuzden deger artik bir **donem butcesi**dir: gorev tiklerini
+/// harcadikca hakki azalir ve hakki bitince, donem yenilenene kadar
+/// SECILMEZ. Boylece oncelik "ne kadar uzun kostugu"nu degil "kac kez
+/// secildigi"ni belirler -- gonullu birakan yuklerde de calisan tek
+/// yontem budur.
+///
+/// Tablo, formul yerine bilincli olarak acik yazildi: zamanlayici
+/// davranisini okurken "hangi nice ne kadar hak alir" sorusunun cevabi
+/// hesap yapmadan gorunsun.
+pub fn slice_ticks(nice: i8) -> u32 {
+    match nice {
+        i8::MIN..=-10 => 8,
+        -9..=-1 => 4,
+        0..=4 => 2,
+        _ => 1,
+    }
+}
+
+/// Zamanlayici kesmesi: calisan gorevin donem hakkini eksiltir.
+///
+/// Onceden her tik kosulsuz baglam degisimi isterdi -- yani hak diye bir
+/// sey yoktu ve oncelik de olamazdi.
 pub fn on_timer_tick() {
+    let current = CURRENT.load(Ordering::Relaxed);
+    unsafe {
+        let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+        (*tasks.add(current)).cpu_ticks = (*tasks.add(current)).cpu_ticks.wrapping_add(1);
+        let credits = &mut (*tasks.add(current)).credits;
+        if *credits > 1 {
+            *credits -= 1;
+            return;
+        }
+        *credits = 0;
+    }
     NEED_RESCHED.store(true, Ordering::Relaxed);
+}
+
+/// Yeni donem: butun gorevlerin hakki `nice` degerine gore tazelenir.
+///
+/// Donem, "hicbir hazir gorevin hakki kalmadi" aninda baslar -- ayri bir
+/// zamanlayici ya da sayac gerekmez, kosul secim aninda zaten bilinir.
+fn refill_credits(count: usize) {
+    unsafe {
+        let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+        for i in 0..count {
+            (*tasks.add(i)).credits = slice_ticks((*tasks.add(i)).nice);
+        }
+    }
+}
+
+/// Gorevin donem icinde kalan hakki (tanilama icin).
+pub fn credits_of(index: usize) -> u32 {
+    if index >= MAX_TASKS {
+        return 0;
+    }
+    unsafe {
+        let tasks = core::ptr::addr_of!(TASKS) as *const Task;
+        (*tasks.add(index)).credits
+    }
+}
+
+/// Gorevin CPU'da gecirdigi toplam tik (10 ms).
+pub fn cpu_ticks_of(index: usize) -> u32 {
+    if index >= MAX_TASKS {
+        return 0;
+    }
+    unsafe {
+        let tasks = core::ptr::addr_of!(TASKS) as *const Task;
+        (*tasks.add(index)).cpu_ticks
+    }
+}
+
+/// Gorevin oncelik degerini okur.
+pub fn nice_of(index: usize) -> i8 {
+    if index >= MAX_TASKS {
+        return 0;
+    }
+    unsafe {
+        let tasks = core::ptr::addr_of!(TASKS) as *const Task;
+        (*tasks.add(index)).nice
+    }
+}
+
+/// Gorevin oncelik degerini ayarlar; POSIX araligina kirpar.
+///
+/// Yeni dilim **hemen** gecerli olmaz: calisan gorevin kalan hakki
+/// tuketilir, sonraki secimde yeni deger uygulanir. Boylece bir gorev
+/// kendi oncelikini yukselterek dilim ortasinda ek sure kazanamaz.
+pub fn set_nice(index: usize, value: i8) -> Result<(), &'static str> {
+    if index >= MAX_TASKS {
+        return Err("gecersiz gorev numarasi");
+    }
+    let clamped = value.clamp(-20, 19);
+    crate::arch::cpu::without_interrupts(|| unsafe {
+        let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+        if (*tasks.add(index)).state == TaskState::Unused {
+            return Err("gorev yok");
+        }
+        (*tasks.add(index)).nice = clamped;
+        Ok(())
+    })
 }
 
 /// Bolunemez bir is boyunca zorla baglam degisimini kapatir.
@@ -230,6 +374,22 @@ pub fn yield_now() {
         if (*tasks.add(current_index)).state == TaskState::Running {
             (*tasks.add(current_index)).state = TaskState::Ready;
         }
+        // Donem hakki TUR basina da harcanir, yalnizca tik basina degil.
+        //
+        // Yalnizca tik sayilsaydi, tik sinirini nadiren gecen ince taneli
+        // isler (her karede `win_flush` cagiran GUI uygulamalari gibi)
+        // kredilerini neredeyse hic tuketmez, hepsi surekli uygun kalir ve
+        // sira 1:1 doner -- yani oncelik hicbir sey ifade etmezdi. Olcum
+        // tam olarak bunu gosterdi: -20 ve 19 ile kosan iki surecin
+        // sayaclari tipatip ayni artiyordu.
+        //
+        // Tur basina da harcayinca hak, "kac tik kostu"nun yani sira "kac
+        // kez secildi"yi de sinirlar; agirlikli sirali dagitim (weighted
+        // round-robin) boyle olusur.
+        if current_index != IDLE_TASK {
+            let credits = &mut (*tasks.add(current_index)).credits;
+            *credits = credits.saturating_sub(1);
+        }
         (*tasks.add(next_index)).state = TaskState::Running;
         CURRENT.store(next_index, Ordering::Relaxed);
         SWITCHES.fetch_add(1, Ordering::Relaxed);
@@ -283,13 +443,50 @@ pub fn terminate_current() -> ! {
 fn pick_next(current: usize) -> usize {
     let count = TASK_COUNT.load(Ordering::Relaxed);
     wake_expired(count);
+
+    // Donem sonu: idle DISINDA hakki kalmis hazir gorev yoksa yeni donem
+    // baslar. Idle'in muafiyeti kosula dahil edilmemeli -- edilseydi o her
+    // zaman hazir ve muaf oldugu icin kosul hicbir zaman saglanmaz, donem
+    // hic yenilenmez ve hakki biten butun gorevler kalici olarak ac
+    // kalirdi. (Tam olarak bu hata yasandi: yeni baslatilan surec hic
+    // zamanlanmadi.)
+    unsafe {
+        let tasks = core::ptr::addr_of!(TASKS) as *const Task;
+        let mut any_credited = false;
+        for i in 0..count {
+            // KOSAN gorev de sayilmali. `pick_next` cagrildigi anda o
+            // gorevin durumu `Running`'dir; yalnizca `Ready` aransaydi
+            // "kimsede hak kalmadi" sanilir ve donem HER turda yenilenirdi
+            // -- yani hakki biten gorev aninda yeniden hak kazanir ve
+            // oncelik hicbir sey ifade etmezdi. Olcum tam olarak bunu
+            // gosterdi: hak sutunu 7'ye karsi 0 iken bile iki surec ayni
+            // hizda kosuyordu.
+            let state = (*tasks.add(i)).state;
+            let runnable = state == TaskState::Ready || state == TaskState::Running;
+            if i != IDLE_TASK && runnable && (*tasks.add(i)).credits > 0 {
+                any_credited = true;
+                break;
+            }
+        }
+        if !any_credited {
+            refill_credits(count);
+        }
+    }
+
     unsafe {
         let tasks = core::ptr::addr_of!(TASKS) as *const Task;
         for offset in 1..=count {
             let candidate = (current + offset) % count;
-            if (*tasks.add(candidate)).state == TaskState::Ready {
-                return candidate;
+            if (*tasks.add(candidate)).state != TaskState::Ready {
+                continue;
             }
+            // Idle (0) ayni zamanda masaustu dongusudur; hakki bitti diye
+            // atlanirsa ekran donar. Bu yuzden secimde muaftir -- ama
+            // yukaridaki donem kosulunda sayilmaz.
+            if candidate != IDLE_TASK && (*tasks.add(candidate)).credits == 0 {
+                continue;
+            }
+            return candidate;
         }
     }
     current
