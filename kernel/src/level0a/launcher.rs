@@ -89,6 +89,7 @@ static KNOWN_APPS: &[(&str, &str, &str)] = &[
     ("sigdemo", "/bin/sigdemo", "sigdemo"),
     ("race", "/bin/race", "race"),
     ("reaper", "/bin/reaper", "reaper"),
+    ("redirect", "/bin/redirect", "redirect"),
     // Windows ikilisi: yol .exe ile biter, cekirdek bicimi magic'ten
     // anlar (bkz. vfs::format) ve PE yukleyicisine yonlendirir. Yol iki
     // mimaride de aynidir; VFS'te duran ikilinin PE32 mi PE32+ mi oldugu

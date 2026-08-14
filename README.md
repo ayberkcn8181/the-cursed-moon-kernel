@@ -46,6 +46,7 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 8 | **`waitpid`** (`Waiting` durumu, cikis kodu, `WNOHANG`, `-1`) | ✅ (i386 + x86_64) |
 | 8 | **Gorev yuvasi geri kazanimi** + zombi/oksuz toplama | ✅ |
 | 8 | **`pipe`** + surec basina fd tablosu | ✅ |
+| 8 | **`dup`/`dup2`** (stdout yonlendirme) | ✅ (i386 + x86_64) |
 | 8 | **Surec basina program break** (`brk`) + **`read(0)` = klavye** | ✅ |
 | 8 | **POSIX sinyalleri** (`kill`/`signal`/`sigreturn`, isleyici cagrisi) | ✅ (i386 + x86_64) |
 | 8+ | musl/busybox | ⏳ yapilmadi |
@@ -74,7 +75,7 @@ Ekranda gorunenler:
   | bellek/disk | `mem` `disk` `df` `format onayla` `sync` `install onayla` |
   | dosya | `ls [dizin]` `mkdir <yol>` `rmdir <yol>` `cat <yol>` `save <yol> <metin>` `cp <kaynak> <hedef>` `rm <yol>` |
   | uygulama/pencere | `apps` `run <ad>` `win` `focus <id>` `mouse` |
-  | uygulamalar (ELF) | `paint` `plasma` `notes` `menu` `twins` `relay` `echo2` `sigdemo` `race` `reaper` `crash` `hog` `spin` |
+  | uygulamalar (ELF) | `paint` `plasma` `notes` `menu` `twins` `relay` `echo2` `sigdemo` `race` `reaper` `redirect` `crash` `hog` `spin` |
   | uygulamalar (PE) | `winclock` (ham `int 0x2E`) `winpad` (IAT) -- i386'da PE32, x86_64'te PE32+ |
   | diger | `echo <metin>` `pipes` `clear` `help` |
 - **Sistem Gunlugu** -- cekirdek kaydinin canli goruntusu (konsol halka
@@ -1349,6 +1350,72 @@ olan bir surec penceresini de dondurur, oysa buradaki uygulamalar kendi
 cizim dongulerini surer. `relay`'in ebeveyni her karede yoklar ve grafik
 akici kalir.
 
+## `dup` / `dup2`: stdout'u baska bir yere baglamak
+
+Borular iki surecin konusmasini sagliyordu. `dup2` bunun uzerine ikinci
+bir sey koyar: bir tanimlayiciyi **baska bir numaraya** tasimak.
+
+Kritik nokta numaralarin sabit olmasidir. Bir program stdout'a yazarken
+1 numaraya yazar; nereye baglandigini sormaz, soramaz. `dup2(hedef, 1)`
+o numaranin arkasindaki nesneyi degistirir ve program -- tek satiri
+degismeden -- baska bir yere yazmaya baslar. UNIX kabugunun
+`komut > dosya` yonlendirmesi tam olarak budur: kabuk `fork`'tan sonra,
+`execve`'den once `dup2` yapar; calisan program nereye yazdigini hic
+bilmez.
+
+![redirect](docs/screenshot-redirect.png)
+
+`redirect` bunu tek surecte gosterir:
+
+```
+pipe()            ->  (r=3, w=4)
+dup(r)            ->  5            en kucuk bos numara
+dup2(w, 1)                         ARTIK 1 = borunun yazma ucu
+close(w)                           1 numara ayni ucu tutuyor
+rapor_yaz()                        stdout'a yazar; boruyu BILMEZ
+close(1)                           yonlendirme geri alinir
+read(5, ...)                       yazilanlar burada
+```
+
+Iki dogrulama ayni ekranda duruyor:
+
+* **158 yazildi, 158 yakalandi.** Rapor satirlarinin tamami boruya
+  gitti, tek bayt kaybolmadi.
+* **Seri konsolda o satirlarin hicbiri yok.** Yonlendirmeden onceki ve
+  sonraki satirlar konsolda; aradakiler degil. Kanit, gorunmeyen seyde.
+
+Okuma `dup`'in verdigi **5** numarasindan yapiliyor, orijinal `3`'ten
+degil -- kopyanin ayni boruya baktiginin kaniti.
+
+### 0/1/2 nasil yonlendirilebilir hale geldi
+
+Cekirdek eskiden once **numaraya** bakiyordu: `write` cagrisi 1 ya da 2
+gorunce dogrudan konsola yaziyor, tabloya hic bakmiyordu. Bu siralamayla
+`dup2(w, 1)` gorunmez olurdu -- yuva dolar, kimse okumaz.
+
+Sira tersine cevrildi: **once tablo, sonra varsayilan.**
+
+| 0/1/2'nin yuvasi | davranis |
+|---|---|
+| bos | varsayilan: stdin klavye kuyrugu, stdout/stderr konsol |
+| dolu | yuvadaki nesne (dosya ya da boru ucu) |
+
+Boylece varsayilan davranis bir **ozel durum** degil, "yonlendirme
+yoksa" halidir. `close(1)` yuvayi bosaltir ve konsol geri gelir; POSIX'te
+de `close` yonlendirmeyi kaldirmanin yoludur.
+
+### Bilerek yapilmayan: paylasilan konum
+
+Gercek POSIX'te `dup` **ayni acik dosya tanimini** paylastirir: iki
+tanimlayici tek bir konumu kullanir, birinden okumak digerinin konumunu
+da ilerletir. TCMK'de tanimlayici degerle kopyalandigi icin konumlar
+kopyadan sonra ayrisir. Yonlendirme bundan etkilenmez (orada onemli olan
+nesnenin kendisidir); fark yalnizca ayni dosyayi iki tanimlayiciyla
+okuyup "ikisi ayni yerden devam etsin" beklendiginde gorunur.
+
+Sayaclar ise dogru tutuluyor: her kopya bir sahiptir, `pipes` komutu uc
+kez ust uste `run redirect` sonrasinda da `acik boru: 0 / 4` gosteriyor.
+
 ## Gorev yuvasi geri kazanimi ve `waitpid(-1)`
 
 Gorev tablosu sekiz yuvalidir (`MAX_TASKS`). Uzun sure `spawn` yalnizca
@@ -1984,8 +2051,10 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
 - **`fork` copy-on-write degil.** Sayfalar cagri aninda tamamen
   kopyalanir; COW icin sayfalari salt okunur isaretleyip page fault'ta
   ayirmak gerekir. Dogruluk degil, maliyet farki.
-- **Boru okumasi bloke etmez** ve boru sayisi dorttur; `dup`/`dup2` ve
-  `select`/`poll` yok.
+- **Boru okumasi bloke etmez** ve boru sayisi dorttur. `dup`/`dup2` var
+  (yukari bkz.) ama `select`/`poll` yok -- hangi tanimlayicinin hazir
+  oldugunu ogrenmenin yolu yoklamaktir. `dup` ayrica konumu
+  paylastirmaz, kopyalar.
 - **Standart girdi bloke etmez.** `read(0, ...)` sahibinin penceresinde
   biriken tuslari **o an ne varsa** dondurur, tus yoksa 0. Bloke eden bir
   `read` GUI dongusunu de dondururdu; terminal disiplini (satir tamponu,

@@ -33,6 +33,8 @@ mod i386_numbers {
     pub const SYS_WRITE: usize = 4;
     pub const SYS_OPEN: usize = 5;
     pub const SYS_CLOSE: usize = 6;
+    pub const SYS_DUP: usize = 41;
+    pub const SYS_DUP2: usize = 63;
     pub const SYS_WAITPID: usize = 7;
     pub const SYS_PIPE: usize = 42;
     pub const SYS_BRK: usize = 45;
@@ -50,6 +52,8 @@ mod x86_64_numbers {
     pub const SYS_WRITE: usize = 1;
     pub const SYS_OPEN: usize = 2;
     pub const SYS_CLOSE: usize = 3;
+    pub const SYS_DUP: usize = 32;
+    pub const SYS_DUP2: usize = 33;
     pub const SYS_BRK: usize = 12;
     pub const SYS_PIPE: usize = 22;
     pub const SYS_FORK: usize = 57;
@@ -192,6 +196,21 @@ pub unsafe fn open_raw(path: *const u8, flags: usize) -> isize {
 /// taraf icin "dosya sonu" olusur.
 pub fn close(fd: usize) -> isize {
     unsafe { syscall1(SYS_CLOSE, fd) as isize }
+}
+
+/// POSIX `dup`: tanimlayiciyi en kucuk bos numaraya kopyalar.
+pub fn dup(fd: usize) -> isize {
+    unsafe { syscall1(SYS_DUP, fd) as isize }
+}
+
+/// POSIX `dup2`: kopyayi **istenen** numaraya koyar; varsa oradakini
+/// kapatir.
+///
+/// Yonlendirmenin tamami budur: `dup2(w, STDOUT)` dedikten sonra stdout'a
+/// yazan kod -- borudan haberi olmasa bile -- boruya yazar. Kabuktaki
+/// `komut > dosya` da tam olarak bu cagridir.
+pub fn dup2(oldfd: usize, newfd: usize) -> isize {
+    unsafe { syscall2(SYS_DUP2, oldfd, newfd) as isize }
 }
 
 /// Program break'i okur (0) veya tasir. Basarisizlikta eski deger doner.

@@ -19,7 +19,7 @@
 //!   42 = sys_pipe    (argumansiz; (okuma << 16) | yazma doner)
 
 use crate::arch::cpu::regs::SyscallFrame;
-use crate::level0a::core::mmu;
+use crate::level0a::core::{fd, mmu};
 use crate::level0a::gui_api;
 use crate::level0a::kernel_api::{self, KernelError};
 use crate::level0b1::signal;
@@ -59,6 +59,8 @@ mod i386_numbers {
     pub const SYS_WRITE: u32 = 4;
     pub const SYS_OPEN: u32 = 5;
     pub const SYS_CLOSE: u32 = 6;
+    pub const SYS_DUP: u32 = 41;
+    pub const SYS_DUP2: u32 = 63;
     pub const SYS_BRK: u32 = 45;
     pub const SYS_GETPID: u32 = 20;
     pub const SYS_KILL: u32 = 37;
@@ -77,6 +79,8 @@ mod x86_64_numbers {
     pub const SYS_WRITE: u32 = 1;
     pub const SYS_OPEN: u32 = 2;
     pub const SYS_CLOSE: u32 = 3;
+    pub const SYS_DUP: u32 = 32;
+    pub const SYS_DUP2: u32 = 33;
     pub const SYS_BRK: u32 = 12;
     pub const SYS_PIPE: u32 = 22;
     pub const SYS_FORK: u32 = 57;
@@ -191,6 +195,31 @@ pub fn dispatch(frame: &mut SyscallFrame) {
             Ok(()) => 0,
             Err(e) => errno_of(e),
         },
+
+        // `dup` en kucuk bos numaraya, `dup2` istenen numaraya kopyalar.
+        // Ikisi de yeni numarayi doner; hatada -EBADF/-EMFILE.
+        SYS_DUP => match fd::dup(arg1) {
+            Some(new_fd) => {
+                frame.set_return(new_fd);
+                return;
+            }
+            None if arg1 < fd::MAX_FDS => -EMFILE,
+            None => -EBADF,
+        },
+
+        SYS_DUP2 => {
+            if arg2 >= fd::MAX_FDS {
+                -EBADF
+            } else {
+                match fd::dup2(arg1, arg2) {
+                    Some(new_fd) => {
+                        frame.set_return(new_fd);
+                        return;
+                    }
+                    None => -EBADF,
+                }
+            }
+        }
 
         SYS_BRK => {
             // brk bir ADRES dondurur, hata kodu degil -- isaretli

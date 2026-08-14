@@ -12,6 +12,12 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 pub const MAX_FDS: usize = 16;
 /// 0,1,2 POSIX geregi stdin/stdout/stderr'e ayrilmistir.
+///
+/// Bu uc yuva tabloda **bos durur**; bos olmalari "varsayilan" anlamina
+/// gelir -- stdin klavye kuyrugu, stdout/stderr konsol. `dup2` ile bir
+/// yuvaya bir sey baglanirsa varsayilan yerine o kullanilir; `close` ile
+/// varsayilana geri donulur. Yonlendirmenin butun mekanigi budur
+/// (bkz. `kernel_api::read` / `kernel_api::write`).
 pub const FIRST_FREE_FD: usize = 3;
 
 /// Bir tanimlayicinin ardindaki nesne.
@@ -93,11 +99,7 @@ pub fn clone_into(child: usize) {
             let entry = parent.add(i).read();
             target.add(i).write(entry);
             if entry.used {
-                match entry.kind {
-                    FdKind::PipeRead => crate::level0a::core::pipe::add_ref(entry.node, false),
-                    FdKind::PipeWrite => crate::level0a::core::pipe::add_ref(entry.node, true),
-                    FdKind::File => {}
-                }
+                retain(entry);
             }
         }
     });
@@ -118,11 +120,7 @@ pub fn close_all(task: usize) {
             if !entry.used {
                 continue;
             }
-            match entry.kind {
-                FdKind::PipeRead => crate::level0a::core::pipe::close_end(entry.node, false),
-                FdKind::PipeWrite => crate::level0a::core::pipe::close_end(entry.node, true),
-                FdKind::File => {}
-            }
+            release(entry);
             table.add(i).write(FileDescriptor::empty());
         }
     });
@@ -181,6 +179,87 @@ pub fn allocate_pipe(pipe: usize, kind: FdKind) -> Option<usize> {
     })
 }
 
+/// Bir tanimlayicinin sahiplendigi nesnenin sayacini artirir.
+///
+/// Kopyalanan her tanimlayici bir sahiptir: iki kopyadan biri kapaninca
+/// boru olmemeli, ikisi de kapaninca olmeli.
+fn retain(entry: FileDescriptor) {
+    match entry.kind {
+        FdKind::PipeRead => crate::level0a::core::pipe::add_ref(entry.node, false),
+        FdKind::PipeWrite => crate::level0a::core::pipe::add_ref(entry.node, true),
+        FdKind::File => {}
+    }
+}
+
+fn release(entry: FileDescriptor) {
+    match entry.kind {
+        FdKind::PipeRead => crate::level0a::core::pipe::close_end(entry.node, false),
+        FdKind::PipeWrite => crate::level0a::core::pipe::close_end(entry.node, true),
+        FdKind::File => {}
+    }
+}
+
+/// POSIX `dup`: en kucuk bos tanimlayiciya kopyalar.
+///
+/// ## Ayrisan yan: konum (offset)
+///
+/// Gercek POSIX'te `dup` **ayni acik dosya tanimini** paylastirir, yani
+/// iki tanimlayici tek bir konumu kullanir: birinden okumak digerinin de
+/// konumunu ilerletir. TCMK'de `FileDescriptor` degerle kopyalandigi icin
+/// konumlar kopyadan sonra **ayrisir**. Yonlendirme (`dup2` ile stdout'u
+/// baska yere baglamak) bundan etkilenmez -- orada onemli olan nesnenin
+/// kendisidir, konum degil. Ayrisma yalnizca ayni dosyayi iki
+/// tanimlayiciyla okuyup "ikisi ayni yerden devam etsin" beklendiginde
+/// gorunur; o kalip burada kullanilmiyor.
+pub fn dup(oldfd: usize) -> Option<usize> {
+    crate::arch::cpu::without_interrupts(|| unsafe {
+        let table = current_table();
+        if oldfd >= MAX_FDS || !(*table.add(oldfd)).used {
+            return None;
+        }
+        let entry = *table.add(oldfd);
+        for fd in FIRST_FREE_FD..MAX_FDS {
+            if !(*table.add(fd)).used {
+                table.add(fd).write(entry);
+                retain(entry);
+                return Some(fd);
+            }
+        }
+        None
+    })
+}
+
+/// POSIX `dup2`: kopyayi **istenen** numaraya koyar.
+///
+/// Yonlendirmenin tamami bu cagridadir: `dup2(boru_yazma_ucu, 1)` dedikten
+/// sonra, stdout'a yazan bir kod -- borudan haberi olmasa bile -- boruya
+/// yazar. UNIX'in kabuk yonlendirmesi (`komut > dosya`) tam olarak bu
+/// mekanizmadir.
+///
+/// `newfd` 0/1/2 olabilir; onlarin normalde bos duran yuvasi dolar ve
+/// varsayilan davranis (klavye/konsol) devre disi kalir.
+pub fn dup2(oldfd: usize, newfd: usize) -> Option<usize> {
+    crate::arch::cpu::without_interrupts(|| unsafe {
+        let table = current_table();
+        if oldfd >= MAX_FDS || newfd >= MAX_FDS || !(*table.add(oldfd)).used {
+            return None;
+        }
+        // POSIX: ayni numaraysa hicbir sey yapilmaz. Ozellikle kapatilmaz --
+        // once kapatip sonra kopyalasaydik tek sahipli bir boru olurdu.
+        if oldfd == newfd {
+            return Some(newfd);
+        }
+        let entry = *table.add(oldfd);
+        let previous = *table.add(newfd);
+        if previous.used {
+            release(previous);
+        }
+        table.add(newfd).write(entry);
+        retain(entry);
+        Some(newfd)
+    })
+}
+
 pub fn advance(fd: usize, delta: usize) {
     if fd >= MAX_FDS {
         return;
@@ -193,8 +272,13 @@ pub fn advance(fd: usize, delta: usize) {
     });
 }
 
+/// Tanimlayiciyi kapatir.
+///
+/// 0/1/2 icin bu, **yonlendirmeyi geri almak** demektir: yuva bosalir ve
+/// varsayilan davranis (klavye/konsol) geri doner. Yonlendirilmemis bir
+/// stdio numarasini kapatmak `false` doner -- kapatilacak bir sey yoktur.
 pub fn close(fd: usize) -> bool {
-    if fd < FIRST_FREE_FD || fd >= MAX_FDS {
+    if fd >= MAX_FDS {
         return false;
     }
     crate::arch::cpu::without_interrupts(|| unsafe {
@@ -205,11 +289,7 @@ pub fn close(fd: usize) -> bool {
         }
         // Boru ucuysa sayaci dusur: son uc de kapaninca boru serbest
         // kalir ve okuyan taraf "yazan kalmadi" bilgisini gorur.
-        match entry.kind {
-            FdKind::PipeRead => crate::level0a::core::pipe::close_end(entry.node, false),
-            FdKind::PipeWrite => crate::level0a::core::pipe::close_end(entry.node, true),
-            FdKind::File => {}
-        }
+        release(entry);
         table.add(fd).write(FileDescriptor::empty());
         true
     })

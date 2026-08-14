@@ -110,29 +110,32 @@ pub unsafe fn write(fd_num: u32, buf: *const u8, len: usize) -> Result<usize, Ke
         return Err(KernelError::Fault);
     }
 
-    match fd_num {
-        FD_STDOUT | FD_STDERR => {
-            let bytes = core::slice::from_raw_parts(buf, len);
+    let bytes = core::slice::from_raw_parts(buf, len);
+
+    // Once TABLOYA bakilir, sonra varsayilana dusulur. Sira boyle olmak
+    // **zorunda**: `dup2(fd, 1)` stdout yuvasini doldurur ve ondan sonra
+    // 1'e yazilanlar konsola degil oraya gitmelidir. Numaraya once bakan
+    // eski sira yonlendirmeyi gorunmez kilardi.
+    match fd::get(fd_num as usize) {
+        Some(entry) => match entry.kind {
+            fd::FdKind::PipeWrite => Ok(pipe::write(entry.node, bytes)),
+            // Borunun okuma ucuna yazmak POSIX'te de hatadir.
+            fd::FdKind::PipeRead => Err(KernelError::BadFileDescriptor),
+            fd::FdKind::File => {
+                let written = vfs::write_at(entry.node, entry.offset, bytes)
+                    .map_err(|_| KernelError::NotSupported)?;
+                fd::advance(fd_num as usize, written);
+                Ok(written)
+            }
+        },
+        // Yonlendirilmemis stdout/stderr: konsol.
+        None if fd_num == FD_STDOUT || fd_num == FD_STDERR => {
             for &byte in bytes {
                 crate::print!("{}", byte as char);
             }
             Ok(len)
         }
-        _ => {
-            let entry = fd::get(fd_num as usize).ok_or(KernelError::BadFileDescriptor)?;
-            let bytes = core::slice::from_raw_parts(buf, len);
-            match entry.kind {
-                fd::FdKind::PipeWrite => Ok(pipe::write(entry.node, bytes)),
-                // Borunun okuma ucuna yazmak POSIX'te de hatadir.
-                fd::FdKind::PipeRead => Err(KernelError::BadFileDescriptor),
-                fd::FdKind::File => {
-                    let written = vfs::write_at(entry.node, entry.offset, bytes)
-                        .map_err(|_| KernelError::NotSupported)?;
-                    fd::advance(fd_num as usize, written);
-                    Ok(written)
-                }
-            }
-        }
+        None => Err(KernelError::BadFileDescriptor),
     }
 }
 
@@ -158,47 +161,49 @@ pub unsafe fn read(fd_num: u32, buf: *mut u8, len: usize) -> Result<usize, Kerne
     if buf.is_null() {
         return Err(KernelError::Fault);
     }
-    // stdin = cagiran surecin penceresinin tus kuyrugu.
-    //
-    // POSIX'te klavye bir dosya tanimlayicisidir, pencere kimligi degil;
-    // bu yuzden `read(0, ...)` surecin kendi penceresine baglanir. Bir
-    // GUI uygulamasi ayni tuslara `win_poll_key` ile de ulasabilir --
-    // ikisi ayni kuyrugu okur, yani hangisi once cagirirsa tusu o alir.
-    //
-    // Okuma **bloke etmez**: tus yoksa 0 doner. Boru okumasindaki ile
-    // ayni gerekce -- bloke olan bir surec penceresini de dondurur.
-    if fd_num == FD_STDIN {
-        let owner = scheduler::current_id();
-        let window = match crate::level0a::wm::first_window_of(owner) {
-            Some(w) => w,
-            None => return Ok(0),
-        };
-        let slice = core::slice::from_raw_parts_mut(buf, len);
-        let mut read = 0usize;
-        while read < slice.len() {
-            let key = crate::level0a::gui_api::poll_key(window);
-            if key == 0 {
-                break;
-            }
-            slice[read] = key;
-            read += 1;
-        }
-        return Ok(read);
-    }
-
-    let entry = fd::get(fd_num as usize).ok_or(KernelError::BadFileDescriptor)?;
     let slice = core::slice::from_raw_parts_mut(buf, len);
-    match entry.kind {
-        // Boru okumasi bloke ETMEZ: veri yoksa 0 doner. Bloke olan bir
-        // surec penceresini de dondururdu (bkz. `core::pipe`).
-        fd::FdKind::PipeRead => Ok(pipe::read(entry.node, slice)),
-        fd::FdKind::PipeWrite => Err(KernelError::BadFileDescriptor),
-        fd::FdKind::File => {
-            let n =
-                vfs::read(entry.node, entry.offset, slice).ok_or(KernelError::BadFileDescriptor)?;
-            fd::advance(fd_num as usize, n);
-            Ok(n)
+
+    // Yazmada oldugu gibi once tabloya bakilir: `dup2(boru, 0)` diyen bir
+    // surec stdin'i borudan okumalidir, klavyeden degil.
+    match fd::get(fd_num as usize) {
+        Some(entry) => match entry.kind {
+            // Boru okumasi bloke ETMEZ: veri yoksa 0 doner. Bloke olan bir
+            // surec penceresini de dondururdu (bkz. `core::pipe`).
+            fd::FdKind::PipeRead => Ok(pipe::read(entry.node, slice)),
+            fd::FdKind::PipeWrite => Err(KernelError::BadFileDescriptor),
+            fd::FdKind::File => {
+                let n = vfs::read(entry.node, entry.offset, slice)
+                    .ok_or(KernelError::BadFileDescriptor)?;
+                fd::advance(fd_num as usize, n);
+                Ok(n)
+            }
+        },
+        // Yonlendirilmemis stdin = cagiran surecin penceresinin tus kuyrugu.
+        //
+        // POSIX'te klavye bir dosya tanimlayicisidir, pencere kimligi degil;
+        // bu yuzden `read(0, ...)` surecin kendi penceresine baglanir. Bir
+        // GUI uygulamasi ayni tuslara `win_poll_key` ile de ulasabilir --
+        // ikisi ayni kuyrugu okur, yani hangisi once cagirirsa tusu o alir.
+        //
+        // Okuma **bloke etmez**: tus yoksa 0 doner.
+        None if fd_num == FD_STDIN => {
+            let owner = scheduler::current_id();
+            let window = match crate::level0a::wm::first_window_of(owner) {
+                Some(w) => w,
+                None => return Ok(0),
+            };
+            let mut read = 0usize;
+            while read < slice.len() {
+                let key = crate::level0a::gui_api::poll_key(window);
+                if key == 0 {
+                    break;
+                }
+                slice[read] = key;
+                read += 1;
+            }
+            Ok(read)
         }
+        None => Err(KernelError::BadFileDescriptor),
     }
 }
 

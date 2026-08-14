@@ -210,7 +210,7 @@ USERLAND_DIR := $(ROOT_DIR)/userland-rs
 USERLAND_TARGET_DIR := $(TARGET_DIR)/userland
 USER_BASE := 0x00C00000
 
-USER_APPS := hello paint plasma crash hog spin notes menu twins relay echo2 sigdemo race reaper
+USER_APPS := hello paint plasma crash hog spin notes menu twins relay echo2 sigdemo race reaper redirect
 
 # Windows (PE32) uygulamalari. Ayni kaynak agacindan, ayni `tcmk`
 # kutuphanesiyle, yalnizca **baska bir hedefle** derlenir: rust-lld
@@ -264,7 +264,7 @@ userland-rust:
 # tek sey taban adresidir, o da bir baglayici argumani.
 USER64_TARGET_DIR := $(TARGET_DIR)/userland64
 # PE tarafi (winclock/winpad) i386'ya ozgu; gerisi iki mimaride de var.
-USER64_APPS := hello plasma paint notes menu crash twins relay echo2 sigdemo race reaper
+USER64_APPS := hello plasma paint notes menu crash twins relay echo2 sigdemo race reaper redirect
 
 userland-x86_64:
 	@mkdir -p $(ROOT_DIR)/userland
