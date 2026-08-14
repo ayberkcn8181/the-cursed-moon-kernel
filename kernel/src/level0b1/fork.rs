@@ -9,8 +9,9 @@
 //!
 //! ## Nasil
 //!
-//! 1. Ebeveynin adres uzayi **icerigiyle** kopyalanir
-//!    (`mmu::clone_user_space`).
+//! 1. Ebeveynin adres uzayi **copy-on-write** olarak cogaltilir
+//!    (`mmu::clone_user_space`): sayfalar paylasilir, iki taraf da salt
+//!    okunur isaretlenir; ilk yazan kendi kopyasini alir.
 //! 2. Syscall cercevesinden ebeveynin tam Ring 3 baglami okunur
 //!    (`SyscallFrame::user_context`) ve donus degeri sifirlanir -- cocugun
 //!    `fork`'tan gorecegi donus degeri budur.
@@ -23,9 +24,10 @@
 //!
 //! ## Bilerek yapilmayanlar
 //!
-//! * **Copy-on-write yok.** Sayfalar hemen kopyalanir. COW, sayfalari
-//!   salt okunur isaretleyip page fault'ta ayirmayi gerektirir; dogruluk
-//!   acisindan fark yoktur, yalnizca maliyet farkidir.
+//! * **Talep uzerine sayfalama yok.** Surec basina sabit bir pencere
+//!   (512 KiB) eslenir; hic dokunulmayan sayfalar icin cerceve
+//!   ayrilmasi COW sayesinde ertelenmis olsa da, ilk `execve` yine
+//!   pencerenin tamamini esler.
 //! * (Dosya tanimlayicilari ve program break **kopyalanir** -- bkz.
 //!   `core::fd::clone_into` ve `kernel_api::clone_program_break`.)
 //! * **Pencere miras alinmaz.** Pencereler gorev kimligine bagli
@@ -100,10 +102,11 @@ pub unsafe fn fork(frame: &SyscallFrame) -> Result<usize, ForkError> {
     scheduler::set_address_space(child, child_space);
 
     crate::println!(
-        "[LEVEL-0b1] fork: gorev #{} -> #{} (eip=0x{:08x}, {} sayfa kopyalandi)",
+        "[LEVEL-0b1] fork: gorev #{} -> #{} (eip=0x{:08x}, {} sayfa paylasildi/COW, {} sayfa)",
         parent,
         child,
         context.instruction_pointer(),
+        mmu::cow_pages(child_space),
         mmu::user_pages(child_space)
     );
 
@@ -134,8 +137,31 @@ extern "C" fn child_task() -> ! {
     // cercevesini ezmek demek olurdu.
     unsafe { usermode::resume_user_context(&context) };
 
-    // Cocuk `sys_exit` cagirdi: penceresi varsa kapansin, adres uzayi
-    // birakilsin -- gorev sonlanirken scheduler bunu zaten yapiyor.
+    // Cocuk `sys_exit` cagirdi.
     crate::level0a::wm::close_owned_by(id);
+
+    // Adres uzayini BURADA birak.
+    //
+    // Uzun sure birakilmiyordu; `terminate_current` yalnizca yuvayi geri
+    // verir, uzayi degil. Kabuktan baslatilan uygulamalarda bunu
+    // `process::release_space` yapiyor, ama `fork` cocugu o yoldan
+    // gecmez -- yani her `fork` cocugunun adres uzayi sizardi. Tam kopya
+    // doneminde bu gorev basina ~130 cerceveydi ve fark edilmemisti;
+    // copy-on-write'in referans sayaci gorunur kildi (`mem` komutunda
+    // "cerceve paylasik" sayisi cocuk ciktiktan sonra da dusmuyordu).
+    //
+    // Sira onemli: once cekirdek uzayina gecilir, sonra eski uzay
+    // yikilir. Ters sirada yururlukteki CR3'un tablolari havuza geri
+    // verilmis olurdu. Cekirdek yigini birebir haritada oldugu icin
+    // gecisten etkilenmez.
+    let space = scheduler::address_space_of(id);
+    if space != 0 {
+        scheduler::set_current_address_space(0);
+        unsafe {
+            mmu::switch_to(mmu::kernel_cr3());
+            mmu::destroy_user_space(space);
+        }
+    }
+
     scheduler::terminate_current()
 }

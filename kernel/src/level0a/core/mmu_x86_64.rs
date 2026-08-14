@@ -14,7 +14,7 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::arch::cpu::{read_cr0, read_cr3, write_cr3};
+use crate::arch::cpu::{read_cr0, read_cr3, write_cr0, write_cr3};
 use crate::level0a::core::frames;
 
 const PAGE_SIZE: usize = 4096;
@@ -25,7 +25,19 @@ const PTE_PRESENT: u64 = 1 << 0;
 const PTE_WRITABLE: u64 = 1 << 1;
 const PTE_USER: u64 = 1 << 2;
 const PTE_HUGE: u64 = 1 << 7;
+
+// 9-11 arasi bitler donanim tarafindan yok sayilir ("available").
+//
+/// Bu sayfa **copy-on-write**: salt okunur eslendi, ilk yazmada cogaltilir.
+const PTE_COW: u64 = 1 << 9;
+/// Cekirdege ait paylasilan cerceve (pencere tamponu); `fork`'ta cocuga
+/// eslenmez.
+const PTE_SHARED: u64 = 1 << 10;
+
 const CR0_PG: u64 = 1 << 31;
+/// Write Protect -- bkz. i386 karsiligi. Acik olmadan cekirdek yazmalari
+/// COW'u sessizce delerdi.
+const CR0_WP: u64 = 1 << 16;
 
 const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
@@ -89,6 +101,9 @@ pub unsafe fn init() {
     debug_assert!(is_enabled());
     // Surecler bu tablodan turetilir, o yuzden saklanmasi sart.
     KERNEL_CR3.store((read_cr3() & ADDR_MASK) as usize, Ordering::Relaxed);
+    // Cekirdek yazmalari da salt okunur sayfalarda hata uretsin; COW'un
+    // dogrulugu buna bagli (bkz. `CR0_WP`).
+    write_cr0(read_cr0() | CR0_WP);
 }
 
 pub fn is_enabled() -> bool {
@@ -414,7 +429,9 @@ pub unsafe fn map_user_frames(cr3: usize, vaddr: usize, phys: usize, len: usize)
             Some(e) => e,
             None => return false,
         };
-        entry.write((phys + i * PAGE_SIZE) as u64 | PTE_PRESENT | PTE_WRITABLE | PTE_USER);
+        entry.write(
+            (phys + i * PAGE_SIZE) as u64 | PTE_PRESENT | PTE_WRITABLE | PTE_USER | PTE_SHARED,
+        );
     }
 
     flush_tlb();
@@ -492,8 +509,12 @@ pub unsafe fn clone_user_space(src_cr3: usize) -> Option<usize> {
         let src_pt = src_entry & ADDR_MASK;
 
         for i in 0..ENTRIES {
-            let page = table_entry(src_pt, i).read();
+            let page_ptr = table_entry(src_pt, i);
+            let page = page_ptr.read();
             if page & PTE_PRESENT == 0 {
+                continue;
+            }
+            if page & PTE_SHARED != 0 {
                 continue;
             }
 
@@ -505,24 +526,104 @@ pub unsafe fn clone_user_space(src_cr3: usize) -> Option<usize> {
                     return None;
                 }
             };
-            let frame = match frames::alloc() {
+
+            let frame = (page & ADDR_MASK) as usize;
+
+            if frames::share(frame) {
+                let shared = (page & !PTE_WRITABLE) | PTE_COW;
+                page_ptr.write(shared);
+                dst_entry.write(shared);
+                continue;
+            }
+
+            let copy = match frames::alloc() {
                 Some(f) => f,
                 None => {
                     destroy_user_space(dst_cr3);
                     return None;
                 }
             };
-
-            core::ptr::copy_nonoverlapping(
-                (page & ADDR_MASK) as *const u8,
-                frame as *mut u8,
-                PAGE_SIZE,
-            );
-            dst_entry.write(frame as u64 | PTE_PRESENT | PTE_WRITABLE | PTE_USER);
+            core::ptr::copy_nonoverlapping(frame as *const u8, copy as *mut u8, PAGE_SIZE);
+            dst_entry.write(copy as u64 | PTE_PRESENT | PTE_WRITABLE | PTE_USER);
         }
     }
 
+    // Ebeveynin girdileri degisti; eski yazilabilir ceviriler TLB'de
+    // kalirsa COW sessizce delinir.
+    flush_tlb();
     Some(dst_cr3)
+}
+
+/// Copy-on-write sayfa hatasini cozer; cozduyse `true` doner.
+/// (Gerekce ve dallar icin i386 karsiligina bakiniz.)
+///
+/// # Safety
+/// Yalnizca sayfa hatasi isleyicisinden cagrilmalidir.
+pub unsafe fn handle_cow_fault(vaddr: usize) -> bool {
+    let cr3 = (read_cr3() & ADDR_MASK) as usize;
+    if cr3 == 0 || cr3 == kernel_cr3() {
+        return false;
+    }
+    let entry_ptr = match user_pte(cr3, vaddr) {
+        Some(e) => e,
+        None => return false,
+    };
+    let entry = entry_ptr.read();
+    if entry & PTE_PRESENT == 0 || entry & PTE_COW == 0 {
+        return false;
+    }
+
+    let frame = (entry & ADDR_MASK) as usize;
+
+    if frames::refcount(frame) <= 1 {
+        entry_ptr.write((entry & !PTE_COW) | PTE_WRITABLE);
+        flush_tlb();
+        frames::note_cow_reuse();
+        return true;
+    }
+
+    let copy = match frames::alloc() {
+        Some(f) => f,
+        None => return false,
+    };
+    core::ptr::copy_nonoverlapping(frame as *const u8, copy as *mut u8, PAGE_SIZE);
+    entry_ptr.write(copy as u64 | PTE_PRESENT | PTE_WRITABLE | PTE_USER);
+    frames::free(frame);
+    flush_tlb();
+    frames::note_cow_copy();
+    true
+}
+
+/// Bir adres uzayindaki copy-on-write sayfasi sayisi (kabuk raporu).
+pub fn cow_pages(cr3: usize) -> usize {
+    if cr3 == 0 || cr3 == kernel_cr3() {
+        return 0;
+    }
+    unsafe {
+        let pdpt = (table_entry(cr3 as u64, 0).read() & ADDR_MASK) as usize;
+        if pdpt == 0 {
+            return 0;
+        }
+        let pd = (table_entry(pdpt as u64, 0).read() & ADDR_MASK) as usize;
+        if pd == 0 {
+            return 0;
+        }
+        let mut total = 0;
+        for pd_index in USER_PD_FIRST..=USER_PD_LAST {
+            let entry = table_entry(pd as u64, pd_index).read();
+            if entry & PTE_PRESENT == 0 || entry & PTE_HUGE != 0 {
+                continue;
+            }
+            let pt = entry & ADDR_MASK;
+            total += (0..ENTRIES)
+                .filter(|&i| {
+                    let e = table_entry(pt, i).read();
+                    e & PTE_PRESENT != 0 && e & PTE_COW != 0
+                })
+                .count();
+        }
+        total
+    }
 }
 
 /// Bir tabloyu (512 girdi) oldugu gibi kopyalar.

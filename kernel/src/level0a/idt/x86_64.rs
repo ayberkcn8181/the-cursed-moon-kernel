@@ -159,7 +159,40 @@ exception_with_code!(ex10, 10);
 exception_with_code!(ex11, 11);
 exception_with_code!(ex12, 12);
 exception_with_code!(ex13, 13);
-exception_with_code!(ex14, 14);
+/// Vektor 14 (sayfa hatasi) **geri donebilen** tek istisnadir.
+///
+/// Digerleri `-> !` imzasiyla yazilir: hata olumcul, geri donus yok.
+/// Sayfa hatasi ise bir hata olmak zorunda degil -- copy-on-write bir
+/// sayfaya yazmak *beklenen* bir olaydir. Cekirdek sayfayi cogaltir ve
+/// **donerek** hataya yol acan komutu tekrarlatir; uygulama hicbir sey
+/// olmamis gibi devam eder.
+///
+/// Hata kodunun alt iki biti (var + yazma) COW adayini secer. Sayfa
+/// gercekten yoksa (bit 0 = 0) ya da okuma hatasiysa COW olamaz.
+///
+/// Ring 0'dan gelen hatalar da buraya duser ve bilerek: `CR0.WP` acik
+/// oldugu icin cekirdegin kullanici tamponuna yazmasi (`read`, `poll`,
+/// sinyal cercevesi) da COW yolunu tetikler.
+extern "x86-interrupt" fn ex14(frame: InterruptStackFrame, error_code: u64) {
+    let fault_addr = read_cr2();
+
+    const PRESENT: u64 = 1 << 0;
+    const WRITE: u64 = 1 << 1;
+    if error_code & (PRESENT | WRITE) == (PRESENT | WRITE)
+        && unsafe { crate::level0a::core::mmu::handle_cow_fault(fault_addr) }
+    {
+        return;
+    }
+
+    let from_user = frame.code_segment & 3 == 3;
+    crate::level0a::exceptions::handle(
+        14,
+        error_code as usize,
+        frame.instruction_pointer as usize,
+        from_user,
+        fault_addr,
+    )
+}
 exception_no_code!(ex16, 16);
 exception_with_code!(ex17, 17);
 exception_no_code!(ex18, 18);

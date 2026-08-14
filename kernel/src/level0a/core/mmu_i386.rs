@@ -45,7 +45,26 @@ const IDENTITY_MAPPED_BYTES: usize = IDENTITY_TABLES * ENTRIES * PAGE_SIZE;
 const PTE_PRESENT: u32 = 1 << 0;
 const PTE_WRITABLE: u32 = 1 << 1;
 const PTE_USER: u32 = 1 << 2;
+
+// 9-11 arasi bitler donanim tarafindan yok sayilir ("available"); isletim
+// sistemi kendi bilgisini oraya saklar.
+//
+/// Bu sayfa **copy-on-write**: salt okunur eslendi, ilk yazma denemesinde
+/// cogaltilacak. Salt okunur olmak tek basina yetmez -- gercekten salt
+/// okunur bir sayfadan (varsa) ayirt edilmesi gerekir.
+const PTE_COW: u32 = 1 << 9;
+/// Bu sayfa cekirdege ait **paylasilan** bir cerceveye bakiyor (pencere
+/// piksel tamponu). `fork`'ta ne kopyalanir ne paylasilir: cocuga hic
+/// eslenmez, cunku cocuk pencereyi miras almaz.
+const PTE_SHARED: u32 = 1 << 10;
+
 const CR0_PG: u32 = 1 << 31;
+/// Write Protect. Acik olmadiginda **cekirdek** salt okunur sayfalara
+/// yazabilir; COW icin bu olumcul olurdu: `read(2)` bir kullanici
+/// tamponuna yazarken sayfayi cogaltmadan, paylasan butun sureclerin
+/// gordugu cerceveyi degistirirdi. Acik olunca cekirdek yazmasi da hata
+/// uretir ve ayni COW yoluna girer.
+const CR0_WP: u32 = 1 << 16;
 
 /// Kullanici (Ring 3) bellek bolgesinin baslangici -- doc'taki
 /// `TCMK_USER_MEM_START` ile ayni deger.
@@ -102,7 +121,7 @@ pub unsafe fn init() {
     }
 
     write_cr3(pd as u32);
-    write_cr0(read_cr0() | CR0_PG);
+    write_cr0(read_cr0() | CR0_PG | CR0_WP);
 }
 
 /// Bir sanal adresin identity map icindeki PTE'sine isaretci dondurur.
@@ -327,30 +346,41 @@ pub unsafe fn map_user_frames(cr3: usize, vaddr: usize, phys: usize, len: usize)
             Some(e) => e,
             None => return false,
         };
-        entry.write((phys + i * PAGE_SIZE) as u32 | PTE_PRESENT | PTE_WRITABLE | PTE_USER);
+        entry.write(
+            (phys + i * PAGE_SIZE) as u32 | PTE_PRESENT | PTE_WRITABLE | PTE_USER | PTE_SHARED,
+        );
     }
 
     flush_tlb();
     true
 }
 
-/// Bir adres uzayinin kullanici bolgesini **icerigiyle birlikte**
-/// kopyalar (`fork`).
+/// Bir adres uzayinin kullanici bolgesini **copy-on-write** olarak
+/// cogaltir (`fork`).
 ///
-/// Kopyalama sanal adresler uzerinden yapilamaz: kaynak ve hedef ayni
-/// sanal adreste (0x00C00000) ama farkli CR3'lerde durur, yani ikisi ayni
-/// anda gorunmez. Bunun yerine **fiziksel** adresler kullanilir --
-/// cerceve havuzu cekirdegin identity haritasinin icinde oldugu icin
-/// (bkz. `frames`) her iki cerceveye de dogrudan yazilabilir. CR3
-/// degistirmek ya da gecici pencere esleme gerekmez.
+/// ## Neden kopyalanmiyor
 ///
-/// Kopyalanan sey ebeveynin yalnizca **var olan** sayfalaridir; hic
-/// dokunulmamis sayfalar cocukta da yoktur.
+/// Once tam kopya yapiliyordu: her sayfa icin yeni bir cerceve ayrilip
+/// icerik tasiniyordu. Dogru sonucu veriyordu ama `fork`'un bedeli
+/// eslenen alan kadardi -- ve `fork`'tan hemen sonra `execve` cagiran
+/// klasik kalipta o kopyanin tamami **aninda cope gidiyordu**.
 ///
-/// Not: bu **tam kopyadir**, copy-on-write degil. COW icin sayfalari salt
-/// okunur isaretleyip page fault'ta ayirmak gerekir; hata isleyicisi
-/// bunun icin ayri bir asamadir. Tam kopya, `fork` semantigi acisindan
-/// dogru sonucu verir -- yalnizca daha pahalidir.
+/// COW ayni sonucu erteleyerek verir: iki taraf da ayni cerceveye bakar,
+/// ikisinin de PTE'si **salt okunur** isaretlenir. Ilk yazma denemesi bir
+/// sayfa hatasi uretir; `handle_cow_fault` o sayfayi -- ve yalnizca onu --
+/// cogaltir. Dokunulmayan sayfa hic kopyalanmaz.
+///
+/// Salt okunur yapmak tek basina yetmez: gercekten salt okunur bir
+/// sayfadan ayirt edilmesi gerekir, bunun icin PTE'nin 9. biti
+/// (`PTE_COW`) kullanilir -- donanim o bitleri yok sayar.
+///
+/// **Ebeveynin sayfalari da** salt okunur yapilir. Yapilmasaydi ebeveyn
+/// paylasilan cerceveyi degistirir ve cocuk bunu gorurdu; `fork`'un tek
+/// vaadi olan "iki ayri bellek" cokerdi.
+///
+/// Pencere tamponlari (`PTE_SHARED`) cocuga **hic eslenmez**: cekirdege
+/// ait, havuz disi cercevelerdir ve cocuk pencereyi miras almaz (kendi
+/// penceresini actiginda ayni sanal adrese kendi tamponu eslenir).
 ///
 /// # Safety
 /// `src_cr3` bu modulun urettigi bir adres uzayi olmalidir.
@@ -367,11 +397,14 @@ pub unsafe fn clone_user_space(src_cr3: usize) -> Option<usize> {
         // Ebeveynin hic kullanici sayfasi yok; bos uzay dogru sonuctur.
         return Some(dst_cr3);
     }
-    let src_pt = (src_pde & !0xFFF) as *const u32;
+    let src_pt = (src_pde & !0xFFF) as *mut u32;
 
     for i in 0..ENTRIES {
         let entry = src_pt.add(i).read();
         if entry & PTE_PRESENT == 0 {
+            continue;
+        }
+        if entry & PTE_SHARED != 0 {
             continue;
         }
 
@@ -384,23 +417,107 @@ pub unsafe fn clone_user_space(src_cr3: usize) -> Option<usize> {
             }
         };
 
-        let frame = match frames::alloc() {
+        let frame = (entry & !0xFFF) as usize;
+
+        if frames::share(frame) {
+            // Iki taraf da ayni cerceveye, salt okunur bakar.
+            let shared = (entry & !PTE_WRITABLE) | PTE_COW;
+            src_pt.add(i).write(shared);
+            dst_entry.write(shared);
+            continue;
+        }
+
+        // Paylasilamadi (havuz disi cerceve ya da sayac tasti): eski yol.
+        let copy = match frames::alloc() {
             Some(f) => f,
             None => {
                 destroy_user_space(dst_cr3);
                 return None;
             }
         };
-
-        core::ptr::copy_nonoverlapping(
-            (entry & !0xFFF) as *const u8,
-            frame as *mut u8,
-            PAGE_SIZE,
-        );
-        dst_entry.write(frame as u32 | PTE_PRESENT | PTE_WRITABLE | PTE_USER);
+        core::ptr::copy_nonoverlapping(frame as *const u8, copy as *mut u8, PAGE_SIZE);
+        dst_entry.write(copy as u32 | PTE_PRESENT | PTE_WRITABLE | PTE_USER);
     }
 
+    // Ebeveynin girdileri degisti; eski (yazilabilir) ceviriler TLB'de
+    // kalirsa ilk yazma hatayi hic uretmez ve COW sessizce delinir.
+    flush_tlb();
     Some(dst_cr3)
+}
+
+/// Copy-on-write sayfa hatasini cozer; cozduyse `true` doner.
+///
+/// Sayfa hatasi isleyicisinden, **yazma** denemesinden dogan ve sayfanin
+/// var oldugu (koruma ihlali) hatalar icin cagrilir. COW sayfasi degilse
+/// `false` doner ve hata normal yoluna -- yani surecin sonlandirilmasina
+/// -- devam eder.
+///
+/// Iki dal var:
+///
+/// * **Son sahip** (referans 1): kopyalanacak kimse kalmamis, sayfa
+///   yalnizca yeniden yazilabilir yapilir. Bu dal olmasaydi her surec
+///   kendi sayfasini bir kez daha kopyalar, COW'un kazandirdigi yeri
+///   geri verirdi.
+/// * **Paylasan var**: yeni cerceve ayrilir, icerik tasinir, eski
+///   cerceveye olan referans birakilir.
+///
+/// # Safety
+/// Yalnizca sayfa hatasi isleyicisinden cagrilmalidir; o an yuklu olan
+/// adres uzayi uzerinde calisir.
+pub unsafe fn handle_cow_fault(vaddr: usize) -> bool {
+    let cr3 = read_cr3() as usize;
+    if cr3 == 0 || cr3 == kernel_cr3() {
+        return false;
+    }
+    let entry_ptr = match user_pte(cr3, vaddr) {
+        Some(e) => e,
+        None => return false,
+    };
+    let entry = entry_ptr.read();
+    if entry & PTE_PRESENT == 0 || entry & PTE_COW == 0 {
+        return false;
+    }
+
+    let frame = (entry & !0xFFF) as usize;
+
+    if frames::refcount(frame) <= 1 {
+        entry_ptr.write((entry & !PTE_COW) | PTE_WRITABLE);
+        flush_tlb();
+        frames::note_cow_reuse();
+        return true;
+    }
+
+    let copy = match frames::alloc() {
+        Some(f) => f,
+        None => return false, // havuz doldu: hata normal yoluna gitsin
+    };
+    core::ptr::copy_nonoverlapping(frame as *const u8, copy as *mut u8, PAGE_SIZE);
+    entry_ptr.write(copy as u32 | PTE_PRESENT | PTE_WRITABLE | PTE_USER);
+    frames::free(frame);
+    flush_tlb();
+    frames::note_cow_copy();
+    true
+}
+
+/// Bir adres uzayindaki copy-on-write sayfasi sayisi (kabuk raporu).
+pub fn cow_pages(cr3: usize) -> usize {
+    if cr3 == 0 || cr3 == kernel_cr3() {
+        return 0;
+    }
+    unsafe {
+        let pd = cr3 as *const u32;
+        let pde = pd.add(USER_PDE).read();
+        if pde & PTE_PRESENT == 0 {
+            return 0;
+        }
+        let pt = (pde & !0xFFF) as *const u32;
+        (0..ENTRIES)
+            .filter(|i| {
+                let e = pt.add(*i).read();
+                e & PTE_PRESENT != 0 && e & PTE_COW != 0
+            })
+            .count()
+    }
 }
 
 /// Bir surecin kullandigi kullanici sayfasi sayisi (kabuk raporu icin).

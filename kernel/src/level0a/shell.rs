@@ -728,6 +728,15 @@ fn execute(line: &str) {
             write_str(", bos ");
             write_num(frames::free_count() * 4 / 1024);
             write_line(" MiB)");
+            // Copy-on-write muhasebesi: `fork` sonrasi paylasilan
+            // cerceveler ve ilk yazmada gercekten kopyalananlar.
+            write_str("cow: ");
+            write_num(frames::shared());
+            write_str(" cerceve paylasik, ");
+            write_num(frames::cow_copies());
+            write_str(" kopya, ");
+            write_num(frames::cow_reuses());
+            write_line(" son-sahip");
             write_str("identity esleme: ");
             write_num(mmu::identity_mapped_bytes() / (1024 * 1024));
             write_line(" MiB");

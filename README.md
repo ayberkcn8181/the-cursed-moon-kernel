@@ -43,6 +43,7 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | — | **Kendi onyukleyicisi** + diske kurulum (`install`) | ✅ (i386) |
 | 8 | **`execve`** (surec kendi yerine program yukler) | ✅ (i386 + x86_64) |
 | 8 | **`fork`** (adres uzayi kopyasi + iki kez donen cagri) | ✅ (i386 + x86_64) |
+| 8 | **Copy-on-write `fork`** (referans sayaci, `CR0.WP`, #PF'te cogaltma) | ✅ (i386 + x86_64) |
 | 8 | **`waitpid`** (`Waiting` durumu, cikis kodu, `WNOHANG`, `-1`) | ✅ (i386 + x86_64) |
 | 8 | **Gorev yuvasi geri kazanimi** + zombi/oksuz toplama | ✅ |
 | 8 | **`pipe`** + surec basina fd tablosu | ✅ |
@@ -1351,6 +1352,79 @@ olan bir surec penceresini de dondurur, oysa buradaki uygulamalar kendi
 cizim dongulerini surer. `relay`'in ebeveyni her karede yoklar ve grafik
 akici kalir.
 
+## Copy-on-write `fork`
+
+`fork`'un tanimi "adres uzayini kopyala"dir, ama **kopyalamak** tanimin
+bir parcasi degil; gozlemlenebilir sonucun bir parcasi. Iki surec
+birbirinin bellegini goremesin yeter. Kopya, bu sonucu vermenin en kaba
+yoludur -- ve `fork`'tan hemen sonra `execve` cagiran klasik kalipta
+kopyanin tamami **aninda cope gider**.
+
+Copy-on-write ayni sonucu erteleyerek verir:
+
+```
+fork()   ->  iki adres uzayi AYNI cercevelere bakar
+             ikisinin de PTE'si salt okunur + PTE_COW
+ilk yazma ->  sayfa hatasi (#PF)
+             cekirdek O sayfayi -- yalnizca onu -- cogaltir
+             komut tekrarlanir, uygulama hicbir sey fark etmez
+```
+
+![copy-on-write](docs/screenshot-cow.png)
+
+### Olcum
+
+Ayni ikili (`twins`), ayni an: uygulama yuklendi ve catallandi, ebeveyn
+ve cocuk ikisi de yasiyor. Iki cekirdek, ayni taban (260 cerceve):
+
+| | `run twins` sonrasi | `fork`'un bedeli |
+|---|---|---|
+| tam kopya | 520 cerceve | **130 cerceve** (520 KiB) |
+| copy-on-write | 393 cerceve | **3 cerceve** (12 KiB) |
+
+Uygulamanin kendisi 130 cerceve (128 sayfa + sayfa dizini + tablo);
+gerisi `fork`. 43 kat ucuzladi. `mem` bunu dogrudan gosteriyor:
+**127 cerceve paylasik, 1 kopya, 1 son-sahip** -- 128 sayfadan yalnizca
+bir tanesine yazildi.
+
+### Uc ayrinti
+
+**Ebeveynin sayfalari da salt okunur yapilir.** Yapilmasaydi ebeveyn
+paylasilan cerceveyi degistirir ve cocuk bunu gorurdu; `fork`'un tek
+vaadi cokerdi. Ayrica `fork` sonunda TLB temizlenir: eski yazilabilir
+ceviri onbellekte kalirsa ilk yazma hatayi hic uretmez ve COW sessizce
+delinir.
+
+**`CR0.WP` acildi.** Bu bit kapaliyken **cekirdek** salt okunur sayfalara
+yazabilir. COW icin olumcul olurdu: `read(2)` bir kullanici tamponuna
+yazarken sayfayi cogaltmadan, paylasan butun sureclerin gordugu cerceveyi
+degistirirdi. Acik olunca cekirdek yazmasi da hata uretir ve ayni COW
+yoluna girer -- `waitpid`'in durum kelimesi, `poll`'un `revents` geri
+yazimi ve sinyal cercevesi bu yoldan geciyor.
+
+Bunun bir yan sonucu var: **vektor 14 artik geri donebilen tek
+istisnadir.** Digerleri `-> !` imzasiyla yazilir (hata olumcul, donus
+yok); sayfa hatasi ise bir hata olmak zorunda degil.
+
+**Son sahip kopyalamaz.** Referans 1'e dusmusse cogaltacak kimse yok,
+sayfa yalnizca yeniden yazilabilir yapilir. Bu dal olmasaydi her surec
+kendi sayfasini bir kez daha kopyalar, kazanilan yeri geri verirdi.
+Ekrandaki "1 son-sahip" tam olarak bu.
+
+### Sayacin ortaya cikardigi sizinti
+
+COW'un referans sayaci, uzun suredir orada duran bir hatayi gorunur
+kildi: **`fork` cocuklarinin adres uzayi hic birakilmiyordu.**
+
+`terminate_current` yalnizca gorev yuvasini geri verir, adres uzayini
+degil; kabuktan baslatilan uygulamalarda bunu `process::release_space`
+yapar, ama `fork` cocugu o yoldan gecmez. Tam kopya doneminde bu gorev
+basina ~130 cerceveydi ve fark edilmemisti -- `mem`'e bakan biri
+"uygulama calisiyor" diye dusunurdu.
+
+Sayac bunu saklayamadi: cocuk ciktiktan **sonra da** "cerceve paylasik"
+sayisi 127'de duruyordu. Duzeltmeden sonra ayni olcum 0 veriyor.
+
 ## `dup` / `dup2`: stdout'u baska bir yere baglamak
 
 Borular iki surecin konusmasini sagliyordu. `dup2` bunun uzerine ikinci
@@ -2121,9 +2195,9 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
   kullanici bolgesinin basina koyar; `/fixed:no` ile linklenmemis, yani
   yeniden yerlesim tablosu tasimayan bir ikili yuklenemez. Windows'ta bu
   ikilinin tercih ettigi tabana bagli olarak calisabilirdi.
-- **`fork` copy-on-write degil.** Sayfalar cagri aninda tamamen
-  kopyalanir; COW icin sayfalari salt okunur isaretleyip page fault'ta
-  ayirmak gerekir. Dogruluk degil, maliyet farki.
+- **Talep uzerine sayfalama yok.** `fork` copy-on-write (yukari bkz.)
+  ama ilk `execve` hala surec basina sabit 512 KiB'lik pencerenin
+  tamamini esler; hic dokunulmayacak sayfalar da cerceve tuketir.
 - **Boru okumasi bloke etmez** ve boru sayisi dorttur. `dup`/`dup2` ve
   `poll` var (yukari bkz.); `select` yok -- `poll` onu kapsadigi icin
   ayrica yazilmadi. `poll` bir bekleme kuyrugu degil, tik cozunurluklu
