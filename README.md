@@ -43,7 +43,8 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | — | **Kendi onyukleyicisi** + diske kurulum (`install`) | ✅ (i386) |
 | 8 | **`execve`** (surec kendi yerine program yukler) | ✅ (i386 + x86_64) |
 | 8 | **`fork`** (adres uzayi kopyasi + iki kez donen cagri) | ✅ (i386 + x86_64) |
-| 8 | **`waitpid`** (`Waiting` durumu, cikis kodu, `WNOHANG`) | ✅ (i386 + x86_64) |
+| 8 | **`waitpid`** (`Waiting` durumu, cikis kodu, `WNOHANG`, `-1`) | ✅ (i386 + x86_64) |
+| 8 | **Gorev yuvasi geri kazanimi** + zombi/oksuz toplama | ✅ |
 | 8 | **`pipe`** + surec basina fd tablosu | ✅ |
 | 8 | **Surec basina program break** (`brk`) + **`read(0)` = klavye** | ✅ |
 | 8 | **POSIX sinyalleri** (`kill`/`signal`/`sigreturn`, isleyici cagrisi) | ✅ (i386 + x86_64) |
@@ -73,7 +74,7 @@ Ekranda gorunenler:
   | bellek/disk | `mem` `disk` `df` `format onayla` `sync` `install onayla` |
   | dosya | `ls [dizin]` `mkdir <yol>` `rmdir <yol>` `cat <yol>` `save <yol> <metin>` `cp <kaynak> <hedef>` `rm <yol>` |
   | uygulama/pencere | `apps` `run <ad>` `win` `focus <id>` `mouse` |
-  | uygulamalar (ELF) | `paint` `plasma` `notes` `menu` `twins` `relay` `echo2` `sigdemo` `race` `crash` `hog` `spin` |
+  | uygulamalar (ELF) | `paint` `plasma` `notes` `menu` `twins` `relay` `echo2` `sigdemo` `race` `reaper` `crash` `hog` `spin` |
   | uygulamalar (PE) | `winclock` (ham `int 0x2E`) `winpad` (IAT) -- i386'da PE32, x86_64'te PE32+ |
   | diger | `echo <metin>` `pipes` `clear` `help` |
 - **Sistem Gunlugu** -- cekirdek kaydinin canli goruntusu (konsol halka
@@ -1348,6 +1349,47 @@ olan bir surec penceresini de dondurur, oysa buradaki uygulamalar kendi
 cizim dongulerini surer. `relay`'in ebeveyni her karede yoklar ve grafik
 akici kalir.
 
+## Gorev yuvasi geri kazanimi ve `waitpid(-1)`
+
+Gorev tablosu sekiz yuvalidir (`MAX_TASKS`). Uzun sure `spawn` yalnizca
+tablonun **sonuna ekliyordu**: sonlanan bir gorevin yuvasi hicbir zaman
+geri alinmiyordu. Yani sistem acilistan itibaren toplam sekiz gorev
+baslatabiliyor, sonra hicbir uygulama acilamiyordu -- kalici bir sinir
+degil, sizan bir kaynak.
+
+Artik yuva geri veriliyor. Yigin bellegi **birakilmiyor**, yuvada
+saklaniyor ve bir sonraki `spawn` onu yeniden kullaniyor: `kmalloc` bir
+bump ayiricidir ve `free` sunmaz, yani her geri kazanimda yeniden
+ayirmak gorev basina 32 KiB'lik sessiz bir sizinti olurdu.
+
+Ne zaman geri verilecegi, gorevi kimin bekledigine bagli:
+
+| gorev turu | cikista |
+|---|---|
+| kabuktan baslatilan uygulama | yuva **hemen** geri verilir |
+| `fork` cocugu | **zombi** kalir, `waitpid` toplayana kadar |
+| ebeveyni olmus zombi | `reap_orphans` temizler |
+
+Ayrim bilincli: cikis kodunu toplayacak bir ebeveyn yalnizca `fork`
+yolunda vardir. Kabuktan baslatilan uygulamalari kimse beklemez, onlari
+zombi tutmak tabloyu birkac uygulama sonra doldururdu.
+
+### `waitpid(-1)`
+
+POSIX'in en cok kullanilan bicimi: "hangi cocuk once biterse onu topla".
+Bir kabuk cocuklarinin hangisinin once bitecegini bilmez.
+
+![reaper](docs/screenshot-reaper.png)
+
+`reaper` sirayla uc cocuk uretir ve her birini `waitpid(-1)` ile toplar.
+Ekrandaki `pid` sutununun kaniti tam da burada: **ucu de ayni yuvada**
+(#5) dogdu -- yuva geri kazanilmasaydi ucuncusu icin yer kalmazdi.
+
+Olcum, iki mimaride de: `reaper`in uc cocugundan sonra ardi ardina **on**
+uygulama daha baslatildi ve hepsi yuklendi (`/bin/hello`, 11 yukleme --
+biri acilistaki dogrulama). Duzeltmeden once bes canli gorev varken bu
+sayi sifir olurdu.
+
 ## Sinyaller: cekirdek uygulamanin akisini kesip isleyicisini cagiriyor
 
 Butun diger sistem cagrilarinda **kullanici cagirir, cekirdek doner**.
@@ -1954,9 +1996,9 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
   (`sigprocmask`), `siginfo`/`sigaction` bayraklari, `alarm` ve
   gercek-zamanli sinyaller yok; isleyici icinde ikinci bir sinyal teslim
   edilmez (ic ice cagri yok).
-- **`waitpid` yalnizca belirli bir cocugu bekler.** `pid = -1` ("herhangi
-  bir cocuk") ve surec gruplari yok; oksuz kalan gorevler de
-  toplanmiyor -- gorev yuvasi surec bitse de tabloda kalir.
+- **Surec gruplari yok.** `waitpid` belirli bir cocugu ve `-1`
+  ("herhangi bir cocuk") bicimlerini destekler, ama `pid < -1` (surec
+  grubu) ve `WUNTRACED`/`WCONTINUED` yok.
 - **Surec basina 512 KiB eslenir**, talep uzerine sayfalama yok.
 - **TCMKFS'te toplam 64 inode var** (dizinler de sayilir), dosya basina
   160 KiB (yalnizca dogrudan blok isaretcileri) ve azami 8 seviye

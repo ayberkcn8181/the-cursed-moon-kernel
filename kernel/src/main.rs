@@ -90,6 +90,9 @@ static SIGDEMO_ELF: &[u8] = include_bytes!("../../userland/sigdemo.elf");
 /// Oncelik gosterimi: iki kopya farkli `nice` ile yarisir.
 #[cfg(target_arch = "x86")]
 static RACE_ELF: &[u8] = include_bytes!("../../userland/race.elf");
+/// waitpid(-1) ve gorev yuvasi geri kazanimi gosterimi.
+#[cfg(target_arch = "x86")]
+static REAPER_ELF: &[u8] = include_bytes!("../../userland/reaper.elf");
 
 /// Linux (ELF64, x86_64) kullanici programi -- `tools/gen_hello_elf64.py`.
 /// Elle kodlanmis en kucuk ELF64: yukleyicinin dar yolunu sinar.
@@ -121,6 +124,8 @@ static ECHO2_64: &[u8] = include_bytes!("../../userland/echo2.elf64");
 static SIGDEMO64: &[u8] = include_bytes!("../../userland/sigdemo.elf64");
 #[cfg(target_arch = "x86_64")]
 static RACE64: &[u8] = include_bytes!("../../userland/race.elf64");
+#[cfg(target_arch = "x86_64")]
+static REAPER64: &[u8] = include_bytes!("../../userland/reaper.elf64");
 
 /// **Windows (PE32+) uygulamalari** -- i386'dakilerle ayni kaynak, ayni
 /// ithal kutuphaneleri; degisen yalnizca hedef. Taban 0x140000000
@@ -151,6 +156,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/echo2", ECHO2_ELF),
     ("/bin/sigdemo", SIGDEMO_ELF),
     ("/bin/race", RACE_ELF),
+    ("/bin/reaper", REAPER_ELF),
     ("/bin/winclock.exe", WINCLOCK_EXE),
     ("/bin/winpad.exe", WINPAD_EXE),
     ("/boot/msg.txt", BOOT_MSG),
@@ -170,6 +176,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/echo2", ECHO2_64),
     ("/bin/sigdemo", SIGDEMO64),
     ("/bin/race", RACE64),
+    ("/bin/reaper", REAPER64),
     ("/bin/winclock.exe", WINCLOCK_EXE64),
     ("/bin/winpad.exe", WINPAD_EXE64),
     ("/boot/msg.txt", BOOT_MSG),

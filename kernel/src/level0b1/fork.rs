@@ -66,7 +66,7 @@ pub unsafe fn fork(frame: &SyscallFrame) -> Result<usize, ForkError> {
     let child_space = mmu::clone_user_space(parent_space).ok_or(ForkError::OutOfResources)?;
 
     // 2. Cocugun gorevini olustur. Basarisiz olursa yeni uzay sizmamali.
-    let child = match scheduler::spawn("fork", child_task) {
+    let child = match scheduler::spawn_child("fork", child_task) {
         Some(id) => id,
         None => {
             mmu::destroy_user_space(child_space);

@@ -78,6 +78,21 @@ pub struct Task {
     /// Bu gorevin dilim icinde kalan tik hakki. Sifirlandiginda
     /// zamanlayici kesmesi baglam degisimi ister.
     pub credits: u32,
+    /// Gorevi olusturan gorev. `waitpid(-1)` "cocuklarimdan herhangi
+    /// biri" sorusunu bununla cevaplar.
+    pub parent: usize,
+    /// Sonlandiginda **zombi** olarak beklesin mi?
+    ///
+    /// Yalnizca `fork` cocuklari icin dogrudur: cikis kodunu toplayacak
+    /// bir ebeveyn ancak orada vardir. Kabuktan baslatilan uygulamalari
+    /// kimse beklemez, o yuzden onlarin yuvasi cikista hemen geri alinir
+    /// -- aksi halde gorev tablosu birkac uygulama sonra dolardi.
+    pub waitable: bool,
+    /// Cekirdek yiginin TEPESI. Yuva geri kazanildiginda yigin yeniden
+    /// ayrilmaz, ayni bellek `bootstrap_stack` ile bastan kurulur --
+    /// `kmalloc` bir bump ayiricidir ve `free` sunmaz, yani yeniden
+    /// ayirmak sizinti demek olurdu.
+    pub stack_top: usize,
     /// Gorevin CPU'da gecirdigi toplam tik. Oncelik gercekten ise
     /// yariyor mu sorusunun tek dogru cevabi budur -- uygulamanin kendi
     /// sayaci uyku/G-C ile bozulabilir, bu sayac bozulmaz.
@@ -99,6 +114,9 @@ impl Task {
             nice: 0,
             credits: 0,
             cpu_ticks: 0,
+            parent: 0,
+            waitable: false,
+            stack_top: 0,
             exit_code: 0,
         }
     }
@@ -131,28 +149,72 @@ pub fn init() {
 /// Yeni bir cekirdek gorevi olusturur; yigini kmalloc'tan alinir.
 /// Basarisizlik nedenleri: gorev tablosu dolu veya heap tukendi.
 pub fn spawn(name: &'static str, entry: extern "C" fn() -> !) -> Option<usize> {
+    spawn_inner(name, entry, false)
+}
+
+/// `fork` icin: cocuk **beklenebilir** olarak isaretlenir, yani cikis
+/// kodu toplanana kadar zombi olarak kalir.
+pub fn spawn_child(name: &'static str, entry: extern "C" fn() -> !) -> Option<usize> {
+    spawn_inner(name, entry, true)
+}
+
+fn spawn_inner(
+    name: &'static str,
+    entry: extern "C" fn() -> !,
+    waitable: bool,
+) -> Option<usize> {
     crate::arch::cpu::without_interrupts(|| unsafe {
-        let index = TASK_COUNT.load(Ordering::Relaxed);
-        if index >= MAX_TASKS {
-            return None;
+        let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+
+        // Once bosalmis bir yuva aranir. Onceki surum yalnizca tablonun
+        // sonuna EKLIYORDU: sonlanan gorevlerin yuvasi hicbir zaman geri
+        // alinmiyordu, yani sistem toplam MAX_TASKS kadar gorev
+        // baslatabiliyor ve sonra hicbir uygulama acilamiyordu.
+        let mut index = usize::MAX;
+        let count = TASK_COUNT.load(Ordering::Relaxed);
+        for i in 0..count {
+            if (*tasks.add(i)).state == TaskState::Unused {
+                index = i;
+                break;
+            }
+        }
+        if index == usize::MAX {
+            if count >= MAX_TASKS {
+                return None;
+            }
+            index = count;
+            TASK_COUNT.store(count + 1, Ordering::Relaxed);
         }
 
-        let stack = kmalloc::kmalloc_aligned(TASK_STACK_SIZE, 16)?;
-        let stack_top = stack.add(TASK_STACK_SIZE) as *mut usize;
-        let sp = bootstrap_stack(stack_top, entry);
+        // Yigin: yuva daha once kullanildiysa ayni bellek yeniden kurulur.
+        // `kmalloc` bir bump ayiricidir ve `free` sunmaz -- her geri
+        // kazanimda yeniden ayirmak, gorev basina 32 KiB'lik sessiz bir
+        // sizinti olurdu.
+        let (stack_top, kstack_top) = if (*tasks.add(index)).stack_top != 0 {
+            (
+                (*tasks.add(index)).stack_top,
+                (*tasks.add(index)).kernel_stack_top,
+            )
+        } else {
+            let stack = kmalloc::kmalloc_aligned(TASK_STACK_SIZE, 16)?;
+            let kstack = kmalloc::kmalloc_aligned(TASK_STACK_SIZE, 16)?;
+            (
+                stack.add(TASK_STACK_SIZE) as usize,
+                kstack.add(TASK_STACK_SIZE) as usize,
+            )
+        };
 
-        // Ring 3 gecisleri icin AYRI bir cekirdek yigini.
-        let kstack = kmalloc::kmalloc_aligned(TASK_STACK_SIZE, 16)?;
-        let kstack_top = kstack.add(TASK_STACK_SIZE) as usize;
+        let sp = bootstrap_stack(stack_top as *mut usize, entry);
 
-        let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
         // Donem hakki BASLANGICTA verilmeli. Sifir birakilirsa gorev,
         // secimde "hakki yok" diye atlanir ve ilk donem yenilenene kadar
         // hic kosmaz -- yeni surecin dogar dogmaz ac kalmasi demektir.
         (*tasks.add(index)).nice = 0;
         (*tasks.add(index)).credits = slice_ticks(0);
+        (*tasks.add(index)).cpu_ticks = 0;
         (*tasks.add(index)).state = TaskState::Ready;
         (*tasks.add(index)).stack_pointer = sp;
+        (*tasks.add(index)).stack_top = stack_top;
         (*tasks.add(index)).name = name;
         (*tasks.add(index)).kernel_stack_top = kstack_top;
         (*tasks.add(index)).user_resume = 0;
@@ -161,10 +223,50 @@ pub fn spawn(name: &'static str, entry: extern "C" fn() -> !) -> Option<usize> {
         (*tasks.add(index)).wake_tick = 0;
         (*tasks.add(index)).wait_for = 0;
         (*tasks.add(index)).exit_code = 0;
+        (*tasks.add(index)).parent = CURRENT.load(Ordering::Relaxed);
+        (*tasks.add(index)).waitable = waitable;
 
-        TASK_COUNT.store(index + 1, Ordering::Relaxed);
         Some(index)
     })
+}
+
+/// Sonlanmis bir gorevin yuvasini geri verir.
+///
+/// Yigin bellegi **birakilmaz**, yuvada saklanir: bir sonraki `spawn` onu
+/// yeniden kullanir (bkz. `spawn_inner`).
+fn release_slot(index: usize) {
+    unsafe {
+        let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+        (*tasks.add(index)).state = TaskState::Unused;
+        (*tasks.add(index)).waitable = false;
+        (*tasks.add(index)).wait_for = 0;
+        (*tasks.add(index)).credits = 0;
+        (*tasks.add(index)).name = "";
+    }
+}
+
+/// Ebeveyni artik var olmayan zombileri temizler.
+///
+/// Zombi, cikis kodu toplansin diye bekleyen sonlanmis bir gorevdir. Onu
+/// toplayacak ebeveyn de olduyse kimse toplamayacak demektir; yuva
+/// sonsuza kadar tutulmamalidir.
+fn reap_orphans() {
+    let count = TASK_COUNT.load(Ordering::Relaxed);
+    unsafe {
+        let tasks = core::ptr::addr_of!(TASKS) as *const Task;
+        for i in 0..count {
+            if (*tasks.add(i)).state != TaskState::Terminated || !(*tasks.add(i)).waitable {
+                continue;
+            }
+            let parent = (*tasks.add(i)).parent;
+            let parent_alive = parent < count
+                && (*tasks.add(parent)).state != TaskState::Unused
+                && (*tasks.add(parent)).state != TaskState::Terminated;
+            if !parent_alive {
+                release_slot(i);
+            }
+        }
+    }
 }
 
 /// PIT kesmesinden cagrilir: zaman dilimi doldu bayragini kaldirir.
@@ -455,6 +557,13 @@ pub fn terminate_current() -> ! {
         let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
         let current = CURRENT.load(Ordering::Relaxed);
         (*tasks.add(current)).state = TaskState::Terminated;
+        // Kimse beklemeyecekse yuva hemen geri verilir. Beklenebilir
+        // olanlar (fork cocuklari) `wait_for_task` toplayana kadar zombi
+        // kalir; ebeveyni de oldulerse `reap_orphans` temizler.
+        if !(*tasks.add(current)).waitable {
+            release_slot(current);
+        }
+        reap_orphans();
     });
 
     loop {
@@ -740,6 +849,9 @@ pub fn terminate(index: usize) -> Result<(), &'static str> {
                 (*tasks.add(index)).state = TaskState::Terminated;
                 let space = (*tasks.add(index)).address_space;
                 (*tasks.add(index)).address_space = 0;
+                if !(*tasks.add(index)).waitable {
+                    release_slot(index);
+                }
                 Ok(space)
             }
         }
@@ -836,9 +948,11 @@ pub fn wait_for_task(child: usize) -> Option<u32> {
         return None;
     }
 
-    // Zaten bitmisse beklemeye gerek yok.
+    // Zaten bitmisse beklemeye gerek yok; toplandigi icin yuva serbest.
     if state_of(child) == TaskState::Terminated {
-        return Some(exit_code_of(child));
+        let code = exit_code_of(child);
+        crate::arch::cpu::without_interrupts(|| release_slot(child));
+        return Some(code);
     }
 
     crate::arch::cpu::without_interrupts(|| unsafe {
@@ -847,8 +961,9 @@ pub fn wait_for_task(child: usize) -> Option<u32> {
         (*tasks.add(current)).state = TaskState::Waiting;
     });
 
-    // Idle her zaman hazir oldugu icin `yield_now` mutlaka baska bir
-    // goreve gecer; dongu ancak cocuk bitince kirilir.
+    // Bekleyen gorev `Waiting` durumunda oldugu icin zamanlanmaz; dongu
+    // ancak cocuk bitince kirilir. Baska hicbir sey kosmuyorsa `yield_now`
+    // idle'i secer, o da bir sonraki kesmeye kadar bekler.
     loop {
         yield_now();
         if state_of(child) == TaskState::Terminated {
@@ -856,7 +971,86 @@ pub fn wait_for_task(child: usize) -> Option<u32> {
         }
     }
 
-    Some(exit_code_of(child))
+    let code = exit_code_of(child);
+    crate::arch::cpu::without_interrupts(|| release_slot(child));
+    Some(code)
+}
+
+/// `waitpid(-1)`: cagiranin **herhangi bir** cocugunu bekler.
+///
+/// Once sonlanmis bir cocuk aranir (varsa hemen toplanir); yoksa canli
+/// bir cocuk bulunup onun bitmesi beklenir. Hic cocuk yoksa `None`
+/// doner -- POSIX'te bu `ECHILD`'dir.
+pub fn wait_for_any() -> Option<(usize, u32)> {
+    let current = CURRENT.load(Ordering::Relaxed);
+    let count = TASK_COUNT.load(Ordering::Relaxed);
+
+    // 1. Zaten bitmis bir cocuk var mi?
+    for i in 0..count {
+        if i == current {
+            continue;
+        }
+        unsafe {
+            let tasks = core::ptr::addr_of!(TASKS) as *const Task;
+            if (*tasks.add(i)).parent == current
+                && (*tasks.add(i)).state == TaskState::Terminated
+            {
+                let code = exit_code_of(i);
+                crate::arch::cpu::without_interrupts(|| release_slot(i));
+                return Some((i, code));
+            }
+        }
+    }
+
+    // 2. Canli bir cocuk bul ve onu bekle.
+    for i in 0..count {
+        if i == current {
+            continue;
+        }
+        let is_child = unsafe {
+            let tasks = core::ptr::addr_of!(TASKS) as *const Task;
+            (*tasks.add(i)).parent == current
+                && (*tasks.add(i)).state != TaskState::Unused
+        };
+        if is_child {
+            return wait_for_task(i).map(|code| (i, code));
+        }
+    }
+
+    None
+}
+
+/// Bitmis bir cocugu bekleMEDEN toplar (`waitpid` + `WNOHANG`).
+pub fn reap_finished_child(parent: usize) -> Option<(usize, u32)> {
+    let count = TASK_COUNT.load(Ordering::Relaxed);
+    for i in 0..count {
+        if i == parent {
+            continue;
+        }
+        let finished = unsafe {
+            let tasks = core::ptr::addr_of!(TASKS) as *const Task;
+            (*tasks.add(i)).parent == parent && (*tasks.add(i)).state == TaskState::Terminated
+        };
+        if finished {
+            let code = exit_code_of(i);
+            crate::arch::cpu::without_interrupts(|| release_slot(i));
+            return Some((i, code));
+        }
+    }
+    None
+}
+
+/// Cagiranin toplanmamis cocugu var mi (`waitpid` icin ECHILD ayrimi)?
+pub fn has_children(index: usize) -> bool {
+    let count = TASK_COUNT.load(Ordering::Relaxed);
+    unsafe {
+        let tasks = core::ptr::addr_of!(TASKS) as *const Task;
+        (0..count).any(|i| {
+            i != index
+                && (*tasks.add(i)).parent == index
+                && (*tasks.add(i)).state != TaskState::Unused
+        })
+    }
 }
 
 /// Baska bir gorevin adres uzayini kaydeder.

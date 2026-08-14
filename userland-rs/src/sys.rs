@@ -263,6 +263,12 @@ pub fn fork() -> isize {
 /// `waitpid` secenegi: cocuk bitmemisse bekleme, 0 don.
 pub const WNOHANG: usize = 1;
 
+/// `waitpid(WAIT_ANY, ...)`: hangi cocuk once biterse onu topla.
+///
+/// POSIX'te bu -1'dir; arguman isaretsiz gectigi icin tum bitleri bir
+/// olan deger kullanilir.
+pub const WAIT_ANY: usize = usize::MAX;
+
 /// Bir cocuk surecin bitmesini bekler.
 ///
 /// Donus: cocugun kimligi, ya da `WNOHANG` verilip cocuk hala

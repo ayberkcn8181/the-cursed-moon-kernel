@@ -115,6 +115,15 @@ const PRIO_PROCESS: usize = 0;
 /// `waitpid` secenegi: cocuk bitmemisse bloke olma, 0 don.
 const WNOHANG: usize = 1;
 
+/// `waitpid(-1, ...)`: herhangi bir cocuk. Arguman isaretsiz geldigi icin
+/// -1, tum bitleri bir olan degerdir.
+const WAIT_ANY: usize = usize::MAX;
+
+/// Negatif errno'yu cerceveye yazar (isaretli genisletme ile).
+fn return_errno(frame: &mut SyscallFrame, errno: i32) {
+    frame.set_return(errno as isize as usize);
+}
+
 /// `waitpid`'in durum kelimesini kullaniciya yazar.
 ///
 /// Linux kodlamasi: normal cikista `status = (kod & 0xFF) << 8`, boylece
@@ -212,6 +221,42 @@ pub fn dispatch(frame: &mut SyscallFrame) {
             let child = arg1;
             let status_ptr = arg2;
             let nohang = arg3 & WNOHANG != 0;
+
+            // pid = -1: "herhangi bir cocuk". POSIX'in en cok kullanilan
+            // bicimi budur; bir kabuk cocuklarinin hangisinin once
+            // bitecegini bilmez.
+            if child == WAIT_ANY {
+                let me = crate::level0a::core::scheduler::current_id();
+                if !crate::level0a::core::scheduler::has_children(me) {
+                    return_errno(frame, -ECHILD);
+                    return;
+                }
+                if nohang {
+                    // Bitmis cocuk varsa topla, yoksa 0.
+                    match crate::level0a::core::scheduler::reap_finished_child(me) {
+                        Some((pid, code)) => {
+                            if !store_status(status_ptr, code) {
+                                return_errno(frame, -EFAULT);
+                            } else {
+                                frame.set_return(pid);
+                            }
+                        }
+                        None => frame.set_return(0),
+                    }
+                    return;
+                }
+                match crate::level0a::core::scheduler::wait_for_any() {
+                    Some((pid, code)) => {
+                        if !store_status(status_ptr, code) {
+                            return_errno(frame, -EFAULT);
+                        } else {
+                            frame.set_return(pid);
+                        }
+                    }
+                    None => return_errno(frame, -ECHILD),
+                }
+                return;
+            }
 
             if child >= crate::level0a::core::scheduler::task_count() {
                 -ECHILD
