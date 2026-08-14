@@ -41,6 +41,7 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 9b | **TCMKFS dizinleri** (gercek agac, `mkdir`/`rmdir`) | ✅ |
 | 9d | **Calisma dizini** (`cd`/`pwd`, `.`/`..`, goreli yollar) | ✅ |
 | 9c | **IRQ14**: disk kesmeyle bekler (`TaskState::IoWait`) | ✅ |
+| 7e | **`WriteFile`**: PE ikilisi diske yazar (`CreateFileA`+`WriteFile`) | ✅ (PE32 + PE32+) |
 | — | **Kendi onyukleyicisi** + diske kurulum (`install`) | ✅ (i386) |
 | 8 | **`execve`** (surec kendi yerine program yukler) | ✅ (i386 + x86_64) |
 | 8 | **`fork`** (adres uzayi kopyasi + iki kez donen cagri) | ✅ (i386 + x86_64) |
@@ -1039,13 +1040,24 @@ Iki incelik:
 * **Kacirilmis uyandirma.** Kesme, gorev `IoWait`'e gecmeden hemen once
   gelebilir. `wait_for_io` bu yuzden uyumadan once kosulu kesmeler kapaliyken
   bir kez daha denetler; aksi halde surec sonsuza kadar beklerdi.
-* **Kesme hic gelmezse.** Sure dolunca yoklama yoluna dusulur. Yani kesme
-  bir **hizlandirici**dir, tek dogruluk kaynagi degil; arizali bir aygit
-  sistemi kilitlemez.
+* **Kesme hic gelmezse.** Uyanma kosulu iki seydir: kesme geldi, **ya da
+  aygit artik mesgul degil**. Ikincisi olmadan bekleme kesmeye bagimli
+  hale geliyordu -- ve olculdu ki QEMU'da IRQ14 sayaci acilistaki birinci
+  kesmeden sonra hic artmiyor. O halde her bekleme zaman asimi suresince
+  (iki saniye) bosuna suruyor, Ring 3'ten yapilan bir kaydetme onlarca
+  saniye aliyor ve uygulama donmus gorunuyordu. Yoklama `ALT_STATUS`
+  uzerinden yapilir: onu okumak aygitin kesme bayragini **temizlemez**,
+  yani yoklama kesme yolunu bozmaz. Modul basligindaki "kesme bir
+  hizlandiricidir, tek dogruluk kaynagi degil" ifadesi ancak bu satirla
+  gercekten dogru.
 
-Iki yer bilerek yoklamada kaldi: acilis (zamanlayici henuz yok) ve **idle
-gorevi** -- ki o gorev ayni zamanda masaustu dongusudur, uyutmak ekrani
-dondururdu. Kabuktan verilen disk komutlari bu yola duser.
+Iki yer bilerek yoklamada kaldi: acilis (zamanlayici henuz yok) ve
+**uyutulamayan gorevler** -- idle ve masaustu. Masaustu ekrani cizen,
+girdiyi dagitan ve kabugu kosturan gorevdir; uyutmak butun arayuzu
+dondururdu. Bu ayrim zamanlayicida tutulur (`scheduler::can_block`),
+surucude degil: eskiden surucu "gorev 0 mi?" diye bakiyordu ve masaustu
+ayri bir goreve tasindiginda sessizce yanlis cevap vermeye basladi --
+kabuktan verilen ilk disk yazmasi butun masaustunu donduruyordu.
 
 ```
 tcmk> df
@@ -1355,6 +1367,28 @@ TCMK'de okuma bloke etmez; veri yoksa `0` doner. Nedeni GUI'dir: bloke
 olan bir surec penceresini de dondurur, oysa buradaki uygulamalar kendi
 cizim dongulerini surer. `relay`'in ebeveyni her karede yoklar ve grafik
 akici kalir.
+
+## `WriteFile`: Windows ikilisi artik diske yaziyor
+
+`KERNEL32.dll` tablosunda `CreateFileA` ve `ReadFile` vardi; **`WriteFile`
+yoktu.** Yani PE uygulamalari dosya okuyabiliyor ama yazamiyordu.
+`winpad` notunu `WriteConsoleA`'ya bir dosya tutamagi vererek
+kaydediyordu -- calisiyordu (ikisi de ayni `kernel_api::write`'a iner)
+ama Win32 sozlesmesi degildi: `WriteConsoleA`'nin dorduncu parametresi
+"yazilan **karakter** sayisi"dir ve konsol icin tanimlidir. Uygulamanin
+kendi yorumu bunu zaten itiraf ediyordu.
+
+![WriteFile](docs/screenshot-writefile.png)
+
+Artik dizi tam: `CreateFileA` -> `WriteFile` -> `CloseHandle`. Windows'ta
+bir dosyayi kaydetmenin gercek yolu budur ve `lpNumberOfBytesWritten`
+cikti parametresi de dolduruluyor -- uygulama onu dogruluyor.
+
+Dogrulama iki mimaride de ayni: `winpad` (PE32 ve PE32+) nota yazdi,
+sistem yeniden basladi, kabuk `cat /winpad.txt` ile geri okudu ve
+`winpad` acilista `ReadFile` ile ayni metni buldu.
+
+`KERNEL32.dll` artik **8 fonksiyon** bagliyor (biri ordinal ile).
 
 ## Calisma dizini ve `.` / `..`
 

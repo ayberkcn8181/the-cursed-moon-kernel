@@ -145,8 +145,25 @@ fn await_irq() {
     if !crate::level0a::core::scheduler::current_can_block() {
         return;
     }
+    // Uyanma kosulu **iki** sey: kesme geldi, YA DA aygit artik mesgul
+    // degil.
+    //
+    // Ikincisi olmadan bekleme kesmeye bagimli hale geliyordu -- ve
+    // kesme gelmedigi ortamlarda (olculdu: IRQ14 sayaci acilistaki
+    // birinci kesmeden sonra hic artmiyor) her bekleme zaman asimi
+    // suresince, iki saniye, bosuna suruyordu. Ring 3'ten yapilan bir
+    // kaydetme boylece onlarca saniye aliyor, uygulama donmus
+    // gorunuyordu.
+    //
+    // `ALT_STATUS` bilerek: onu okumak aygitin kesme bayragini
+    // TEMIZLEMEZ, yani yoklama kesme yolunu bozmaz. Modul basligindaki
+    // "kesme bir hizlandiricidir, tek dogruluk kaynagi degil" ifadesi
+    // ancak bu satirla gercekten dogru oluyor.
     crate::level0a::core::scheduler::wait_for_io(
-        || IRQ_SEEN.load(Ordering::SeqCst),
+        || {
+            IRQ_SEEN.load(Ordering::SeqCst)
+                || unsafe { inb(ALT_STATUS) } & STATUS_BSY == 0
+        },
         IO_TIMEOUT_TICKS,
     );
     IRQ_SEEN.store(false, Ordering::SeqCst);

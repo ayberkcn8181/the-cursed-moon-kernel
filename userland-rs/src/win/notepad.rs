@@ -7,8 +7,9 @@
 //! yapidadir -- ithal tablosunu cozmeyen bir cekirdek bunu calistiramaz.
 //!
 //! Yaptigi is: kucuk bir metin defteri. Yazilanlar `CreateFileA` +
-//! `WriteConsoleA` ile TCMKFS'e yazilir, acilista `CreateFileA` +
-//! `ReadFile` ile geri okunur.
+//! `WriteFile` ile TCMKFS'e yazilir, acilista `CreateFileA` +
+//! `ReadFile` ile geri okunur -- Windows'ta bir dosyayi kaydetmenin ve
+//! geri okumanin tam dizisi.
 //!
 //! Tuslar:  yazi,  BACKSPACE,  `~` -> kaydet,  ESC -> cik
 
@@ -67,7 +68,19 @@ fn main() {
             0 => {}
             0x1B => break, // ESC
             b'~' | b'`' => {
-                if save(&buffer) {
+                // Kaydetme denemesi konsola da yazilir: kaydin
+                // gerceklesip gerceklesmedigi ekrandan bagimsiz olarak
+                // seri gunlukten dogrulanabilsin.
+                let ok = save(&buffer);
+                let _ = core::fmt::Write::write_str(
+                    &mut console,
+                    if ok {
+                        "[winpad] WriteFile: kaydedildi.\n"
+                    } else {
+                        "[winpad] WriteFile: YAZILAMADI.\n"
+                    },
+                );
+                if ok {
                     status = "kaydedildi";
                     status_color = OK;
                 } else {
@@ -144,12 +157,13 @@ fn draw(win: &mut Window, buffer: &Buffer, status: &str, status_color: u32) {
     win.glyph(rx, h - 18, b's', ACCENT);
 }
 
-/// Notu diske yazar -- `CreateFileA` + `WriteConsoleA` + `CloseHandle`.
+/// Notu diske yazar -- `CreateFileA` + `WriteFile` + `CloseHandle`.
 ///
-/// `WriteConsoleA` adi konsola ozgu gorunse de tutamac bir dosya olabilir;
-/// TCMK'de her ikisi de ayni `kernel_api::write`'a iner. Windows'ta bunun
-/// dogru adi `WriteFile` olurdu, ama o cagrinin cikti parametresi ayni
-/// bicimde calistigi icin fark yalnizca isimdedir.
+/// Bu, Windows'ta bir dosyayi kaydetmenin **tam** dizisidir. Onceden
+/// yazma `WriteConsoleA` ile yapiliyordu: tutamac bir dosya olabildigi ve
+/// TCMK'de ikisi de ayni `kernel_api::write`'a indigi icin calisiyordu,
+/// ama sozlesme yanlisti -- `WriteConsoleA`nin dorduncu parametresi
+/// "yazilan **karakter** sayisi"dir ve konsol icin tanimlidir.
 fn save(buffer: &Buffer) -> bool {
     let mut name = [0u8; 32];
     name[..PATH.len()].copy_from_slice(PATH.as_bytes());
@@ -171,7 +185,7 @@ fn save(buffer: &Buffer) -> bool {
 
     let mut written: winapi::Dword = 0;
     let ok = unsafe {
-        winapi::WriteConsoleA(
+        winapi::WriteFile(
             handle,
             buffer.bytes.as_ptr(),
             buffer.len as winapi::Dword,

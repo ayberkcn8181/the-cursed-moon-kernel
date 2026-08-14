@@ -65,6 +65,7 @@ pub const NT_WIN32_CLOSE_HANDLE: u32 = 0x3003;
 pub const NT_WRITE_CONSOLE_A: u32 = 0x3004;
 pub const NT_CREATE_FILE_A: u32 = 0x3005;
 pub const NT_READ_FILE_WIN32: u32 = 0x3006;
+pub const NT_WRITE_FILE_WIN32: u32 = 0x3007;
 
 pub const NT_USER_CREATE_WINDOW_W32: u32 = 0x3010;
 pub const NT_GDI_GET_BITS_W32: u32 = 0x3011;
@@ -406,6 +407,32 @@ fn dispatch_win32_api(frame: &mut SyscallFrame) {
                     match unsafe { kernel_api::read(handle, buffer as *mut u8, count as usize) } {
                         Ok(read) => {
                             store_out(args, 3, read as u32);
+                            WIN32_TRUE
+                        }
+                        Err(_) => WIN32_FALSE,
+                    }
+                }
+                _ => WIN32_FALSE,
+            }
+        }
+
+        NT_WRITE_FILE_WIN32 => {
+            // WriteFile(hFile, lpBuffer, nBytes, lpBytesWritten, lpOverlapped)
+            //
+            // `ReadFile`in aynadaki esi. Bu cagriya kadar Windows
+            // uygulamalari dosya **okuyabiliyor ama yazamiyordu**;
+            // `winpad` notunu `WriteConsoleA`'ya bir dosya tutamagi
+            // vererek kaydediyordu -- calisiyordu, cunku ikisi de ayni
+            // `kernel_api::write`e iniyor, ama Win32 sozlesmesi degildi:
+            // `WriteConsoleA`nin dorduncu parametresi "yazilan karakter
+            // sayisi"dir ve konsol icin tanimlidir, dosya icin degil.
+            match (arg(args, 0), arg_ptr(args, 1), arg(args, 2)) {
+                (Some(handle), Some(buffer), Some(count)) => {
+                    match unsafe {
+                        kernel_api::write(handle, buffer as *const u8, count as usize)
+                    } {
+                        Ok(written) => {
+                            store_out(args, 3, written as u32);
                             WIN32_TRUE
                         }
                         Err(_) => WIN32_FALSE,

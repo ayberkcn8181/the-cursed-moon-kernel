@@ -115,6 +115,13 @@ static KERNEL32: &[Export] = &[
         service: nt::NT_READ_FILE_WIN32,
         stack_bytes: 20,
     },
+    Export {
+        name: "WriteFile",
+        ordinal: 8,
+        service: nt::NT_WRITE_FILE_WIN32,
+        // hFile, lpBuffer, nBytes, lpBytesWritten, lpOverlapped
+        stack_bytes: 20,
+    },
 ];
 
 /// `TCMKGUI.dll` -- win32k cagrilarinin kullanici modundaki yuzu.

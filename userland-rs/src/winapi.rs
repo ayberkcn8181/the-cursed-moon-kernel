@@ -67,6 +67,17 @@ extern "system" {
         bytes_read: *mut Dword,
         overlapped: *mut c_void,
     ) -> Bool;
+    /// `ReadFile`in aynadaki esi. Bu cagri gelene kadar Windows
+    /// uygulamalari dosya okuyabiliyor ama **yazamiyordu**; `winpad`
+    /// notunu `WriteConsoleA`'ya bir dosya tutamagi vererek
+    /// kaydediyordu -- calisiyordu ama Win32 sozlesmesi degildi.
+    pub fn WriteFile(
+        file: Handle,
+        buffer: *const u8,
+        bytes_to_write: Dword,
+        bytes_written: *mut Dword,
+        overlapped: *mut c_void,
+    ) -> Bool;
 }
 
 #[link(name = "tcmkgui")]

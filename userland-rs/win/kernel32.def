@@ -17,3 +17,4 @@ CloseHandle@4 @4
 WriteConsoleA@20 @5
 CreateFileA@28 @6
 ReadFile@20 @7
+WriteFile@20 @8
