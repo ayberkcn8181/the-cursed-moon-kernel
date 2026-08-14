@@ -122,6 +122,20 @@ static KERNEL32: &[Export] = &[
         // hFile, lpBuffer, nBytes, lpBytesWritten, lpOverlapped
         stack_bytes: 20,
     },
+    Export {
+        name: "SetFilePointer",
+        ordinal: 9,
+        service: nt::NT_SET_FILE_POINTER,
+        // hFile, lDistanceToMove, lpDistanceToMoveHigh, dwMoveMethod
+        stack_bytes: 16,
+    },
+    Export {
+        name: "GetFileSize",
+        ordinal: 10,
+        service: nt::NT_GET_FILE_SIZE,
+        // hFile, lpFileSizeHigh
+        stack_bytes: 8,
+    },
 ];
 
 /// `TCMKGUI.dll` -- win32k cagrilarinin kullanici modundaki yuzu.

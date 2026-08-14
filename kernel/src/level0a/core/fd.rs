@@ -260,6 +260,25 @@ pub fn dup2(oldfd: usize, newfd: usize) -> Option<usize> {
     })
 }
 
+/// Tanimlayicinin konumunu **mutlak** olarak ayarlar.
+///
+/// Boru uclarinda anlamsizdir (halka tamponun "konumu" yoktur), o yuzden
+/// yalnizca dosyalarda kabul edilir.
+pub fn seek(fd: usize, offset: usize) -> bool {
+    if fd >= MAX_FDS {
+        return false;
+    }
+    crate::arch::cpu::without_interrupts(|| unsafe {
+        let table = current_table();
+        let entry = *table.add(fd);
+        if !entry.used || entry.kind != FdKind::File {
+            return false;
+        }
+        (*table.add(fd)).offset = offset;
+        true
+    })
+}
+
 pub fn advance(fd: usize, delta: usize) {
     if fd >= MAX_FDS {
         return;

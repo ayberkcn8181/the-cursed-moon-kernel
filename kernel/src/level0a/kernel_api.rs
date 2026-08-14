@@ -48,10 +48,11 @@ impl Break {
     }
 }
 
-static BREAKS: [Break; scheduler::MAX_TASKS] = [
-    Break::new(), Break::new(), Break::new(), Break::new(),
-    Break::new(), Break::new(), Break::new(), Break::new(),
-];
+/// Elle sekiz kez yazilmisti; `MAX_TASKS` degisince derleme kirildi.
+/// Sabit tekrar bicimi tablo boyutuna bagli kalmaz.
+#[allow(clippy::declare_interior_mutable_const)]
+const NEW_BREAK: Break = Break::new();
+static BREAKS: [Break; scheduler::MAX_TASKS] = [NEW_BREAK; scheduler::MAX_TASKS];
 
 fn current_break() -> &'static Break {
     &BREAKS[scheduler::current_id() % scheduler::MAX_TASKS]
@@ -305,6 +306,55 @@ pub fn readiness(fd_num: u32) -> u16 {
         None if fd_num == FD_STDOUT || fd_num == FD_STDERR => POLLOUT,
         None => POLLNVAL,
     }
+}
+
+/// `lseek` bicimleri (Linux ile ayni sayilar).
+pub const SEEK_SET: usize = 0;
+pub const SEEK_CUR: usize = 1;
+pub const SEEK_END: usize = 2;
+
+/// POSIX `lseek`: dosya konumunu tasir, **yeni konumu** doner.
+///
+/// Bu cagriya kadar dosyalar yalnizca **bastan sona** okunabiliyordu:
+/// konum yalnizca `read`/`write` tarafindan ilerletiliyor, geri
+/// alinamiyordu. Bir dosyanin ortasindan okumak, basa sarip yeniden
+/// okumak ya da sonuna eklemek mumkun degildi.
+///
+/// Bilerek: negatif goreli kaydirma desteklenmiyor. Cagri arayuzu
+/// isaretsiz kelime tasidigi icin `SEEK_CUR`/`SEEK_END` yalnizca **ileri**
+/// ya da sifir olabilir; `SEEK_END` ile sifir vermek dosya sonuna gitmek
+/// demektir ki "ekleme" kalibinin ihtiyaci da budur.
+pub fn lseek(fd_num: u32, offset: usize, whence: usize) -> Result<usize, KernelError> {
+    let entry = fd::get(fd_num as usize).ok_or(KernelError::BadFileDescriptor)?;
+    if entry.kind != fd::FdKind::File {
+        // Boru bir akistir; konumu yoktur (POSIX de ESPIPE doner).
+        return Err(KernelError::NotSupported);
+    }
+    let base = match whence {
+        SEEK_SET => 0,
+        SEEK_CUR => entry.offset,
+        SEEK_END => vfs::size(entry.node).ok_or(KernelError::BadFileDescriptor)?,
+        _ => return Err(KernelError::NotSupported),
+    };
+    let target = base.saturating_add(offset);
+    if !fd::seek(fd_num as usize, target) {
+        return Err(KernelError::BadFileDescriptor);
+    }
+    Ok(target)
+}
+
+/// Acik bir tanimlayicinin dosya boyutu.
+///
+/// `fstat`in TCMK'deki karsiligi. Gercek `struct stat` yerine tek bir
+/// sayi donuyor: izin, sahiplik, aygit numarasi gibi alanlarin hicbiri
+/// bu dosya sisteminde yok, yani yapiyi kopyalamak sifir dolu bir kayit
+/// tasimak olurdu.
+pub fn file_size(fd_num: u32) -> Result<usize, KernelError> {
+    let entry = fd::get(fd_num as usize).ok_or(KernelError::BadFileDescriptor)?;
+    if entry.kind != fd::FdKind::File {
+        return Err(KernelError::NotSupported);
+    }
+    vfs::size(entry.node).ok_or(KernelError::BadFileDescriptor)
 }
 
 pub fn close(fd_num: u32) -> Result<(), KernelError> {

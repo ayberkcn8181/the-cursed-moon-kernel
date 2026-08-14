@@ -105,6 +105,9 @@ static MASKED_ELF: &[u8] = include_bytes!("../../userland/masked.elf");
 /// mmap/munmap gosterimi.
 #[cfg(target_arch = "x86")]
 static ARENA_ELF: &[u8] = include_bytes!("../../userland/arena.elf");
+/// lseek/fstat gosterimi.
+#[cfg(target_arch = "x86")]
+static SEEKER_ELF: &[u8] = include_bytes!("../../userland/seeker.elf");
 
 /// Linux (ELF64, x86_64) kullanici programi -- `tools/gen_hello_elf64.py`.
 /// Elle kodlanmis en kucuk ELF64: yukleyicinin dar yolunu sinar.
@@ -146,6 +149,8 @@ static MUX64: &[u8] = include_bytes!("../../userland/mux.elf64");
 static MASKED64: &[u8] = include_bytes!("../../userland/masked.elf64");
 #[cfg(target_arch = "x86_64")]
 static ARENA64: &[u8] = include_bytes!("../../userland/arena.elf64");
+#[cfg(target_arch = "x86_64")]
+static SEEKER64: &[u8] = include_bytes!("../../userland/seeker.elf64");
 
 /// **Windows (PE32+) uygulamalari** -- i386'dakilerle ayni kaynak, ayni
 /// ithal kutuphaneleri; degisen yalnizca hedef. Taban 0x140000000
@@ -181,6 +186,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/mux", MUX_ELF),
     ("/bin/masked", MASKED_ELF),
     ("/bin/arena", ARENA_ELF),
+    ("/bin/seeker", SEEKER_ELF),
     ("/bin/winclock.exe", WINCLOCK_EXE),
     ("/bin/winpad.exe", WINPAD_EXE),
     ("/boot/msg.txt", BOOT_MSG),
@@ -205,6 +211,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/mux", MUX64),
     ("/bin/masked", MASKED64),
     ("/bin/arena", ARENA64),
+    ("/bin/seeker", SEEKER64),
     ("/bin/winclock.exe", WINCLOCK_EXE64),
     ("/bin/winpad.exe", WINPAD_EXE64),
     ("/boot/msg.txt", BOOT_MSG),

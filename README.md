@@ -42,6 +42,7 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 9d | **Calisma dizini** (`cd`/`pwd`, `.`/`..`, goreli yollar) | ✅ |
 | 9c | **IRQ14**: disk kesmeyle bekler (`TaskState::IoWait`) | ✅ |
 | 7e | **`WriteFile`**: PE ikilisi diske yazar (`CreateFileA`+`WriteFile`) | ✅ (PE32 + PE32+) |
+| 5b | **`lseek`/`fstat`** + Win32 ikizleri (`SetFilePointer`/`GetFileSize`) | ✅ (i386 + x86_64) |
 | — | **Kendi onyukleyicisi** + diske kurulum (`install`) | ✅ (i386) |
 | 8 | **`execve`** (surec kendi yerine program yukler) | ✅ (i386 + x86_64) |
 | 8 | **`fork`** (adres uzayi kopyasi + iki kez donen cagri) | ✅ (i386 + x86_64) |
@@ -82,7 +83,7 @@ Ekranda gorunenler:
   | bellek/disk | `mem` `disk` `df` `format onayla` `sync` `install onayla` |
   | dosya | `ls [dizin]` `mkdir <yol>` `rmdir <yol>` `cat <yol>` `save <yol> <metin>` `cp <kaynak> <hedef>` `rm <yol>` |
   | uygulama/pencere | `apps` `run <ad>` `win` `focus <id>` `mouse` |
-  | uygulamalar (ELF) | `paint` `plasma` `notes` `menu` `twins` `relay` `echo2` `sigdemo` `race` `reaper` `redirect` `mux` `masked` `arena` `crash` `hog` `spin` |
+  | uygulamalar (ELF) | `paint` `plasma` `notes` `menu` `twins` `relay` `echo2` `sigdemo` `race` `reaper` `redirect` `mux` `masked` `arena` `seeker` `crash` `hog` `spin` |
   | uygulamalar (PE) | `winclock` (ham `int 0x2E`) `winpad` (IAT) -- i386'da PE32, x86_64'te PE32+ |
   | diger | `echo <metin>` `pipes` `clear` `help` |
 - **Sistem Gunlugu** -- cekirdek kaydinin canli goruntusu (konsol halka
@@ -1373,6 +1374,50 @@ TCMK'de okuma bloke etmez; veri yoksa `0` doner. Nedeni GUI'dir: bloke
 olan bir surec penceresini de dondurur, oysa buradaki uygulamalar kendi
 cizim dongulerini surer. `relay`'in ebeveyni her karede yoklar ve grafik
 akici kalir.
+
+## `lseek` / `fstat` -- ve Win32'deki ikizleri
+
+Dosyalar yalnizca **bastan sona** okunabiliyordu: konum sadece
+`read`/`write` tarafindan ilerliyor, geri alinamiyordu. Ortadan okumak,
+basa sarmak, sona eklemek -- hicbiri mumkun degildi. Boyutu ogrenmenin de
+yolu yoktu; tek care dosyayi sonuna kadar okuyup saymakti.
+
+![lseek](docs/screenshot-seek.png)
+
+`seeker` bes sinav yapiyor ve besi de geciyor. Ucuncusu olcunun kendisi:
+`lseek(4, SEEK_SET)` sonrasi dort bayt okunuyor ve **"4567"** geliyor --
+konum gercekten tasindi. Dorduncusu "ekleme" kalibi: `lseek(0, SEEK_END)`
++ `write` sonrasi dosya 16'dan 25 bayta cikiyor ve kabuk
+`0123456789ABCDEF++EKLENDI` okuyor.
+
+### Iki ABI, tek cekirdek cagrisi
+
+Ayni yetenek Win32 tarafina da acildi ve **ayni** `kernel_api::lseek`e
+iniyor:
+
+| POSIX | Win32 | Level-0a |
+|---|---|---|
+| `lseek(fd, off, whence)` | `SetFilePointer(h, d, NULL, method)` | `kernel_api::lseek` |
+| `fstat(fd)` -> boyut | `GetFileSize(h, NULL)` | `kernel_api::file_size` |
+
+`FILE_BEGIN`/`FILE_CURRENT`/`FILE_END` sayilari POSIX'in `SEEK_*`
+degerleriyle **ayni** (0/1/2), yani cevirmenin yapacak isi bile kalmiyor.
+Level-0b1'in butun mesele ettigi sey bu: iki ABI, tek Level-0a API'si.
+
+`winpad` artik notunu gercek Windows kalibiyla okuyor: `CreateFileA` ->
+`GetFileSize` -> `SetFilePointer(0, FILE_BEGIN)` -> `ReadFile` ->
+`CloseHandle`.
+
+### Bilerek yapilmayanlar
+
+* **Negatif goreli kaydirma yok.** Cagri arayuzu isaretsiz kelime tasiyor,
+  yani `SEEK_CUR`/`SEEK_END` ileri ya da sifirdir. `lseek(fd, 0, SEEK_END)`
+  dosya sonuna gider -- ekleme kalibinin ihtiyaci da budur.
+* **`fstat` bir `struct stat` doldurmuyor**, yalnizca boyut donuyor. Izin,
+  sahiplik, aygit numarasi, bag sayisi -- hicbiri bu dosya sisteminde yok;
+  yapiyi kopyalamak sifir dolu bir kayit tasimak olurdu.
+* **Boru bir akistir**, konumu yoktur: boru ucunda `lseek` reddedilir
+  (POSIX de `ESPIPE` doner).
 
 ## Kabuk komutlari artik ekrani dondurmuyor
 

@@ -36,6 +36,8 @@ mod i386_numbers {
     pub const SYS_DUP: usize = 41;
     pub const SYS_DUP2: usize = 63;
     pub const SYS_POLL: usize = 168;
+    pub const SYS_LSEEK: usize = 19;
+    pub const SYS_FSTAT: usize = 197;
     pub const SYS_WAITPID: usize = 7;
     pub const SYS_PIPE: usize = 42;
     pub const SYS_BRK: usize = 45;
@@ -60,6 +62,8 @@ mod x86_64_numbers {
     pub const SYS_DUP: usize = 32;
     pub const SYS_DUP2: usize = 33;
     pub const SYS_POLL: usize = 7;
+    pub const SYS_LSEEK: usize = 8;
+    pub const SYS_FSTAT: usize = 5;
     pub const SYS_BRK: usize = 12;
     pub const SYS_PIPE: usize = 22;
     pub const SYS_FORK: usize = 57;
@@ -267,6 +271,28 @@ pub fn poll(fds: &mut [PollFd], timeout_ms: isize) -> isize {
             timeout_ms as usize,
         ) as isize
     }
+}
+
+/// `lseek` bicimleri.
+pub const SEEK_SET: usize = 0;
+pub const SEEK_CUR: usize = 1;
+pub const SEEK_END: usize = 2;
+
+/// POSIX `lseek`: dosya konumunu tasir, yeni konumu doner.
+///
+/// Negatif goreli kaydirma yok: arayuz isaretsiz kelime tasiyor, yani
+/// `SEEK_CUR`/`SEEK_END` ileri ya da sifirdir. `lseek(fd, 0, SEEK_END)`
+/// dosya sonuna gider -- "ekleme" kalibinin ihtiyaci budur.
+pub fn lseek(fd: usize, offset: usize, whence: usize) -> isize {
+    unsafe { syscall3(SYS_LSEEK, fd, offset, whence) as isize }
+}
+
+/// Acik dosyanin boyutu (`fstat`in TCMK'deki karsiligi).
+///
+/// Gercek `fstat` bir `struct stat` doldurur; izin, sahiplik, aygit
+/// numarasi gibi alanlarin hicbiri bu dosya sisteminde yok.
+pub fn file_size(fd: usize) -> isize {
+    unsafe { syscall1(SYS_FSTAT, fd) as isize }
 }
 
 /// Anonim bellek ayirir (`mmap(NULL, len, ...)`); adresi doner.

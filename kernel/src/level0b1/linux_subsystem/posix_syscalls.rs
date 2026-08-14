@@ -62,6 +62,9 @@ mod i386_numbers {
     pub const SYS_DUP: u32 = 41;
     pub const SYS_DUP2: u32 = 63;
     pub const SYS_POLL: u32 = 168;
+    pub const SYS_LSEEK: u32 = 19;
+    /// i386'da `fstat64`. TCMK tam `struct stat` dondurmez (bkz. cagri).
+    pub const SYS_FSTAT: u32 = 197;
     pub const SYS_BRK: u32 = 45;
     pub const SYS_GETPID: u32 = 20;
     pub const SYS_KILL: u32 = 37;
@@ -88,6 +91,8 @@ mod x86_64_numbers {
     pub const SYS_DUP: u32 = 32;
     pub const SYS_DUP2: u32 = 33;
     pub const SYS_POLL: u32 = 7;
+    pub const SYS_LSEEK: u32 = 8;
+    pub const SYS_FSTAT: u32 = 5;
     pub const SYS_BRK: u32 = 12;
     pub const SYS_PIPE: u32 = 22;
     pub const SYS_FORK: u32 = 57;
@@ -601,6 +606,31 @@ pub fn dispatch(frame: &mut SyscallFrame) {
                 -EINVAL
             }
         }
+
+        // `lseek(fd, offset, whence)` -- yeni konumu doner.
+        //
+        // Bu cagriya kadar dosyalar yalnizca bastan sona okunabiliyordu.
+        SYS_LSEEK => match kernel_api::lseek(arg1 as u32, arg2, arg3) {
+            Ok(position) => {
+                frame.set_return(position);
+                return;
+            }
+            Err(e) => errno_of(e),
+        },
+
+        // `fstat(fd)` -- TCMK'de yalnizca **boyut** doner.
+        //
+        // Gercek `fstat` bir `struct stat` doldurur; izin, sahiplik,
+        // aygit numarasi, bag sayisi gibi alanlarin hicbiri bu dosya
+        // sisteminde yok. Yapiyi kopyalamak sifir dolu bir kayit tasimak
+        // olurdu -- boyut ise gercek ve tek basina yeterli.
+        SYS_FSTAT => match kernel_api::file_size(arg1 as u32) {
+            Ok(size) => {
+                frame.set_return(size);
+                return;
+            }
+            Err(e) => errno_of(e),
+        },
 
         SYS_SLEEP => {
             // arg1 = milisaniye. PIT 100 Hz oldugu icin cozunurluk 10 ms;

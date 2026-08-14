@@ -463,6 +463,29 @@ fn path_under(path: &str, prefix: &str) -> bool {
     }
 }
 
+/// `path` dogrudan `prefix` dizininin altinda mi (alt dizinlerde degil)?
+///
+/// `ls` bunu kullanir: bir dizini listelemek "altindaki her sey" degil,
+/// "icindekiler" demektir. Ayrimi yapmadan `ls /` butun agaci dokuyordu.
+fn direct_child(path: &str, prefix: &str) -> bool {
+    let rest = if prefix.is_empty() || prefix == "/" {
+        match path.strip_prefix('/') {
+            Some(r) => r,
+            None => return false,
+        }
+    } else {
+        match path.strip_prefix(prefix) {
+            // "/notlar" ile "/notlar2/x" karismasin diye ayirici sart.
+            Some(r) => match r.strip_prefix('/') {
+                Some(r) => r,
+                None => return false,
+            },
+            None => return false,
+        }
+    };
+    !rest.is_empty() && !rest.contains('/')
+}
+
 fn state_name(state: scheduler::TaskState) -> &'static str {
     match state {
         scheduler::TaskState::Unused => "bos",
@@ -502,7 +525,7 @@ fn execute(line: &str) {
             write_line("bellek / disk:");
             write_line("  mem  disk  df  format onayla  sync  install");
             write_line("dosya:");
-            write_line("  ls [dizin]  cat <yol>  save <yol> <metin>  cp <kaynak> <hedef>  rm <yol>");
+            write_line("  ls [-a] [dizin]  cat <yol>  save <yol> <metin>  cp <kaynak> <hedef>  rm <yol>");
             write_line("  mkdir <yol>  rmdir <yol>  cd [dizin]  pwd");
             write_line("uygulama / pencere:");
             write_line("  apps  run <ad>  win  focus <id>  mouse");
@@ -941,6 +964,14 @@ fn execute(line: &str) {
             // Argumansiz: her sey. Argumanla: yalnizca o dizinin altindaki
             // yollar. Once diskteki dizinler listelenir -- VFS'in dizin
             // kavrami olmadigi icin onlari TCMKFS'e sormak gerekir.
+            // `-a`: butun agaci dok (eski davranis). Aksi halde yalnizca
+            // o dizinin **icindekiler** listelenir -- `ls /` artik 128
+            // satirlik RAMFS dokumu degil.
+            let (recursive, arg) = match arg.strip_prefix("-a") {
+                Some(rest) => (true, rest.trim()),
+                None => (false, arg),
+            };
+
             // Argumansiz: calisma dizini. Goreli yol da kabul edilir.
             let mut pbuf = [0u8; tcmkfs::PATH_MAX];
             let prefix = if arg.is_empty() {
@@ -978,7 +1009,12 @@ fn execute(line: &str) {
             let mut files = 0usize;
             for i in 0..vfs::node_count() {
                 if let Some(path) = vfs::path_of(i) {
-                    if !arg.is_empty() && !path_under(path, prefix) {
+                    let visible = if recursive {
+                        path_under(path, prefix)
+                    } else {
+                        direct_child(path, prefix)
+                    };
+                    if !visible {
                         continue;
                     }
                     files += 1;

@@ -78,7 +78,24 @@ extern "system" {
         bytes_written: *mut Dword,
         overlapped: *mut c_void,
     ) -> Bool;
+    /// Win32'nin `lseek`i. Ayni cekirdek cagrisina iner: Level-0b1'in
+    /// butun mesele ettigi sey bu -- iki ABI, tek Level-0a API'si.
+    pub fn SetFilePointer(
+        file: Handle,
+        distance: Dword,
+        distance_high: *mut Dword,
+        method: Dword,
+    ) -> Dword;
+    pub fn GetFileSize(file: Handle, size_high: *mut Dword) -> Dword;
 }
+
+/// `SetFilePointer` -- `dwMoveMethod`. Sayilar POSIX'in `SEEK_*`
+/// degerleriyle ayni.
+pub const FILE_BEGIN: Dword = 0;
+pub const FILE_CURRENT: Dword = 1;
+pub const FILE_END: Dword = 2;
+/// `SetFilePointer`/`GetFileSize` hata donusu.
+pub const INVALID_SET_FILE_POINTER: Dword = 0xFFFF_FFFF;
 
 #[link(name = "tcmkgui")]
 extern "system" {

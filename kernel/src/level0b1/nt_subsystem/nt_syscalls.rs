@@ -66,6 +66,8 @@ pub const NT_WRITE_CONSOLE_A: u32 = 0x3004;
 pub const NT_CREATE_FILE_A: u32 = 0x3005;
 pub const NT_READ_FILE_WIN32: u32 = 0x3006;
 pub const NT_WRITE_FILE_WIN32: u32 = 0x3007;
+pub const NT_SET_FILE_POINTER: u32 = 0x3008;
+pub const NT_GET_FILE_SIZE: u32 = 0x3009;
 
 pub const NT_USER_CREATE_WINDOW_W32: u32 = 0x3010;
 pub const NT_GDI_GET_BITS_W32: u32 = 0x3011;
@@ -439,6 +441,39 @@ fn dispatch_win32_api(frame: &mut SyscallFrame) {
                     }
                 }
                 _ => WIN32_FALSE,
+            }
+        }
+
+        NT_SET_FILE_POINTER => {
+            // SetFilePointer(hFile, lDistance, lpDistanceHigh, dwMoveMethod)
+            //
+            // Win32'nin `lseek`i. Ayni cekirdek cagrisina iniyor --
+            // Level-0b1'in butun mesele ettigi sey bu: iki ABI, tek
+            // Level-0a API'si. `lpDistanceHigh` (64-bit uzantisi) yok
+            // sayilir; dosyalar 160 KiB ile sinirli.
+            //
+            // FILE_BEGIN/CURRENT/END sayilari POSIX'in SEEK_* degerleriyle
+            // ayni (0/1/2), yani cevirme gerekmiyor.
+            match (arg(args, 0), arg(args, 1), arg(args, 3)) {
+                (Some(handle), Some(distance), Some(method)) => {
+                    match kernel_api::lseek(handle, distance as usize, method as usize) {
+                        Ok(position) => position,
+                        // Win32 hatada INVALID_SET_FILE_POINTER (0xFFFFFFFF) doner.
+                        Err(_) => u32::MAX as usize,
+                    }
+                }
+                _ => u32::MAX as usize,
+            }
+        }
+
+        NT_GET_FILE_SIZE => {
+            // GetFileSize(hFile, lpFileSizeHigh) -> DWORD
+            match arg(args, 0) {
+                Some(handle) => match kernel_api::file_size(handle) {
+                    Ok(size) => size,
+                    Err(_) => u32::MAX as usize,
+                },
+                None => u32::MAX as usize,
             }
         }
 

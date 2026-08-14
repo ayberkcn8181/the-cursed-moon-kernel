@@ -8,8 +8,8 @@
 //!
 //! Yaptigi is: kucuk bir metin defteri. Yazilanlar `CreateFileA` +
 //! `WriteFile` ile TCMKFS'e yazilir, acilista `CreateFileA` +
-//! `ReadFile` ile geri okunur -- Windows'ta bir dosyayi kaydetmenin ve
-//! geri okumanin tam dizisi.
+//! `GetFileSize` + `SetFilePointer` + `ReadFile` ile geri okunur --
+//! Windows'ta bir dosyayi kaydetmenin ve geri okumanin tam dizisi.
 //!
 //! Tuslar:  yazi,  BACKSPACE,  `~` -> kaydet,  ESC -> cik
 
@@ -201,7 +201,14 @@ fn save(buffer: &Buffer) -> bool {
     ok && written as usize == buffer.len
 }
 
-/// Notu geri okur -- `CreateFileA` + `ReadFile` + `CloseHandle`.
+/// Notu geri okur -- `CreateFileA` + `GetFileSize` + `SetFilePointer` +
+/// `ReadFile` + `CloseHandle`.
+///
+/// Boyutu **once** sormak Windows'ta aliskanliktir: okunacak miktar
+/// bilinince tampon bosuna taranmaz. `SetFilePointer(0, FILE_BEGIN)`
+/// ise gereksiz gorunse de sozlesmeyi acikca kuruyor -- ve iki cagrinin
+/// da cekirdekte POSIX'in `fstat`/`lseek`iyle **ayni** yere indigini
+/// gosteriyor.
 fn load(buffer: &mut Buffer) -> bool {
     let mut name = [0u8; 32];
     name[..PATH.len()].copy_from_slice(PATH.as_bytes());
@@ -221,12 +228,23 @@ fn load(buffer: &mut Buffer) -> bool {
         return false;
     }
 
+    // Once boyut, sonra basa sar, sonra oku.
+    let size = unsafe { winapi::GetFileSize(handle, core::ptr::null_mut()) };
+    if size == winapi::INVALID_SET_FILE_POINTER {
+        unsafe { winapi::CloseHandle(handle) };
+        return false;
+    }
+    unsafe {
+        winapi::SetFilePointer(handle, 0, core::ptr::null_mut(), winapi::FILE_BEGIN);
+    }
+    let want = (size as usize).min(CAPACITY) as winapi::Dword;
+
     let mut read: winapi::Dword = 0;
     let ok = unsafe {
         winapi::ReadFile(
             handle,
             buffer.bytes.as_mut_ptr(),
-            CAPACITY as winapi::Dword,
+            want,
             &mut read,
             core::ptr::null_mut(),
         )

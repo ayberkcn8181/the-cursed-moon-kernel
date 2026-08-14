@@ -15,7 +15,16 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use crate::arch::cpu::context::{arch_context_switch, bootstrap_stack};
 use crate::level0a::core::kmalloc;
 
-pub const MAX_TASKS: usize = 8;
+/// Gorev tablosu boyutu.
+///
+/// Sekizdi; kabuk komutlari ayri bir goreve tasininca (bkz.
+/// `shell::command_task`) kalici tuketim bese cikti -- idle, masaustu,
+/// kabuk ve acilista baslatilan iki uygulama. Kullaniciya uc yuva
+/// kaliyordu ve `fork` yapan bir uygulama ikisini birden yiyordu.
+///
+/// Maliyet gorev basina 16 KiB cekirdek yigini + 16 KiB Ring 3 yigini;
+/// dort yuva daha 128 KiB demek, heap 12 MiB.
+pub const MAX_TASKS: usize = 12;
 /// Idle gorevi her zaman 0 numaradadir ve ayni zamanda **masaustu
 /// dongusudur** (bkz. `main.rs`); oncelik muhasebesinin disindadir.
 pub const IDLE_TASK: usize = 0;
