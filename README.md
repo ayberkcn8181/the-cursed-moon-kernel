@@ -2157,3 +2157,8 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
 
 AArch64 portu (Faz 6), ext2/tmpfs ve genis POSIX (Faz 9-10),
 musl/busybox + shell (Faz 11-12), framebuffer/virtio-net (Faz 13-14).
+
+## Lisans
+
+MIT -- bkz. [LICENSE](LICENSE). Kullanabilir, degistirebilir, kendi
+projene katabilirsin; tek sart telif bildiriminin kopyalarda kalmasi.
