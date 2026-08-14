@@ -148,12 +148,16 @@ fn await_irq() {
     // Uyanma kosulu **iki** sey: kesme geldi, YA DA aygit artik mesgul
     // degil.
     //
-    // Ikincisi olmadan bekleme kesmeye bagimli hale geliyordu -- ve
-    // kesme gelmedigi ortamlarda (olculdu: IRQ14 sayaci acilistaki
-    // birinci kesmeden sonra hic artmiyor) her bekleme zaman asimi
-    // suresince, iki saniye, bosuna suruyordu. Ring 3'ten yapilan bir
-    // kaydetme boylece onlarca saniye aliyor, uygulama donmus
-    // gorunuyordu.
+    // Ikincisi neden sart: bir YAZMADA aygit ilk veri istegi oncesinde
+    // kesme uretmez -- BSY'yi dusurup DRQ'yu kaldirir, o kadar (asagida
+    // `write` icindeki nota bak). Surucu yine de kesme bekliyordu, yani
+    // her yazma ilk sektorunde zaman asimi suresince bosuna bekliyordu.
+    // `create_file` birkac ayri sektor yazmasi yaptigi icin Ring 3'ten
+    // bir kaydetme onlarca saniye suruyor, uygulama donmus gorunuyordu.
+    //
+    // Kesmenin kendisi calisiyor: bir okuma + yazma turundan sonra
+    // `df` IRQ14 sayacini 95 gosteriyor. Sorun kesmenin gelmemesi degil,
+    // **gelmeyecegi bir anda beklenmesiydi**.
     //
     // `ALT_STATUS` bilerek: onu okumak aygitin kesme bayragini
     // TEMIZLEMEZ, yani yoklama kesme yolunu bozmaz. Modul basligindaki

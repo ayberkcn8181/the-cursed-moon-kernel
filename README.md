@@ -1040,16 +1040,22 @@ Iki incelik:
 * **Kacirilmis uyandirma.** Kesme, gorev `IoWait`'e gecmeden hemen once
   gelebilir. `wait_for_io` bu yuzden uyumadan once kosulu kesmeler kapaliyken
   bir kez daha denetler; aksi halde surec sonsuza kadar beklerdi.
-* **Kesme hic gelmezse.** Uyanma kosulu iki seydir: kesme geldi, **ya da
-  aygit artik mesgul degil**. Ikincisi olmadan bekleme kesmeye bagimli
-  hale geliyordu -- ve olculdu ki QEMU'da IRQ14 sayaci acilistaki birinci
-  kesmeden sonra hic artmiyor. O halde her bekleme zaman asimi suresince
-  (iki saniye) bosuna suruyor, Ring 3'ten yapilan bir kaydetme onlarca
-  saniye aliyor ve uygulama donmus gorunuyordu. Yoklama `ALT_STATUS`
-  uzerinden yapilir: onu okumak aygitin kesme bayragini **temizlemez**,
-  yani yoklama kesme yolunu bozmaz. Modul basligindaki "kesme bir
-  hizlandiricidir, tek dogruluk kaynagi degil" ifadesi ancak bu satirla
-  gercekten dogru.
+* **Kesmenin gelmedigi an.** Uyanma kosulu iki seydir: kesme geldi,
+  **ya da aygit artik mesgul degil**.
+
+  Ikincisi neden sart: bir **yazmada** aygit ilk veri istegi oncesinde
+  kesme uretmez -- BSY'yi dusurup DRQ'yu kaldirir, o kadar. Surucu yine
+  de kesme bekliyordu, yani her yazma ilk sektorunde zaman asimi
+  suresince (iki saniye) bosuna bekliyordu. `create_file` birkac ayri
+  sektor yazmasi yaptigi icin Ring 3'ten bir kaydetme onlarca saniye
+  suruyor, uygulama donmus gorunuyordu. Olcum: `notes`'un kaydetmesi
+  "yirmi bes saniyede bile bitmiyor" halinden **alti saniyeye** indi.
+
+  Yoklama `ALT_STATUS` uzerinden yapilir: onu okumak aygitin kesme
+  bayragini **temizlemez**, yani yoklama kesme yolunu bozmaz. Kesmenin
+  kendisi calisiyor -- bir okuma + yazma turundan sonra `df` IRQ14
+  sayacini 95 gosteriyor. Modul basligindaki "kesme bir hizlandiricidir,
+  tek dogruluk kaynagi degil" ifadesi ancak bu satirla gercekten dogru.
 
 Iki yer bilerek yoklamada kaldi: acilis (zamanlayici henuz yok) ve
 **uyutulamayan gorevler** -- idle ve masaustu. Masaustu ekrani cizen,
