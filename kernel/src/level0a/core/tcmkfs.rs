@@ -528,11 +528,26 @@ pub fn child_of(parent: usize, name: &str) -> Option<usize> {
 ///
 /// `/` kok dizini verir. Bos bilesenler (`//`, sondaki `/`) atlanir --
 /// yani `/a/b/` ile `/a/b` ayni seydir, POSIX'te oldugu gibi.
+///
+/// `.` ve `..` bilesenleri desteklenir. Diskte `.`/`..` diye **girdi
+/// yoktur**; ikisi de yol yurutucusunde ele alinir. `..` icin gereken
+/// bilgi inode'un `parent` alaninda zaten duruyor (dizin agaci
+/// cocuktan ebeveyne saklanir), yani ek bir sey yazmak gerekmedi.
+///
+/// Kokun ebeveyni kendisidir: `/..` ve `/../..` yine koktur -- POSIX de
+/// boyle davranir, aksi halde yol agacin disina cikardi.
 pub fn resolve(path: &str) -> Option<usize> {
     let mut current = ROOT_INODE;
     let mut depth = 0usize;
     for part in path.split('/') {
         if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            // Yukari cikmak derinligi de azaltir; yoksa `a/../a/../a`
+            // gibi bir yol yerinde sayarken sinira takilirdi.
+            depth = depth.saturating_sub(1);
+            current = parent_of(current).unwrap_or(ROOT_INODE);
             continue;
         }
         depth += 1;
@@ -546,6 +561,25 @@ pub fn resolve(path: &str) -> Option<usize> {
         current = child_of(current, part)?;
     }
     Some(current)
+}
+
+/// Yolun net derinligi (`..` geri sayar). `None` = sinir asildi.
+fn net_depth(path: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    for part in path.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            depth = depth.saturating_sub(1);
+            continue;
+        }
+        depth += 1;
+        if depth > MAX_DEPTH {
+            return None;
+        }
+    }
+    Some(depth)
 }
 
 /// Yalnizca **dosyalari** dondurur; eski `lookup` sozlesmesi budur.
@@ -569,9 +603,14 @@ fn split_parent(path: &str) -> Result<(usize, &str), FsError> {
     if leaf.is_empty() || leaf.len() >= MAX_NAME {
         return Err(FsError::NameTooLong);
     }
+    // `.` ve `..` isim olamaz: "olustur/sil" hedefi olarak anlamsizlar
+    // (birincisi dizinin kendisi, ikincisi ebeveyni).
+    if leaf == "." || leaf == ".." {
+        return Err(FsError::BadPath);
+    }
     // Derinlik siniri burada bir kez denetlenir; `path_of` de ayni sinira
     // dayandigi icin asilan bir yol sonradan geri okunamazdi.
-    if trimmed.split('/').filter(|p| !p.is_empty() && *p != ".").count() > MAX_DEPTH {
+    if net_depth(trimmed).is_none() {
         return Err(FsError::TooDeep);
     }
     let parent = resolve(if dir.is_empty() { "/" } else { dir })

@@ -39,6 +39,7 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 8 | **Oncelik**: `nice`, donem butcesi, `setpriority` | ✅ |
 | 9 | **Kalici depolama**: ATA PIO, MBR, TCMKFS (yazilabilir) | ✅ (i386) |
 | 9b | **TCMKFS dizinleri** (gercek agac, `mkdir`/`rmdir`) | ✅ |
+| 9d | **Calisma dizini** (`cd`/`pwd`, `.`/`..`, goreli yollar) | ✅ |
 | 9c | **IRQ14**: disk kesmeyle bekler (`TaskState::IoWait`) | ✅ |
 | — | **Kendi onyukleyicisi** + diske kurulum (`install`) | ✅ (i386) |
 | 8 | **`execve`** (surec kendi yerine program yukler) | ✅ (i386 + x86_64) |
@@ -1355,6 +1356,48 @@ olan bir surec penceresini de dondurur, oysa buradaki uygulamalar kendi
 cizim dongulerini surer. `relay`'in ebeveyni her karede yoklar ve grafik
 akici kalir.
 
+## Calisma dizini ve `.` / `..`
+
+Yollar "her zaman mutlak" idi: `cat /home/alt/derin.txt` yazmak
+zorundaydiniz. Artik kabugun bir **calisma dizini** var ve komut istemi
+de onu tasiyor.
+
+![calisma dizini](docs/screenshot-cwd.png)
+
+`cd ..` sonrasi `pwd` `/home/alt/..` degil `/home` diyor: yol
+**sadelestirilerek** saklaniyor. Sadelestirilmeseydi her `cd ..` yolu
+uzatir ve birkac adimda derinlik sinirina takilirdi.
+
+### Sadelestirme neden kabukta, `..` neden dosya sisteminde
+
+Ikisi ayri sorun ve ayri yerde cozuldu:
+
+* **`tcmkfs::resolve`** `.`/`..` bilesenlerini anlar. Diskte `.`/`..`
+  diye girdi **yoktur**; `..` icin gereken bilgi inode'un `parent`
+  alaninda zaten duruyordu (dizin agaci cocuktan ebeveyne saklanir), yani
+  eklenen tek sey yol yurutucusundeki iki dal oldu. Bu, Ring 3
+  uygulamalarinin kabuktan gecmeden `open("../x")` diyebilmesi icin
+  gerekli.
+* **Kabuk** yolu ayrica **sadelestirir**. Cunku VFS'in oteki ucu,
+  cekirdek imajina gomulu RAMFS, duz bir isim tablosudur ve yolu birebir
+  karsilastirir: `/./bin/hello` TCMKFS'te calisirken RAMFS'te
+  bulunamazdi. Kabuk tek bir yerde sadelestirerek iki dosya sistemini de
+  ayni girdiyle besliyor -- `run ./bin/hello` bu yuzden calisiyor.
+
+`run` bir istisna tasiyor: `run paint` kisa addir, yol degil. Yalnizca
+icinde egik cizgi olan argumanlar calisma dizinine gore cozuluyor.
+
+Kokun ebeveyni kendisidir: `/..` yine koktur. POSIX de boyle davranir;
+aksi halde yol agacin disina cikardi.
+
+### Bilerek yapilmayan: surec basina `cwd`
+
+Calisma dizini **kabuga** ait, surece degil. POSIX'te `cwd` surec
+basinadir ve `fork` ile devredilir; `chdir` de bir syscall'dir. Burada
+kabuk yolu cagirmadan once mutlaklastirdigi icin `run notes` ile
+`run ./notes` ayni sonucu veriyor -- uygulama yine mutlak yol goruyor.
+Ring 3 tarafinda `chdir`/`getcwd` yok.
+
 ## `mmap` / `munmap`: ilk gercek "geri verme"
 
 `brk` tek bir siniri iter ve geri cekildiginde cerceve **iade etmez** --
@@ -2403,9 +2446,9 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
 - **Surec basina 512 KiB eslenir**, talep uzerine sayfalama yok.
 - **TCMKFS'te toplam 64 inode var** (dizinler de sayilir), dosya basina
   160 KiB (yalnizca dogrudan blok isaretcileri) ve azami 8 seviye
-  derinlik. Dizin agaci gercek, ama `.`/`..` bilesenleri, sembolik
-  baglar, izinler ve sahiplik yok; kabugun bir "calisma dizini" kavrami
-  da yok -- yollar her zaman mutlaktir.
+  derinlik. Dizin agaci gercek ve `.`/`..` calisiyor (yukari bkz.), ama
+  sembolik baglar, izinler ve sahiplik yok. Calisma dizini **kabuga**
+  aittir: Ring 3 tarafinda `chdir`/`getcwd` yok.
 - **Kabuktan verilen disk komutlari hala yoklamali.** Kabuk idle
   gorevinde (masaustu dongusu) kosar ve o gorev uyutulamaz -- uyutmak
   ekrani dondururdu. Ring 3 sureclerinin disk erisimi kesmeyle bekler.

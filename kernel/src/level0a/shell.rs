@@ -27,6 +27,100 @@ static INPUT_LEN: AtomicUsize = AtomicUsize::new(0);
 
 static WINDOW: AtomicUsize = AtomicUsize::new(usize::MAX);
 
+/// Kabugun **calisma dizini**.
+///
+/// Surec basina degil, kabuga ozeldir: Ring 3 uygulamalarinin bir
+/// `chdir` kavrami yok (POSIX `cwd`'si surec basinadir ve `fork`'la
+/// devredilir). Kabuk yolu **cagirmadan once** mutlaklastirdigi icin
+/// `run notes` ile `run ./notes` ayni sonucu veriyor; uygulama yine
+/// mutlak yol goruyor.
+static mut CWD: [u8; tcmkfs::PATH_MAX] = [b'/'; tcmkfs::PATH_MAX];
+static CWD_LEN: AtomicUsize = AtomicUsize::new(1);
+
+fn cwd() -> &'static str {
+    unsafe {
+        let base = core::ptr::addr_of!(CWD) as *const u8;
+        core::str::from_utf8(core::slice::from_raw_parts(
+            base,
+            CWD_LEN.load(Ordering::Relaxed),
+        ))
+        .unwrap_or("/")
+    }
+}
+
+fn set_cwd(path: &str) -> bool {
+    if path.len() >= tcmkfs::PATH_MAX {
+        return false;
+    }
+    unsafe {
+        let base = core::ptr::addr_of_mut!(CWD) as *mut u8;
+        for (i, b) in path.bytes().enumerate() {
+            base.add(i).write(b);
+        }
+    }
+    CWD_LEN.store(path.len(), Ordering::Relaxed);
+    true
+}
+
+/// Goreli yolu calisma dizinine gore mutlaklastirir **ve
+/// sadelestirir**: `.` atilir, `..` bir onceki bileseni siler.
+///
+/// ## Sadelestirme neden burada
+///
+/// `tcmkfs::resolve` `.`/`..` bilesenlerini zaten anliyor -- ama VFS'in
+/// oteki ucu, cekirdek imajina gomulu **RAMFS**, duz bir isim tablosudur
+/// ve yolu birebir karsilastirir. Yani `/./bin/hello` TCMKFS'te
+/// calisirken RAMFS'te bulunamazdi.
+///
+/// Kabuk yolu **tek bir yerde** sadelestirerek iki dosya sistemini de
+/// ayni girdiyle beslemis oluyor. `tcmkfs`'teki destek yine gerekli:
+/// Ring 3 uygulamalari kabuktan gecmeden `open("../x")` diyebilir.
+fn absolute<'a>(path: &str, buf: &'a mut [u8; tcmkfs::PATH_MAX]) -> Option<&'a str> {
+    // Mutlak yol verildiyse calisma dizini hic karismaz.
+    let base = if path.starts_with('/') { "" } else { cwd() };
+
+    buf[0] = b'/';
+    let mut len = 1usize;
+    // Her bilesenin **basladigi** uzunluk; `..` buraya geri sarar.
+    let mut starts = [0usize; tcmkfs::MAX_DEPTH + 2];
+    let mut depth = 0usize;
+
+    for part in base.split('/').chain(path.split('/')) {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            // Kokun ustune cikilmaz -- POSIX'te de `/..` koktur.
+            if depth > 0 {
+                depth -= 1;
+                len = starts[depth];
+            }
+            continue;
+        }
+        if depth + 1 >= starts.len() {
+            return None; // cok derin
+        }
+        starts[depth] = len;
+        depth += 1;
+
+        // Ilk bilesen zaten bastaki egik cizginin ardina gelir.
+        if len > 1 {
+            if len >= buf.len() {
+                return None;
+            }
+            buf[len] = b'/';
+            len += 1;
+        }
+        if len + part.len() >= buf.len() {
+            return None;
+        }
+        buf[len..len + part.len()].copy_from_slice(part.as_bytes());
+        len += part.len();
+    }
+
+    core::str::from_utf8(&buf[..len]).ok()
+}
+
 /// Kabuk penceresini olusturur.
 pub fn start(x: usize, y: usize) {
     let w = MAX_COLS * gfx::font_width() + 8;
@@ -92,8 +186,26 @@ pub fn write_line(s: &str) {
     newline();
 }
 
+/// Son yazilan komut isteminin uzunlugu.
+///
+/// Istem artik sabit degil (calisma dizinini tasiyor), oysa backspace
+/// "istemin soluna gecme" siniri icin bu uzunluga bakiyor. Sabit
+/// `PROMPT.len()` kullanilsaydi `/home`'dayken silme tusu istemin
+/// icini yerdi.
+static PROMPT_LEN: AtomicUsize = AtomicUsize::new(PROMPT.len());
+
 fn prompt() {
-    write_str(PROMPT);
+    let dir = cwd();
+    if dir == "/" {
+        write_str(PROMPT);
+        PROMPT_LEN.store(PROMPT.len(), Ordering::Relaxed);
+    } else {
+        // "tcmk> " yerine "tcmk:/home> "
+        write_str("tcmk:");
+        write_str(dir);
+        write_str("> ");
+        PROMPT_LEN.store(5 + dir.len() + 2, Ordering::Relaxed);
+    }
 }
 
 /// WM'den gelen tus olayi.
@@ -117,7 +229,7 @@ pub fn on_key(ascii: u8) {
             if len > 0 {
                 INPUT_LEN.store(len - 1, Ordering::Relaxed);
                 let col = COL.load(Ordering::Relaxed);
-                if col > PROMPT.len() {
+                if col > PROMPT_LEN.load(Ordering::Relaxed) {
                     COL.store(col - 1, Ordering::Relaxed);
                     put(b' ');
                     COL.store(col - 1, Ordering::Relaxed);
@@ -126,7 +238,7 @@ pub fn on_key(ascii: u8) {
         }
         0x20..=0x7E => {
             let len = INPUT_LEN.load(Ordering::Relaxed);
-            if len < MAX_COLS - PROMPT.len() - 1 {
+            if len < MAX_COLS - PROMPT_LEN.load(Ordering::Relaxed) - 1 {
                 unsafe {
                     let input = core::ptr::addr_of_mut!(INPUT) as *mut u8;
                     input.add(len).write(ascii);
@@ -339,7 +451,7 @@ fn execute(line: &str) {
             write_line("  mem  disk  df  format onayla  sync  install");
             write_line("dosya:");
             write_line("  ls [dizin]  cat <yol>  save <yol> <metin>  cp <kaynak> <hedef>  rm <yol>");
-            write_line("  mkdir <yol>  rmdir <yol>");
+            write_line("  mkdir <yol>  rmdir <yol>  cd [dizin]  pwd");
             write_line("uygulama / pencere:");
             write_line("  apps  run <ad>  win  focus <id>  mouse");
             write_line("diger:");
@@ -777,7 +889,19 @@ fn execute(line: &str) {
             // Argumansiz: her sey. Argumanla: yalnizca o dizinin altindaki
             // yollar. Once diskteki dizinler listelenir -- VFS'in dizin
             // kavrami olmadigi icin onlari TCMKFS'e sormak gerekir.
-            let prefix = if arg.is_empty() { "/" } else { arg.trim_end_matches('/') };
+            // Argumansiz: calisma dizini. Goreli yol da kabul edilir.
+            let mut pbuf = [0u8; tcmkfs::PATH_MAX];
+            let prefix = if arg.is_empty() {
+                cwd()
+            } else {
+                match absolute(arg.trim_end_matches('/'), &mut pbuf) {
+                    Some(p) => p,
+                    None => {
+                        write_line("yol cok uzun");
+                        return;
+                    }
+                }
+            };
             let mut dirs = 0usize;
             if tcmkfs::mounted() {
                 if let Some(dir) = tcmkfs::resolve(if prefix.is_empty() { "/" } else { prefix }) {
@@ -847,11 +971,40 @@ fn execute(line: &str) {
             }
             newline();
         }
+        "pwd" => write_line(cwd()),
+        "cd" => {
+            let target = if arg.is_empty() { "/" } else { arg };
+            let mut buf = [0u8; tcmkfs::PATH_MAX];
+            match absolute(target, &mut buf) {
+                Some(path) => {
+                    if !tcmkfs::mounted() {
+                        write_line("dizin agaci yok (once 'format onayla')");
+                    } else if tcmkfs::resolve(path).map(tcmkfs::entry_kind)
+                        != Some(Some(tcmkfs::KIND_DIR))
+                    {
+                        write_line("boyle bir dizin yok");
+                    } else if !set_cwd(path) {
+                        // `absolute` yolu zaten sadelestirdi: `cd ..`
+                        // sonrasi `pwd` "/home/.." degil "/" der.
+                        write_line("yol cok uzun");
+                    }
+                }
+                None => write_line("yol cok uzun"),
+            }
+        }
         "mkdir" => {
             if arg.is_empty() {
                 write_line("kullanim: mkdir <yol>   (ust dizin onceden var olmali)");
             } else {
-                match vfs::mkdir(arg) {
+                let mut pbuf = [0u8; tcmkfs::PATH_MAX];
+                let target = match absolute(arg, &mut pbuf) {
+                    Some(p) => p,
+                    None => {
+                        write_line("yol cok uzun");
+                        return;
+                    }
+                };
+                match vfs::mkdir(target) {
                     Ok(()) => {
                         write_str("dizin olusturuldu: ");
                         write_line(arg);
@@ -864,7 +1017,15 @@ fn execute(line: &str) {
             if arg.is_empty() {
                 write_line("kullanim: rmdir <yol>   (dizin bos olmali)");
             } else {
-                match vfs::rmdir(arg) {
+                let mut pbuf = [0u8; tcmkfs::PATH_MAX];
+                let target = match absolute(arg, &mut pbuf) {
+                    Some(p) => p,
+                    None => {
+                        write_line("yol cok uzun");
+                        return;
+                    }
+                };
+                match vfs::rmdir(target) {
                     Ok(()) => {
                         write_str("dizin silindi: ");
                         write_line(arg);
@@ -981,6 +1142,14 @@ fn execute(line: &str) {
                 let len = text.len().min(MAX_COLS);
                 buf[..len].copy_from_slice(&text.as_bytes()[..len]);
                 buf[len] = b'\n';
+                let mut pbuf = [0u8; tcmkfs::PATH_MAX];
+                let path = match absolute(path, &mut pbuf) {
+                    Some(p) => p,
+                    None => {
+                        write_line("yol cok uzun");
+                        return;
+                    }
+                };
                 match vfs::write_file(path, &buf[..len + 1]) {
                     Ok(n) => {
                         write_num(n);
@@ -1001,6 +1170,15 @@ fn execute(line: &str) {
             if src.is_empty() || dst.is_empty() {
                 write_line("kullanim: cp <kaynak> <hedef>");
             } else {
+                let mut sbuf = [0u8; tcmkfs::PATH_MAX];
+                let mut dbuf = [0u8; tcmkfs::PATH_MAX];
+                let (src, dst) = match (absolute(src, &mut sbuf), absolute(dst, &mut dbuf)) {
+                    (Some(a), Some(b)) => (a, b),
+                    _ => {
+                        write_line("yol cok uzun");
+                        return;
+                    }
+                };
                 match vfs::lookup(src).and_then(vfs::load) {
                     Some(data) => match vfs::write_file(dst, data) {
                         Ok(n) => {
@@ -1018,6 +1196,14 @@ fn execute(line: &str) {
             if arg.is_empty() {
                 write_line("kullanim: rm <yol>");
             } else {
+                let mut pbuf = [0u8; tcmkfs::PATH_MAX];
+                let arg = match absolute(arg, &mut pbuf) {
+                    Some(p) => p,
+                    None => {
+                        write_line("yol cok uzun");
+                        return;
+                    }
+                };
                 match vfs::remove_file(arg) {
                     Ok(()) => {
                         write_str("silindi: ");
@@ -1075,7 +1261,16 @@ fn execute(line: &str) {
             Ok(()) => write_line("tcmkfs: onbellek diske yazildi."),
             Err(e) => write_line(tcmkfs::error_name(e)),
         },
-        "cat" => match vfs::lookup(arg) {
+        "cat" => {
+            let mut pbuf = [0u8; tcmkfs::PATH_MAX];
+            let arg = match absolute(arg, &mut pbuf) {
+                Some(p) => p,
+                None => {
+                    write_line("yol cok uzun");
+                    return;
+                }
+            };
+            match vfs::lookup(arg) {
             Some(node) => {
                 let mut buf = [0u8; 256];
                 let n = vfs::read(node, 0, &mut buf).unwrap_or(0);
@@ -1087,11 +1282,28 @@ fn execute(line: &str) {
                 }
             }
             None => write_line("dosya bulunamadi"),
-        },
+            }
+        }
         "run" => {
             if arg.is_empty() {
                 write_line("kullanim: run <yol>");
             } else {
+                // `run paint` kisa addir, yol degil. Yalnizca icinde
+                // egik cizgi olan (yani gercekten yol olan) argumanlar
+                // calisma dizinine gore cozulur; boylece `run ./notes` ve
+                // `run bin/hello` calisirken kisa adlar bozulmuyor.
+                let mut pbuf = [0u8; tcmkfs::PATH_MAX];
+                let arg = if arg.contains('/') && !arg.starts_with('/') {
+                    match absolute(arg, &mut pbuf) {
+                        Some(p) => p,
+                        None => {
+                            write_line("yol cok uzun");
+                            return;
+                        }
+                    }
+                } else {
+                    arg
+                };
                 match crate::level0a::launcher::spawn_user_app(arg) {
                     Ok(()) => {
                         write_str("baslatildi: ");

@@ -134,10 +134,15 @@ fn arm_irq() {
     IRQ_SEEN.store(false, Ordering::SeqCst);
 }
 
-/// Kesmeyi bekler. Beklenemeyen baglamlarda (idle gorevi, acilis) hicbir
-/// sey yapmadan doner ve cagiran yoklamaya duser.
+/// Kesmeyi bekler. Beklenemeyen baglamlarda (idle, masaustu, acilis)
+/// hicbir sey yapmadan doner ve cagiran yoklamaya duser.
+///
+/// "Uyutulamayan gorev" sorusunun cevabi zamanlayicidadir
+/// (`scheduler::can_block`), burada degil: eskiden burada "0 numara mi?"
+/// diye bakiliyordu ve masaustu ayri bir goreve tasindiginda bu sessizce
+/// yanlis cevap vermeye basladi.
 fn await_irq() {
-    if crate::level0a::core::scheduler::current_id() == 0 {
+    if !crate::level0a::core::scheduler::current_can_block() {
         return;
     }
     crate::level0a::core::scheduler::wait_for_io(

@@ -152,6 +152,36 @@ pub fn spawn(name: &'static str, entry: extern "C" fn() -> !) -> Option<usize> {
     spawn_inner(name, entry, false)
 }
 
+/// **Uyutulamayan** gorev: masaustu dongusu.
+///
+/// 0 numara (idle) her zaman uyutulamazdi -- uyuyacak baska gorev
+/// olmayabilir. Masaustu ise ayri bir sebeple uyutulamaz: ekrani cizen,
+/// girdiyi dagitan ve **kabugu kosturan** gorev odur. Uykuya girerse
+/// ekran donar ve kullanici hicbir sey yapamaz.
+///
+/// Bu, masaustu ayri bir goreve tasindiginda (o zamana kadar kabuk 0
+/// numarada kosuyordu) sessizce kirilmisti: `wait_for_io` yalnizca
+/// "0 numara" istisnasina bakiyordu, oysa kabuk artik baska bir
+/// numaradaydi. Sonuc, kabuktan verilen ilk disk **yazmasinda** butun
+/// masaustunun donmasiydi -- okuma yollari inode onbelleginden
+/// dondugu icin belirti yalnizca yazmada gorunuyordu.
+static NO_BLOCK: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+/// Bu gorevi uyutulamaz olarak isaretler.
+pub fn mark_no_block(index: usize) {
+    NO_BLOCK.store(index, Ordering::Relaxed);
+}
+
+/// Gorev uyutulabilir mi? Idle ve masaustu haric hepsi uyutulabilir.
+pub fn can_block(index: usize) -> bool {
+    index != IDLE_TASK && index != NO_BLOCK.load(Ordering::Relaxed)
+}
+
+/// Calisan gorev uyutulabilir mi?
+pub fn current_can_block() -> bool {
+    can_block(CURRENT.load(Ordering::Relaxed))
+}
+
 /// `fork` icin: cocuk **beklenebilir** olarak isaretlenir, yani cikis
 /// kodu toplanana kadar zombi olarak kalir.
 pub fn spawn_child(name: &'static str, entry: extern "C" fn() -> !) -> Option<usize> {
@@ -719,8 +749,8 @@ pub fn wait_for_io(ready: impl Fn() -> bool, timeout_ticks: u32) -> bool {
     // Olcum: kac kez gercekten uyunuldu. Sayacin sifirdan buyuk olmasi,
     // disk beklemesinin CPU'yu bosa harcamadiginin dogrudan kanitidir.
     let current = CURRENT.load(Ordering::Relaxed);
-    if current == 0 {
-        // Idle baglami: uyunacak baska gorev yok, yoklamaya dusulur.
+    if !can_block(current) {
+        // Uyutulamayan baglam: yoklamaya dusulur (bkz. `can_block`).
         return ready();
     }
 

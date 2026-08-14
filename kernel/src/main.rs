@@ -478,8 +478,14 @@ fn start_desktop() {
 
     // Masaustu artik kendi gorevinde kosar; bu satirdan once cagrilamaz,
     // cunku gorev ilk turunda `wm`'in hazir oldugunu varsayar.
+    // Masaustu gorevi UYUTULAMAZ olarak isaretlenir: ekrani cizen,
+    // girdiyi dagitan ve kabugu kosturan gorev odur (bkz.
+    // `scheduler::mark_no_block`).
     match scheduler::spawn("desktop", desktop_task) {
-        Some(id) => crate::println!("[LEVEL-0a] masaustu gorevi olusturuldu (id={}).", id),
+        Some(id) => {
+            scheduler::mark_no_block(id);
+            crate::println!("[LEVEL-0a] masaustu gorevi olusturuldu (id={}).", id);
+        }
         None => level0b2::fallback::emergency(&["masaustu gorevi olusturulamadi."]),
     }
 
