@@ -61,6 +61,7 @@ mod i386_numbers {
     pub const SYS_CLOSE: u32 = 6;
     pub const SYS_DUP: u32 = 41;
     pub const SYS_DUP2: u32 = 63;
+    pub const SYS_POLL: u32 = 168;
     pub const SYS_BRK: u32 = 45;
     pub const SYS_GETPID: u32 = 20;
     pub const SYS_KILL: u32 = 37;
@@ -81,6 +82,7 @@ mod x86_64_numbers {
     pub const SYS_CLOSE: u32 = 3;
     pub const SYS_DUP: u32 = 32;
     pub const SYS_DUP2: u32 = 33;
+    pub const SYS_POLL: u32 = 7;
     pub const SYS_BRK: u32 = 12;
     pub const SYS_PIPE: u32 = 22;
     pub const SYS_FORK: u32 = 57;
@@ -146,6 +148,31 @@ fn store_status(ptr: usize, code: u32) -> bool {
 
 /// Kullanici alanindan gelen yol adinin en fazla uzunlugu.
 const PATH_MAX: usize = 128;
+
+/// Tek bir `poll` cagrisinda izlenebilecek tanimlayici sayisi. Bir
+/// surecin tablosu zaten bu kadar (`fd::MAX_FDS`).
+const MAX_POLL_FDS: usize = fd::MAX_FDS;
+
+/// `struct pollfd { int fd; short events; short revents; }` -- 8 bayt.
+/// Boyut iki mimaride de aynidir (int 4, short 2, short 2), o yuzden
+/// mimariye gore ayrilmasi gerekmiyor.
+const POLLFD_SIZE: usize = 8;
+
+/// Kopyalanan `pollfd` kaydinin cekirdek tarafindaki hali.
+#[derive(Clone, Copy)]
+struct PollEntry {
+    fd: i32,
+    events: u16,
+    revents: u16,
+}
+
+impl PollEntry {
+    const EMPTY: PollEntry = PollEntry {
+        fd: -1,
+        events: 0,
+        revents: 0,
+    };
+}
 
 fn errno_of(err: KernelError) -> i32 {
     match err {
@@ -395,6 +422,113 @@ pub fn dispatch(frame: &mut SyscallFrame) {
                 None => -EFAULT,
             }
         }
+        // `poll(pollfd[], nfds, timeout_ms)` -- "hangisi hazir?"
+        //
+        // Bu cagriya kadar cevap yoklamaktan geciyordu: uygulama her
+        // tanimlayiciyi sirayla `read` ediyor, sifir donerse uyuyordu.
+        // Iki sorunu vardi -- veri gelse bile uyku suresi kadar
+        // gecikiyordu, ve tek bir kaynagi beklerken digerlerini de
+        // yoklamak zorundaydi.
+        SYS_POLL => {
+            let count = arg2;
+            if count == 0 || count > MAX_POLL_FDS {
+                return_errno(frame, -EINVAL);
+                return;
+            }
+            let timeout = arg3 as isize;
+
+            // Dizi once cekirdege kopyalanir. Kullanici bellegine dogrudan
+            // bakip donguye girmek, kullanicinin arada sayfa esleme
+            // degistirmesine acik olurdu.
+            let mut entries = [PollEntry::EMPTY; MAX_POLL_FDS];
+            for i in 0..count {
+                let record = arg1 + i * POLLFD_SIZE;
+                if !mmu::is_user_accessible(record)
+                    || !mmu::is_user_accessible(record + POLLFD_SIZE - 1)
+                {
+                    return_errno(frame, -EFAULT);
+                    return;
+                }
+                unsafe {
+                    entries[i].fd = (record as *const i32).read_unaligned();
+                    entries[i].events = ((record + 4) as *const u16).read_unaligned();
+                }
+            }
+
+            // Zaman asimi tike cevrilir (PIT 100 Hz). Negatif = sonsuz.
+            let start = crate::level0a::pit::ticks();
+            let limit = if timeout < 0 {
+                None
+            } else {
+                Some(((timeout as u32) / 10).max(if timeout > 0 { 1 } else { 0 }))
+            };
+
+            let ready = loop {
+                let mut ready = 0usize;
+                for entry in entries.iter_mut().take(count) {
+                    // Istenmeyen olaylar suzulur; ama POLLERR/POLLHUP/
+                    // POLLNVAL POSIX'te **istenmese de** bildirilir --
+                    // kapanan bir boruyu kimse "istemez", yine de bilmek
+                    // zorundadir.
+                    let mask = if entry.fd < 0 {
+                        0
+                    } else {
+                        kernel_api::readiness(entry.fd as u32)
+                    };
+                    entry.revents = mask
+                        & (entry.events
+                            | kernel_api::POLLERR
+                            | kernel_api::POLLHUP
+                            | kernel_api::POLLNVAL);
+                    if entry.revents != 0 {
+                        ready += 1;
+                    }
+                }
+                if ready > 0 {
+                    break ready;
+                }
+                if let Some(limit) = limit {
+                    if crate::level0a::pit::ticks().wrapping_sub(start) >= limit {
+                        break 0;
+                    }
+                }
+                // Hicbiri hazir degil: bir tik **uyu**.
+                //
+                // Ilk hali `yield_now()` idi ve olcum onu eledi: tek bir
+                // `poll` cagrisi baglam degisimini saniyede 316'dan
+                // 104.000'e cikardi (330 kat). Gorev her turda hemen
+                // devredip hemen geri geldigi icin `cpu` sutununda
+                // gorunmuyordu bile -- yani "sifir CPU" olcusu
+                // yaniltiyordu; is zamanlayicinin kendisinde yaniyordu.
+                //
+                // Uyumak bu turlarin tamamini siliyor. Bedeli en fazla
+                // bir tiklik (10 ms) gecikme, ki `poll`'un zaman asimi
+                // cozunurlugu zaten PIT tiki oldugu icin yeni bir
+                // sinirlama getirmiyor.
+                //
+                // Dogrusu bir bekleme kuyrugu olurdu: her nesnenin (boru,
+                // tus kuyrugu) uyandirma listesi tutmasi ve veri gelince
+                // bekleyeni `Ready` yapmasi. O zaman gecikme de sifira
+                // inerdi -- ama her nesnenin bekleyen listesi tasimasi
+                // gerekirdi; buradaki tik cozunurluguyle deger etmiyor.
+                crate::level0a::core::scheduler::sleep_ticks(1);
+            };
+
+            // Sonuclar geri yazilir. Kopyalama sirasinda dogrulanan
+            // adresler yeniden dogrulanir: arada `yield` edildi.
+            for i in 0..count {
+                let field = arg1 + i * POLLFD_SIZE + 6;
+                if !mmu::is_user_accessible(field) || !mmu::is_user_accessible(field + 1) {
+                    return_errno(frame, -EFAULT);
+                    return;
+                }
+                unsafe { (field as *mut u16).write_unaligned(entries[i].revents) };
+            }
+
+            frame.set_return(ready);
+            return;
+        }
+
         SYS_SLEEP => {
             // arg1 = milisaniye. PIT 100 Hz oldugu icin cozunurluk 10 ms;
             // sifirdan buyuk her istek en az bir tik surer.

@@ -35,6 +35,7 @@ mod i386_numbers {
     pub const SYS_CLOSE: usize = 6;
     pub const SYS_DUP: usize = 41;
     pub const SYS_DUP2: usize = 63;
+    pub const SYS_POLL: usize = 168;
     pub const SYS_WAITPID: usize = 7;
     pub const SYS_PIPE: usize = 42;
     pub const SYS_BRK: usize = 45;
@@ -54,6 +55,7 @@ mod x86_64_numbers {
     pub const SYS_CLOSE: usize = 3;
     pub const SYS_DUP: usize = 32;
     pub const SYS_DUP2: usize = 33;
+    pub const SYS_POLL: usize = 7;
     pub const SYS_BRK: usize = 12;
     pub const SYS_PIPE: usize = 22;
     pub const SYS_FORK: usize = 57;
@@ -196,6 +198,67 @@ pub unsafe fn open_raw(path: *const u8, flags: usize) -> isize {
 /// taraf icin "dosya sonu" olusur.
 pub fn close(fd: usize) -> isize {
     unsafe { syscall1(SYS_CLOSE, fd) as isize }
+}
+
+// --- `poll(2)` ---
+
+/// Okunacak veri var (ya da dosya sonu).
+pub const POLLIN: u16 = 0x001;
+/// Yazilabilir: boruda yer var.
+pub const POLLOUT: u16 = 0x004;
+/// Hata: borunun okuyan ucu kalmadi.
+pub const POLLERR: u16 = 0x008;
+/// Karsi taraf kapandi: artik veri gelmeyecek.
+pub const POLLHUP: u16 = 0x010;
+/// Boyle bir tanimlayici yok.
+pub const POLLNVAL: u16 = 0x020;
+
+/// `poll`'un izledigi tek tanimlayici.
+///
+/// Yerlesim POSIX'in `struct pollfd`'siyle bire bir aynidir (4+2+2 = 8
+/// bayt) ve iki mimaride de ayni boyuttadir; cekirdek diziyi bu bicimde
+/// okur.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct PollFd {
+    pub fd: i32,
+    /// Beklenen olaylar (`POLLIN` / `POLLOUT`).
+    pub events: u16,
+    /// Cekirdegin **gerceklesen** olaylari yazdigi alan.
+    pub revents: u16,
+}
+
+impl PollFd {
+    pub const fn new(fd: usize, events: u16) -> PollFd {
+        PollFd {
+            fd: fd as i32,
+            events,
+            revents: 0,
+        }
+    }
+
+    /// Bu tanimlayicida beklenen olay gerceklesti mi.
+    pub fn ready(&self, mask: u16) -> bool {
+        self.revents & mask != 0
+    }
+}
+
+/// POSIX `poll`: verilen tanimlayicilardan **hangisinin** hazir
+/// oldugunu sorar.
+///
+/// `timeout_ms`: 0 = hemen don, negatif = suresiz bekle. Cozunurluk PIT
+/// tikidir (10 ms).
+///
+/// Hazir tanimlayici sayisini doner; zaman asiminda 0.
+pub fn poll(fds: &mut [PollFd], timeout_ms: isize) -> isize {
+    unsafe {
+        syscall3(
+            SYS_POLL,
+            fds.as_mut_ptr() as usize,
+            fds.len(),
+            timeout_ms as usize,
+        ) as isize
+    }
 }
 
 /// POSIX `dup`: tanimlayiciyi en kucuk bos numaraya kopyalar.

@@ -107,6 +107,18 @@ pub fn deliver_key(id: usize, ascii: u8) {
     KEY_HEAD[id].store(next, Ordering::Relaxed);
 }
 
+/// Kuyrukta tus var mi -- **almadan** bakar.
+///
+/// `poll(2)` icin gerekli: "hazir mi?" sorusunun cevabi veriyi tuketmeden
+/// verilmelidir, yoksa `poll` cagrisi tusu yer ve arkasindan gelen
+/// `read(0, ...)` bos doner.
+pub fn has_key(id: usize) -> bool {
+    if id >= wm::MAX_WINDOWS {
+        return false;
+    }
+    KEY_TAIL[id].load(Ordering::Relaxed) != KEY_HEAD[id].load(Ordering::Relaxed)
+}
+
 /// Pencerenin bekleyen tus olayini alir; yoksa 0 doner.
 pub fn poll_key(id: usize) -> u8 {
     if id >= wm::MAX_WINDOWS {

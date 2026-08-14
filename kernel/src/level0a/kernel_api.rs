@@ -235,6 +235,78 @@ pub fn create_pipe() -> Result<(usize, usize), KernelError> {
     Ok((read_fd, write_fd))
 }
 
+// --- `poll(2)` olay bitleri (Linux ile ayni sayilar) ---
+/// Okunacak veri var (ya da dosya sonu).
+pub const POLLIN: u16 = 0x001;
+/// Yazilabilir: boruda yer var.
+pub const POLLOUT: u16 = 0x004;
+/// Hata: borunun okuyan ucu kalmadi (POSIX'te SIGPIPE'in sessiz hali).
+pub const POLLERR: u16 = 0x008;
+/// Karsi taraf kapandi: yazan uc kalmadi, artik veri gelmeyecek.
+pub const POLLHUP: u16 = 0x010;
+/// Boyle bir tanimlayici yok.
+pub const POLLNVAL: u16 = 0x020;
+
+/// Bir tanimlayicinin **su anki** hazirlik durumu.
+///
+/// `poll`'un tek gercek isi budur; gerisi (dongu, zaman asimi, kullanici
+/// bellegine yazma) cevre isidir. Kural her tur icin ayri:
+///
+/// | tanimlayici | hazir sayilma kosulu |
+/// |---|---|
+/// | dosya | her zaman (yerel dosya okumasi beklemez) |
+/// | boru okuma ucu | bekleyen bayt varsa `POLLIN`; yazan uc bittiyse `POLLHUP` |
+/// | boru yazma ucu | tamponda yer varsa `POLLOUT`; okuyan kalmadiysa `POLLERR` |
+/// | yonlendirilmemis stdin | pencerede bekleyen tus varsa `POLLIN` |
+/// | yonlendirilmemis stdout/stderr | her zaman `POLLOUT` (konsol) |
+///
+/// Tus kuyruguna **bakilir, tuketilmez**: `poll` veriyi yeseydi
+/// arkasindan gelen `read` bos donerdi.
+pub fn readiness(fd_num: u32) -> u16 {
+    match fd::get(fd_num as usize) {
+        Some(entry) => match entry.kind {
+            fd::FdKind::File => POLLIN | POLLOUT,
+            fd::FdKind::PipeRead => match pipe::info(entry.node) {
+                Some((pending, writers, _)) => {
+                    let mut mask = 0;
+                    if pending > 0 {
+                        mask |= POLLIN;
+                    }
+                    // Yazan uc kalmadi: bu "dosya sonu"dur. POLLHUP ile
+                    // bildirilir ve tamponda kalan veri yine POLLIN ile
+                    // okunabilir -- ikisi ayni anda gorunebilir.
+                    if writers == 0 {
+                        mask |= POLLHUP;
+                    }
+                    mask
+                }
+                None => POLLNVAL,
+            },
+            fd::FdKind::PipeWrite => match pipe::info(entry.node) {
+                Some((pending, _, readers)) => {
+                    if readers == 0 {
+                        POLLERR
+                    } else if pending < pipe::PIPE_CAPACITY {
+                        POLLOUT
+                    } else {
+                        0
+                    }
+                }
+                None => POLLNVAL,
+            },
+        },
+        None if fd_num == FD_STDIN => {
+            let owner = scheduler::current_id();
+            match crate::level0a::wm::first_window_of(owner) {
+                Some(window) if crate::level0a::gui_api::has_key(window) => POLLIN,
+                _ => 0,
+            }
+        }
+        None if fd_num == FD_STDOUT || fd_num == FD_STDERR => POLLOUT,
+        None => POLLNVAL,
+    }
+}
+
 pub fn close(fd_num: u32) -> Result<(), KernelError> {
     if fd::close(fd_num as usize) {
         Ok(())

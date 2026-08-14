@@ -47,6 +47,7 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 8 | **Gorev yuvasi geri kazanimi** + zombi/oksuz toplama | ✅ |
 | 8 | **`pipe`** + surec basina fd tablosu | ✅ |
 | 8 | **`dup`/`dup2`** (stdout yonlendirme) | ✅ (i386 + x86_64) |
+| 8 | **`poll`** (`POLLIN`/`POLLOUT`/`POLLHUP`, zaman asimi) | ✅ (i386 + x86_64) |
 | 8 | **Surec basina program break** (`brk`) + **`read(0)` = klavye** | ✅ |
 | 8 | **POSIX sinyalleri** (`kill`/`signal`/`sigreturn`, isleyici cagrisi) | ✅ (i386 + x86_64) |
 | 8+ | musl/busybox | ⏳ yapilmadi |
@@ -75,7 +76,7 @@ Ekranda gorunenler:
   | bellek/disk | `mem` `disk` `df` `format onayla` `sync` `install onayla` |
   | dosya | `ls [dizin]` `mkdir <yol>` `rmdir <yol>` `cat <yol>` `save <yol> <metin>` `cp <kaynak> <hedef>` `rm <yol>` |
   | uygulama/pencere | `apps` `run <ad>` `win` `focus <id>` `mouse` |
-  | uygulamalar (ELF) | `paint` `plasma` `notes` `menu` `twins` `relay` `echo2` `sigdemo` `race` `reaper` `redirect` `crash` `hog` `spin` |
+  | uygulamalar (ELF) | `paint` `plasma` `notes` `menu` `twins` `relay` `echo2` `sigdemo` `race` `reaper` `redirect` `mux` `crash` `hog` `spin` |
   | uygulamalar (PE) | `winclock` (ham `int 0x2E`) `winpad` (IAT) -- i386'da PE32, x86_64'te PE32+ |
   | diger | `echo <metin>` `pipes` `clear` `help` |
 - **Sistem Gunlugu** -- cekirdek kaydinin canli goruntusu (konsol halka
@@ -1416,6 +1417,78 @@ okuyup "ikisi ayni yerden devam etsin" beklendiginde gorunur.
 Sayaclar ise dogru tutuluyor: her kopya bir sahiptir, `pipes` komutu uc
 kez ust uste `run redirect` sonrasinda da `acik boru: 0 / 4` gosteriyor.
 
+## `poll`: "hangisi hazir?"
+
+Buraya kadar cevap **yoklamaktan** geciyordu: uygulama her tanimlayiciyi
+sirayla `read` ediyor, sifir donerse uyuyordu. Iki sorunu vardi -- veri
+gelse bile uyku suresi kadar gecikiyor, ve ikinci bir kaynak (klavye)
+eklendiginde ikisini sirayla yoklamaktan baska yol kalmiyordu.
+
+`poll` soruyu tersine cevirir: **sen bekle, hangisi hazir olursa beni
+dondur.**
+
+![mux](docs/screenshot-mux.png)
+
+`mux` bir boru ile klavyeyi tek cagriyla bekler:
+
+```
+poll([ boru: POLLIN, stdin: POLLIN ], 120 ms)
+```
+
+Cocuk 24 bayti 300 ms araliklarla yaziyor, yani ebeveyn cogu turda zaman
+asimina dusuyor -- ekrandaki uc sayac tam olarak `poll`'un dondugu uc
+nedeni sayiyor. Iki mimaride de ayni sonuc: **24 veri, 8 tus, 173 zaman
+asimi**, cocuk cikis kodu 3.
+
+Hazirlik kurallari tanimlayici turune gore:
+
+| tanimlayici | hazir sayilma kosulu |
+|---|---|
+| dosya | her zaman (yerel dosya okumasi beklemez) |
+| boru okuma ucu | bekleyen bayt varsa `POLLIN`; yazan uc bittiyse `POLLHUP` |
+| boru yazma ucu | tamponda yer varsa `POLLOUT`; okuyan kalmadiysa `POLLERR` |
+| yonlendirilmemis stdin | pencerede bekleyen tus varsa `POLLIN` |
+| yonlendirilmemis stdout/stderr | her zaman `POLLOUT` (konsol) |
+
+Tus kuyruguna **bakilir, tuketilmez**. `poll` tusu yeseydi arkasindan
+gelen `read(0, ...)` bos donerdi.
+
+`POLLHUP` kalicidir: boru kapandiktan sonra izlemede birakilirsa `poll`
+bir daha hic beklemez. `mux` bu yuzden kapanan boruyu `fd = -1` yaparak
+izlemeden cikariyor -- POSIX'in negatif tanimlayiciyi yok saymasi tam da
+bunun icin. Ekrandaki "kapanistan sonraki zaman asimi: 125" sayaci bunun
+kaniti: cikarildiktan sonra `poll` yeniden **beklemeye** basliyor.
+
+### Olcumun eledigi ilk hal: `yield` bir bekleme degil
+
+Ilk uygulamada bekleme dongusu `yield_now()` cagiriyordu: "hazir yoksa
+sirayi birak, tekrar bak". `ps` tablosunda masum gorunuyordu --
+`poll` yapan surecin `cpu` sutunu **1 tik**ti, cunku gorev her turda
+hemen devredip hemen geri geliyor ve tik sayimina neredeyse hic
+yakalanmiyordu.
+
+Baglam degisimi sayaci gercegi soyledi:
+
+| durum | baglam degisimi / saniye |
+|---|---|
+| `mux` yokken (taban) | 316 |
+| `mux` `yield` ile bekliyor | **104.000** |
+| `mux` bir tik uyuyarak bekliyor | 313 |
+
+Tek bir bekleyen surec sistemi 330 katina cikariyordu. "Sifir CPU"
+olcusu yaniltmisti: is surecin kendisinde degil, **zamanlayicida**
+yaniyordu.
+
+Dongu artik `sleep_ticks(1)` cagiriyor. Bedeli en fazla bir tiklik
+(10 ms) gecikme, ki `poll`'un zaman asimi cozunurlugu zaten PIT tiki
+oldugu icin yeni bir sinirlama getirmiyor. Islevsel sonuc degismedi:
+ayni test aynen 24 veri / 8 tus / 173 zaman asimi verdi.
+
+Dogrusu bir **bekleme kuyrugu** olurdu -- her nesnenin (boru, tus
+kuyrugu) uyandirma listesi tutmasi ve veri gelince bekleyeni `Ready`
+yapmasi. O zaman gecikme sifira inerdi; tik cozunurlugunun 10 ms oldugu
+bir sistemde deger etmedi.
+
 ## Gorev yuvasi geri kazanimi ve `waitpid(-1)`
 
 Gorev tablosu sekiz yuvalidir (`MAX_TASKS`). Uzun sure `spawn` yalnizca
@@ -2051,9 +2124,10 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
 - **`fork` copy-on-write degil.** Sayfalar cagri aninda tamamen
   kopyalanir; COW icin sayfalari salt okunur isaretleyip page fault'ta
   ayirmak gerekir. Dogruluk degil, maliyet farki.
-- **Boru okumasi bloke etmez** ve boru sayisi dorttur. `dup`/`dup2` var
-  (yukari bkz.) ama `select`/`poll` yok -- hangi tanimlayicinin hazir
-  oldugunu ogrenmenin yolu yoklamaktir. `dup` ayrica konumu
+- **Boru okumasi bloke etmez** ve boru sayisi dorttur. `dup`/`dup2` ve
+  `poll` var (yukari bkz.); `select` yok -- `poll` onu kapsadigi icin
+  ayrica yazilmadi. `poll` bir bekleme kuyrugu degil, tik cozunurluklu
+  bir dongudur: uyanma gecikmesi en fazla 10 ms. `dup` ayrica konumu
   paylastirmaz, kopyalar.
 - **Standart girdi bloke etmez.** `read(0, ...)` sahibinin penceresinde
   biriken tuslari **o an ne varsa** dondurur, tus yoksa 0. Bloke eden bir
