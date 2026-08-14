@@ -6,7 +6,7 @@
 //! erisip sistemi gozlemlemeyi ve **Ring 3 uygulamalari baslatmayi**
 //! saglar; boylece "uygulama calistirilabilir" iddiasi somutlasir.
 
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::level0a::core::{fd, frames, init, kmalloc, mmu, pipe, scheduler, tcmkfs, vfs};
 use crate::level0a::drivers::{ata, block, gfx, partition, rtc};
@@ -209,19 +209,71 @@ fn prompt() {
 }
 
 /// WM'den gelen tus olayi.
+/// Calisan bir komut var mi? Varken tuslar yok sayilir.
+static BUSY: AtomicBool = AtomicBool::new(false);
+/// Calistirilmayi bekleyen komut satiri.
+static mut PENDING: [u8; MAX_COLS] = [0; MAX_COLS];
+static PENDING_LEN: AtomicUsize = AtomicUsize::new(0);
+
+/// Komutu **ayri bir gorevde** calistirir.
+///
+/// ## Neden ayri gorev
+///
+/// Kabuk masaustu gorevinde kosar ve o gorev **uyutulamaz** (ekrani o
+/// ciziyor). Yani kabuktan verilen bir disk komutu kesmeyle bekleyemez,
+/// yoklamak zorunda kalir -- ve yoklarken masaustu dongusu ilerlemez:
+/// `format onayla` boyunca ekran otuz saniye donuyor, o sirada basilan
+/// tuslar kuyruk dolunca dusuyordu.
+///
+/// Komut kendi gorevine tasininca ikisi de duzeliyor: masaustu cizmeye
+/// devam ediyor ve komut **uyutulabilir** bir baglamda kostugu icin
+/// disk beklemesi gercekten kesmeye baglaniyor (`ps` satirinda "disk"
+/// durumu, `df` cikitisinda "io beklemesi" sayaci).
+extern "C" fn command_task() -> ! {
+    let line = unsafe {
+        let base = core::ptr::addr_of!(PENDING) as *const u8;
+        core::str::from_utf8(core::slice::from_raw_parts(
+            base,
+            PENDING_LEN.load(Ordering::Relaxed),
+        ))
+        .unwrap_or("")
+    };
+    execute(line);
+    prompt();
+    BUSY.store(false, Ordering::SeqCst);
+    scheduler::terminate_current()
+}
+
 pub fn on_key(ascii: u8) {
+    // Komut kosarken girdi alinmaz: yarim kalan satir sonraki komuta
+    // karisirdi.
+    if BUSY.load(Ordering::SeqCst) {
+        return;
+    }
     match ascii {
         b'\n' => {
             newline();
             let len = INPUT_LEN.load(Ordering::Relaxed);
-            let line = unsafe {
-                let input = core::ptr::addr_of!(INPUT) as *const u8;
-                core::slice::from_raw_parts(input, len)
-            };
-            let command = core::str::from_utf8(line).unwrap_or("");
-            execute(command);
+            unsafe {
+                let src = core::ptr::addr_of!(INPUT) as *const u8;
+                let dst = core::ptr::addr_of_mut!(PENDING) as *mut u8;
+                core::ptr::copy_nonoverlapping(src, dst, len);
+            }
+            PENDING_LEN.store(len, Ordering::Relaxed);
             INPUT_LEN.store(0, Ordering::Relaxed);
-            prompt();
+
+            BUSY.store(true, Ordering::SeqCst);
+            if scheduler::spawn("kabuk", command_task).is_none() {
+                // Gorev tablosu dolu: eski yola dusulur. Komut yine
+                // calisir, yalnizca ekran o sure boyunca donar.
+                BUSY.store(false, Ordering::SeqCst);
+                let line = unsafe {
+                    let base = core::ptr::addr_of!(PENDING) as *const u8;
+                    core::str::from_utf8(core::slice::from_raw_parts(base, len)).unwrap_or("")
+                };
+                execute(line);
+                prompt();
+            }
         }
         0x08 => {
             // Backspace

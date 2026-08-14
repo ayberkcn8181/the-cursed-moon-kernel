@@ -1374,6 +1374,36 @@ olan bir surec penceresini de dondurur, oysa buradaki uygulamalar kendi
 cizim dongulerini surer. `relay`'in ebeveyni her karede yoklar ve grafik
 akici kalir.
 
+## Kabuk komutlari artik ekrani dondurmuyor
+
+Kabuk masaustu gorevinde kosuyordu ve o gorev **uyutulamaz** (ekrani o
+ciziyor). Sonuc iki katliydi: kabuktan verilen bir disk komutu kesmeyle
+bekleyemiyor, yoklamak zorunda kaliyordu -- ve yoklarken masaustu
+dongusu ilerlemiyordu. `format onayla` boyunca ekran otuz saniye
+donuyor, o sirada basilan tuslar kuyruk dolunca dusuyordu.
+
+Komut artik **kendi gorevinde** kosuyor. `ps` tablosunda gorunur:
+
+![kabuk gorevi](docs/screenshot-shelltask.png)
+
+Ikisi birden duzeldi:
+
+| | once | sonra |
+|---|---|---|
+| `format` sirasinda masaustu | donuk | **caliyor** (tik ilerliyor) |
+| `format` suresi | 30 sn+ | **8 sn** |
+| `df` -> io beklemesi | 0 | **101** |
+
+Son satir olcumun kendisi: "io beklemesi" bir gorevin disk icin
+gercekten **uyudugu** kez sayisidir. Sifir olmasi, kabugun butun disk
+isini yoklayarak yaptigi anlamina geliyordu. Komut uyutulabilir bir
+baglama tasininca kesmeyle bekleme yolu ilk kez kabuk icin de devreye
+girdi -- ve sure de bu yuzden dortte bire indi.
+
+Komut kosarken tuslar yok sayilir: yarim kalan satir sonraki komuta
+karisirdi. Gorev tablosu doluysa eski yola dusulur (komut yine calisir,
+yalnizca ekran o sure boyunca donar) -- yeni bir hata yolu acmamak icin.
+
 ## `WriteFile`: Windows ikilisi artik diske yaziyor
 
 `KERNEL32.dll` tablosunda `CreateFileA` ve `ReadFile` vardi; **`WriteFile`
@@ -2489,10 +2519,9 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
   derinlik. Dizin agaci gercek ve `.`/`..` calisiyor (yukari bkz.), ama
   sembolik baglar, izinler ve sahiplik yok. Calisma dizini **kabuga**
   aittir: Ring 3 tarafinda `chdir`/`getcwd` yok.
-- **Kabuktan verilen disk komutlari hala yoklamali.** Kabuk idle
-  gorevinde (masaustu dongusu) kosar ve o gorev uyutulamaz -- uyutmak
-  ekrani dondururdu. Ring 3 sureclerinin disk erisimi kesmeyle bekler.
-  Ayrica DMA yok: veri hala `in/out` ile kelime kelime tasinir.
+- **DMA yok**: veri hala `in/out` ile kelime kelime tasinir. (Kabuk
+  komutlari artik ayri bir gorevde kostugu icin kesmeyle bekliyor --
+  yukari bkz.)
 
 ## Kapsam Disi (sonraki fazlar)
 
