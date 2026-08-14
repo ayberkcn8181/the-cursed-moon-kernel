@@ -1525,17 +1525,22 @@ tcmk> nice 5 19
 
 `race` ayni programin iki kopyasidir ve **CPU'ya baglidir** (her turda
 sabit miktarda hesap yapar). Esit oncelikle kosarken tur sayaclari ayni
-hizda artar; oncelikler ayrilinca ayrisir. Olcum (esit fazdan sonraki
-~18 saniye):
+hizda artar; oncelikler ayrilinca ayrisir.
+
+Olcum, uygulamanin kendi sayacindan degil, **cekirdegin gorev basina
+saydigi tiklerden** (`ps`'in `cpu` sutunu) alinir -- uygulama sayaci
+uyku ve G/C ile bozulabilir, tik sayaci bozulmaz:
 
 | | i386 | x86_64 |
 |---|---|---|
-| nice -20 | +1573 tur | +1598 tur |
-| nice 19 | +266 tur | +281 tur |
-| oran | **5.9 : 1** | **5.7 : 1** |
+| nice -20 | 1072 tik | 1817 tik |
+| nice 19 | 536 tik | 948 tik |
+| oran | **2.0 : 1** | **1.9 : 1** |
 
-Butce orani nominalde 8:1'dir; olculen degerin altinda kalmasinin sebebi
-masaustu dongusunun kendi payini almasidir (asagi bkz.).
+Butce orani nominalde 8:1'dir. Olculenin altinda kalmasinin iki sebebi
+var: hak hem tik hem tur basina harcanir (ince taneli isler turlarini
+tiklerinden once tuketir), ve masaustu gorevi de ayni havuzdan pay alir
+-- `ps`'te onun `cpu` sutunu digerlerininkiyle yarisir.
 
 ### Nasil calisiyor
 
@@ -1578,22 +1583,61 @@ Iki gorevli bir sistemde biri kosuyor, oteki hakkini bitirmisse denetim
 "kimsede hak kalmadi" der ve donem **her turda** yenilenirdi. Hakki biten
 gorev aninda yeniden hak kazandigi icin oncelik hicbir sey ifade etmezdi.
 
-### Bilinen sinir: masaustu dongusunun CPU payi
+### Masaustu artik ayri bir gorev
 
-Olcumun yan urunu olarak ortaya cikan bir sey: 0 numarali gorev (idle)
-ayni zamanda **masaustu dongusudur** ve zamanlayici tiklerinin buyuk
-cogunlugunu tuketir (`ps`'te `cpu` sutunu). Kompozitor artik en fazla iki
-tikta bir tam ekran birlestirse de dongu kendisi siki calisir.
+Bir donem 0 numarali gorev (idle) ayni zamanda **masaustu dongusuydu**:
+girdiyi isliyor, pencereleri birlestiriyor, State Monitor'u besliyordu.
+Olcum bunun bedelini gosterdi -- zamanlayici tiklerinin ~%95'i oraya
+yaziliyordu ve zamanlayici muhasebesinin disinda kaldigi icin kimse onu
+sinirlayamiyordu.
 
-Her turda kosulsuz `yield` denendi ve sistemi kilitledi: uygulamalar da
-her karede biraktigi icin saniyede binlerce baglam degisimi olusuyor ve
-is yapmaya zaman kalmiyor (olcum: 151 zamanlayici tikine karsilik 815 bin
-baglam degisimi). Baglam degisimi ucuz degildir -- CR3 dahil butun baglam
-yenilenir.
+Artik masaustu kendi gorevindedir ve **normal kurallara tabidir**:
+`nice`, donem hakki, preemption. 0 numaranin tek isi bos beklemek kaldi;
+`pick_next` onu yalnizca calistirilabilir baska gorev yokken secer, o da
+`hlt` ile CPU'yu tamamen birakir. `ps`'te idle'in `cpu` sutununun 2'de
+kalmasi bunun olcusudur -- yani CPU bosa gitmiyor.
 
-Dogru cozum masaustunu **ayri bir goreve** tasiyip 0 numarayi gercek bir
-idle yapmaktir (o zaman idle yalnizca baska hicbir sey kosmadiginda
-secilir ve `hlt` edebilir). Ayri bir is olarak duruyor.
+Bu ayrimin iki yan etkisi de var: kabuk artik masaustu gorevinde kostugu
+icin disk komutlari **kesmeyle bekleyebiliyor** (bkz. IRQ14), ve
+masaustunun gercek CPU maliyeti `ps`'te gorunur hale geldi.
+
+#### Yol boyunca cikan uc hata
+
+**1. Baglam degisimi bolunemez degildi.** Masaustu ayri goreve tasinir
+tasinmaz sistem `#DB` (debug) istisnasiyla coktu; hata adresi her
+seferinde `arch_context_switch` icindeki `popfl`'in bir sonraki
+komutuydu. Yani takas edilen baglamin EFLAGS'i bozuktu ve icinde TF
+(single-step) biti vardi.
+
+Sebep: `yield_now` yalnizca **secimi** kesmelere karsi koruyordu, takasin
+kendisi acikti. O aralikta gelen bir zamanlayici kesmesi
+`preempt_from_timer` uzerinden `yield_now`'a **ic ice** girebiliyordu:
+`CURRENT` yeni goreve yazilmis ama yigin henuz degismemis oluyor, bu
+yuzden ic cagri ESKI yigini YENI gorevin yuvasina kaydediyordu. Cozum,
+secim ve takasi tek bir kesmesiz bolgeye almak. Bu hata masaustu
+ayrimindan onceki kodda da vardi; oradaki yield sikligi onu gun yuzune
+cikarmamisti.
+
+**2. Kosan gorev hicbir zaman aday olamiyordu.** `pick_next` yalnizca
+`Ready` durumundakileri tarar, oysa cagri aninda mevcut gorevin durumu
+`Running`'dir. Baska aday yoksa sistem, kosmaya hazir bir gorev VARKEN
+idle'a dusuyordu -- ve idle artik `hlt` ettigi icin CPU gercekten bosa
+gidiyordu (tiklerin %60'i idle'a yazildi). Duzeltme: baska aday yoksa
+hakki duran mevcut gorev surdurulur.
+
+**3. Kullanilmayan hak devrediyordu.** Yukaridaki duzeltmenin ilk hali
+"hakki varsa hep devam etsin" diyordu; bu sefer yuksek oncelikli gorev
+sirayi hic birakmadi ve oran 8:1 yerine **163:1** oldu (1305 tike karsi
+8 tik). Donem kapandiginda kullanilmamis hak artik **silinir**.
+
+#### Denenip geri alinan
+
+Idle dongusunde her turda kosulsuz `yield` denendi ve sistemi kilitledi:
+uygulamalar da her karede biraktigi icin saniyede binlerce baglam
+degisimi olusuyor, is yapmaya zaman kalmiyordu (olcum: 151 zamanlayici
+tikine karsilik 815 bin baglam degisimi). Baglam degisimi ucuz degildir
+-- CR3 dahil butun baglam yenilenir. Dogru cozum, yukaridaki gibi,
+masaustunu ayri bir goreve tasiyip idle'i gercekten bos birakmakti.
 
 ## Preemptive zamanlama
 

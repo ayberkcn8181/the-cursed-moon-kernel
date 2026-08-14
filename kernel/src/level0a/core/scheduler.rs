@@ -344,6 +344,12 @@ pub fn preemptions() -> usize {
     PREEMPTIONS.load(Ordering::Relaxed)
 }
 
+/// Zamanlayici baglam degisimi istiyor mu?
+///
+/// Su an yalnizca `preempt_from_timer` icinden okunuyor; disariya acik
+/// kalmasi bilincli, cunku uzun suren cekirdek islerinin arasinda
+/// "sirami birakmali miyim" diye sormasi dogru olan yontemdir.
+#[allow(dead_code)]
 pub fn needs_resched() -> bool {
     NEED_RESCHED.load(Ordering::Relaxed)
 }
@@ -359,16 +365,27 @@ pub fn yield_now() {
     // sekilde bosta calisiyordur, olu degil.
     crate::level0a::pit::beat();
 
-    let (current_index, next_index) = crate::arch::cpu::without_interrupts(|| {
-        let current = CURRENT.load(Ordering::Relaxed);
-        (current, pick_next(current))
-    });
+    // Secim VE takas tek parcada, kesmeler kapali yapilir.
+    //
+    // Onceden yalnizca secim korunuyordu; takasin kendisi kesmelere
+    // acikti. O aralikta gelen bir zamanlayici kesmesi `preempt_from_timer`
+    // uzerinden `yield_now`'a IC ICE girebiliyordu: CURRENT yeni goreve
+    // yazilmis ama yigin henuz degismemis oluyor, bu yuzden ic cagri
+    // ESKI yigini YENI gorevin yuvasina kaydediyordu. Sonucu, bir
+    // sonraki takasta `popfl`'in bozuk bir EFLAGS okumasi -- ve TF biti
+    // oradan gelirse aninda #DB istisnasi.
+    //
+    // Kesmeleri kapatmak burada tutarlidir: her gorev ayni sarmalayicinin
+    // icinde takas edilir, yani IF=0 ile cikip IF=0 ile geri girer ve
+    // sarmalayici cikista onu geri acar. Yeni dogan gorev ise
+    // `bootstrap_stack`'ten IF=1 ile baslar.
+    crate::arch::cpu::without_interrupts(|| unsafe {
+        let current_index = CURRENT.load(Ordering::Relaxed);
+        let next_index = pick_next(current_index);
+        if next_index == current_index {
+            return;
+        }
 
-    if next_index == current_index {
-        return;
-    }
-
-    unsafe {
         let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
 
         if (*tasks.add(current_index)).state == TaskState::Running {
@@ -389,6 +406,14 @@ pub fn yield_now() {
         if current_index != IDLE_TASK {
             let credits = &mut (*tasks.add(current_index)).credits;
             *credits = credits.saturating_sub(1);
+        }
+        // Idle'a gecerken donem yenilenir: baska gorev kalmadigi icin
+        // idle secildiyse, sonraki uyanmada herkesin hakki hazir olsun.
+        if next_index == IDLE_TASK {
+            let count = TASK_COUNT.load(Ordering::Relaxed);
+            for i in 0..count {
+                (*tasks.add(i)).credits = slice_ticks((*tasks.add(i)).nice);
+            }
         }
         (*tasks.add(next_index)).state = TaskState::Running;
         CURRENT.store(next_index, Ordering::Relaxed);
@@ -417,7 +442,7 @@ pub fn yield_now() {
         let old_sp_slot = core::ptr::addr_of_mut!((*tasks.add(current_index)).stack_pointer);
         let new_sp = (*tasks.add(next_index)).stack_pointer;
         arch_context_switch(old_sp_slot, new_sp);
-    }
+    });
 }
 
 /// Calisan gorevi sonlandirir ve bir daha asla ona donmez.
@@ -444,49 +469,59 @@ fn pick_next(current: usize) -> usize {
     let count = TASK_COUNT.load(Ordering::Relaxed);
     wake_expired(count);
 
-    // Donem sonu: idle DISINDA hakki kalmis hazir gorev yoksa yeni donem
-    // baslar. Idle'in muafiyeti kosula dahil edilmemeli -- edilseydi o her
-    // zaman hazir ve muaf oldugu icin kosul hicbir zaman saglanmaz, donem
-    // hic yenilenmez ve hakki biten butun gorevler kalici olarak ac
-    // kalirdi. (Tam olarak bu hata yasandi: yeni baslatilan surec hic
-    // zamanlanmadi.)
-    unsafe {
-        let tasks = core::ptr::addr_of!(TASKS) as *const Task;
-        let mut any_credited = false;
-        for i in 0..count {
-            // KOSAN gorev de sayilmali. `pick_next` cagrildigi anda o
-            // gorevin durumu `Running`'dir; yalnizca `Ready` aransaydi
-            // "kimsede hak kalmadi" sanilir ve donem HER turda yenilenirdi
-            // -- yani hakki biten gorev aninda yeniden hak kazanir ve
-            // oncelik hicbir sey ifade etmezdi. Olcum tam olarak bunu
-            // gosterdi: hak sutunu 7'ye karsi 0 iken bile iki surec ayni
-            // hizda kosuyordu.
-            let state = (*tasks.add(i)).state;
-            let runnable = state == TaskState::Ready || state == TaskState::Running;
-            if i != IDLE_TASK && runnable && (*tasks.add(i)).credits > 0 {
-                any_credited = true;
-                break;
+    // Iki gecis. Once donem hakki kalmis hazir gorevler aranir; hicbiri
+    // yoksa donem kapanir (herkesin hakki tazelenir) ve tekrar bakilir.
+    //
+    // Donem kapaninca kullanilmamis hak SILINIR, devretmez. Devretseydi
+    // yuksek oncelikli bir gorev hak biriktirip sirayi hic birakmazdi --
+    // olculdu: dusuk oncelikli surec 1305 tike karsi 8 tik aldi, yani
+    // 8:1 olmasi gereken oran 163:1'e cikti.
+    for pass in 0..2 {
+        unsafe {
+            let tasks = core::ptr::addr_of!(TASKS) as *const Task;
+            for offset in 1..=count {
+                let candidate = (current + offset) % count;
+                if (*tasks.add(candidate)).state != TaskState::Ready {
+                    continue;
+                }
+                // Idle SON CARE: normal taramada hic secilmez. Bir donem
+                // masaustu dongusuyle birlesikti ve her turda secilmesi
+                // gerekiyordu; masaustu ayri bir goreve tasindiktan sonra
+                // 0 numaranin tek isi bos beklemek kaldi.
+                if candidate == IDLE_TASK {
+                    continue;
+                }
+                if (*tasks.add(candidate)).credits == 0 {
+                    continue;
+                }
+                return candidate;
             }
         }
-        if !any_credited {
+        if pass == 0 {
             refill_credits(count);
         }
     }
 
+    // Hazir baska gorev yok. Bu, mevcut gorevin kosamayacagi anlamina
+    // GELMEZ: tarama yalnizca `Ready` olanlara bakar, oysa cagri aninda
+    // mevcut gorevin durumu `Running`'dir -- yani kendisi hicbir zaman
+    // aday olamaz. Hakki duruyorsa devam etmesi gerekir.
+    //
+    // Bu atlanirsa sistem, kosmaya hazir bir gorev VARKEN idle'a duser ve
+    // idle `hlt` ettigi icin CPU gercekten bosa gider (olculdu: tiklerin
+    // %60'i idle'a yaziliyordu).
     unsafe {
         let tasks = core::ptr::addr_of!(TASKS) as *const Task;
-        for offset in 1..=count {
-            let candidate = (current + offset) % count;
-            if (*tasks.add(candidate)).state != TaskState::Ready {
-                continue;
-            }
-            // Idle (0) ayni zamanda masaustu dongusudur; hakki bitti diye
-            // atlanirsa ekran donar. Bu yuzden secimde muaftir -- ama
-            // yukaridaki donem kosulunda sayilmaz.
-            if candidate != IDLE_TASK && (*tasks.add(candidate)).credits == 0 {
-                continue;
-            }
-            return candidate;
+        if current != IDLE_TASK
+            && (*tasks.add(current)).state == TaskState::Running
+            && (*tasks.add(current)).credits > 0
+        {
+            return current;
+        }
+        if (*tasks.add(IDLE_TASK)).state == TaskState::Ready
+            || (*tasks.add(IDLE_TASK)).state == TaskState::Running
+        {
+            return IDLE_TASK;
         }
     }
     current

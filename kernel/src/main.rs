@@ -226,11 +226,45 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info_addr: usize) 
         None => level0b2::fallback::emergency(&["worker gorevi olusturulamadi."]),
     }
 
-    // Idle gorevi (task 0) ayni zamanda **masaustu dongusudur**:
-    // girdiyi isler, pencereleri birlestirir ve State Monitor'u besler.
-    let mut last_report_tick = 0u32;
+    // --- Idle gorevi (task 0) ---
+    //
+    // Bu gorev bir donem ayni zamanda **masaustu dongusuydu**: girdiyi
+    // isliyor, pencereleri birlestiriyor, State Monitor'u besliyordu.
+    // Olcum bunun bedelini gosterdi -- zamanlayici tiklerinin ~%95'i
+    // buraya yaziliyordu ve Ring 3 uygulamalari kalanini paylasiyordu.
+    //
+    // Artik masaustu kendi gorevindedir (`desktop_task`) ve 0 numara
+    // **gercek bir idle**: `pick_next` onu yalnizca baska hicbir gorev
+    // calistirilabilir degilken secer, o da `hlt` ile bir sonraki
+    // kesmeye kadar CPU'yu tamamen serbest birakir.
+    //
+    // `hlt` sonrasi `yield_now`: kesme yeni bir gorevi hazir yapmis
+    // olabilir (uyku suresi doldu, disk kesmesi geldi). Baska hazir gorev
+    // yoksa `yield_now` baglam degistirmeden doner, yani bu dongu bos
+    // dondugunde bile ucuzdur.
+    loop {
+        arch::cpu::halt();
+        scheduler::yield_now();
+    }
+}
+
+/// Masaustu dongusu: girdi, kompozitor, State Monitor ve durum raporu.
+///
+/// Ayri bir gorev olmasi bilincli. Idle ile birlesikken zamanlayici
+/// muhasebesinin disinda kaliyordu: her turda secilip CPU'yu tuketiyor,
+/// ama oncelik butcesine tabi olmadigi icin kimse onu sinirlayamiyordu.
+/// Normal bir gorev olarak artik `nice` degeri, donem hakki ve preemption
+/// ona da uygulanir -- yani masaustu, sistemin geri kalaniyla ayni
+/// kurallara tabidir.
+extern "C" fn desktop_task() -> ! {
     /// Kompozitor tavani: en fazla iki tikta bir tam ekran birlestirme.
+    ///
+    /// 1024x768x32 bir kareyi saniyede yuzlerce kez uretmenin karsiligi
+    /// yok; ekran zaten o hizda degismiyor. Iki tik (=20 ms, ~50 kare/sn)
+    /// gozle fark edilmeyen ama uygulamalara CPU birakan bir sinirdir.
     const COMPOSE_INTERVAL_TICKS: u32 = 2;
+
+    let mut last_report_tick = 0u32;
     let mut last_compose_tick = 0u32;
 
     loop {
@@ -239,18 +273,8 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info_addr: usize) 
         // Level-0b2 -> Level-0a mesaj kuyrugu (doc S.10 Faz 4+).
         level0a::messages::drain();
 
-        // Girdi her turda islenir (gecikme fark edilir), ama KOMPOZITOR
+        // Girdi her turda islenir (gecikmesi fark edilir), kompozitor
         // sinirlanir.
-        //
-        // Onceden her turda tam ekran birlestiriliyordu ve olcum bunun
-        // bedelini gosterdi: 5151 zamanlayici tikinin 4898'i idle
-        // gorevine, yani kompozitore gidiyordu -- CPU'nun ~%95'i. Ring 3
-        // uygulamalari kalan diliminde bogusuyordu.
-        //
-        // 1024x768x32 bir kareyi saniyede yuzlerce kez uretmenin bir
-        // karsiligi yok; ekran zaten o hizda degismiyor. Iki tiklik
-        // (=20 ms, ~50 kare/sn) bir tavan, gozle fark edilmeyen ama
-        // uygulamalara CPU birakan siniri koyar.
         if level0a::wm::active() {
             level0a::wm::handle_input();
             let now = level0a::pit::ticks();
@@ -258,23 +282,6 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info_addr: usize) 
                 last_compose_tick = now;
                 level0a::wm::compose();
             }
-        }
-
-        // CPU yalnizca zamanlayici istediginde birakilir.
-        //
-        // Her turda kosulsuz birakmak DENENDI ve sistemi kilitledi:
-        // uygulamalar da her karede biraktigi icin iki gorev arasinda
-        // saniyede binlerce baglam degisimi olusuyor, is yapmaya zaman
-        // kalmiyor (olcum: 151 zamanlayici tikine karsilik 815 bin
-        // baglam degisimi). Baglam degisimi ucuz degildir -- CR3 dahil
-        // butun baglam yenilenir.
-        //
-        // Bunun bilinen bedeli: bu gorev tiklerin cogunu tuketiyor
-        // (bkz. README, "masaustu dongusunun CPU payi"). Dogru cozum
-        // masaustunu ayri bir goreve tasiyip 0 numarayi gercek bir idle
-        // yapmaktir; ayri bir is.
-        if scheduler::needs_resched() {
-            scheduler::yield_now();
         }
 
         // ~10 saniyede bir sistem durumu raporu (100 Hz PIT).
@@ -290,9 +297,11 @@ pub extern "C" fn kernel_main(multiboot_magic: u32, multiboot_info_addr: usize) 
             );
         }
 
-        if !level0a::wm::active() {
-            arch::cpu::halt();
-        }
+        // Sirayi birak. Kosulsuz birakmak burada guvenlidir cunku bu gorev
+        // artik donem hakkina tabidir: hakki bitince secilmez, yani eski
+        // "her turda yield" denemesindeki baglam degisimi firtinasi
+        // olusamaz.
+        scheduler::yield_now();
     }
 }
 
@@ -431,6 +440,13 @@ fn start_desktop() {
 
     // Etkilesimli kabuk.
     level0a::shell::start(30, 300);
+
+    // Masaustu artik kendi gorevinde kosar; bu satirdan once cagrilamaz,
+    // cunku gorev ilk turunda `wm`'in hazir oldugunu varsayar.
+    match scheduler::spawn("desktop", desktop_task) {
+        Some(id) => crate::println!("[LEVEL-0a] masaustu gorevi olusturuldu (id={}).", id),
+        None => level0b2::fallback::emergency(&["masaustu gorevi olusturulamadi."]),
+    }
 
     // Ring 3 GUI uygulamalari (her biri kendi gorevinde).
     #[cfg(target_arch = "x86")]
