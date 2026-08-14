@@ -45,6 +45,7 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 8 | **`fork`** (adres uzayi kopyasi + iki kez donen cagri) | ✅ (i386 + x86_64) |
 | 8 | **Copy-on-write `fork`** (referans sayaci, `CR0.WP`, #PF'te cogaltma) | ✅ (i386 + x86_64) |
 | 8 | **Talep uzerine sayfalama** (`PTE_DEMAND`, ilk dokunusta cerceve) | ✅ (i386 + x86_64) |
+| 8 | **`mmap`/`munmap`** (anonim; cerceveler havuza geri doner) | ✅ (i386 + x86_64) |
 | 8 | **`waitpid`** (`Waiting` durumu, cikis kodu, `WNOHANG`, `-1`) | ✅ (i386 + x86_64) |
 | 8 | **Gorev yuvasi geri kazanimi** + zombi/oksuz toplama | ✅ |
 | 8 | **`pipe`** + surec basina fd tablosu | ✅ |
@@ -79,7 +80,7 @@ Ekranda gorunenler:
   | bellek/disk | `mem` `disk` `df` `format onayla` `sync` `install onayla` |
   | dosya | `ls [dizin]` `mkdir <yol>` `rmdir <yol>` `cat <yol>` `save <yol> <metin>` `cp <kaynak> <hedef>` `rm <yol>` |
   | uygulama/pencere | `apps` `run <ad>` `win` `focus <id>` `mouse` |
-  | uygulamalar (ELF) | `paint` `plasma` `notes` `menu` `twins` `relay` `echo2` `sigdemo` `race` `reaper` `redirect` `mux` `masked` `crash` `hog` `spin` |
+  | uygulamalar (ELF) | `paint` `plasma` `notes` `menu` `twins` `relay` `echo2` `sigdemo` `race` `reaper` `redirect` `mux` `masked` `arena` `crash` `hog` `spin` |
   | uygulamalar (PE) | `winclock` (ham `int 0x2E`) `winpad` (IAT) -- i386'da PE32, x86_64'te PE32+ |
   | diger | `echo <metin>` `pipes` `clear` `help` |
 - **Sistem Gunlugu** -- cekirdek kaydinin canli goruntusu (konsol halka
@@ -1354,6 +1355,74 @@ olan bir surec penceresini de dondurur, oysa buradaki uygulamalar kendi
 cizim dongulerini surer. `relay`'in ebeveyni her karede yoklar ve grafik
 akici kalir.
 
+## `mmap` / `munmap`: ilk gercek "geri verme"
+
+`brk` tek bir siniri iter ve geri cekildiginde cerceve **iade etmez** --
+adres hala surecin sayilir, cerceve surec olene kadar durur. `mmap`
+bagimsiz bloklar verir, `munmap` ise cerceveleri gercekten havuza
+dondurur. Sistemdeki ilk calisma-zamani geri verme yolu budur.
+
+### Defter neden yok
+
+Ayri bir "hangi sayfa bos" tablosu tutulmuyor: **sayfa tablosunun kendisi
+zaten o defter.** Bir PTE'nin uc hali var ve ucu de ayirt edilebilir:
+
+| PTE | anlam |
+|---|---|
+| `0` | bos -- `mmap` buradan verebilir |
+| `PTE_DEMAND` | ayrildi, henuz dokunulmadi |
+| `PRESENT` | ayrildi ve cerceve verildi |
+
+`mmap` ardisik sifir girdi arar, bulunca `PTE_DEMAND` yazar; cerceveyi
+ilk dokunusta sayfa hatasi verir (talep uzerine sayfalama zaten oradaydi).
+Ikinci bir veri yapisi tutmak, `fork`/`execve`/surec olumu yollarinin
+hepsinde ayrica guncellenmesi gereken bir sey demek olurdu -- ve senkron
+kalmadigi gun sessizce yanlis cevap verirdi.
+
+Bolge de ayri: ilk pencere (`USER_MAP_SIZE`, 512 KiB) imaj + yigin +
+`brk` icin, `mmap` penceresi (0x00C80000, 512 KiB) calisma aninda istenen
+bloklar icin. Ikisinin ayri olmasi birbirlerine girmelerini engelliyor.
+
+### Olcum
+
+Durum cubugundaki `cerceve` sayaci butun hikayeyi anlatiyor -- `arena`
+32 KiB'lik bloklarla calisiyor (blok = 8 sayfa):
+
+![mmap](docs/screenshot-mmap.png)
+
+| adim | cerceve |
+|---|---|
+| taban (`arena` yok) | 10 |
+| 10 blok ayrildi ve dolduruldu | 97 |
+| `z` -- hepsi `munmap` | **17** |
+| 4 blok yeniden ayrildi | 49 |
+
+10 blok = 80 sayfa; `arena`'nin kendi sayfalariyla 87 artis. `munmap`
+sonrasi 17'ye dusuyor: **80 cerceve gercekten geri geldi.** Yeniden dort
+blok (32 sayfa) alininca 49 -- bosalan adresler de tekrar kullanilabiliyor.
+
+x86_64'te ayni test 0 -> 90 -> 10 -> 42 veriyor.
+
+`ps` satirinda ucuncu bir sayi belirdi: `(123+123+16m sayfa)` --
+yerlesik, ayrilmis ve **`mmap` penceresinde tutulan** sayfalar.
+
+### Cerceveler sifirlanmis geliyor
+
+`arena` her blogu **once okuyor**, sonra dolduruyor: sifir olmayan bayt
+sayaci 0 kaliyor. Cekirdek cerceveyi vermeden once temizliyor;
+temizlemeseydi onceki surecin verisi yeni surece sizardi -- izolasyonun
+tam da engellemesi gereken sey. Desen de adrese bagli, yani bir blok
+digerinin uzerine yazsa dogrulama bunu yakalardi (0 bozuk bayt).
+
+### Bilerek yapilmayanlar
+
+POSIX `mmap` alti argumanlidir. TCMK yalnizca **anonim ve ozel**
+eslemeyi destekler: `addr` sifir olmak zorunda (yeri cekirdek secer),
+`prot` yok sayilir (butun kullanici sayfalari okuma+yazma), dosya
+destekli esleme yok. Desteklenmeyen bir cagriyi sessizce baska bir sey
+gibi davranmak yerine reddetmek dogru olan -- `addr != 0` gelirse
+`-EINVAL` doner.
+
 ## Sinyal maskesi ve `alarm`
 
 Sinyaller teslim ediliyordu ama **ertelenemiyordu**. POSIX'te bir
@@ -2307,11 +2376,10 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
   kullanici bolgesinin basina koyar; `/fixed:no` ile linklenmemis, yani
   yeniden yerlesim tablosu tasimayan bir ikili yuklenemez. Windows'ta bu
   ikilinin tercih ettigi tabana bagli olarak calisabilirdi.
-- **Sayfa disari atilamaz.** Talep uzerine sayfalama var (yukari bkz.)
-  ama tek yon: sayfa dolar, bir daha bosalmaz. Diske takas (swap) ve
-  kullanilmayan sayfayi geri alma yok; havuz dolarsa `fork`/`execve`
-  reddedilir. Ayrica surec basina pencere sabit 512 KiB -- `mmap` ile
-  buyutulemez.
+- **Diske takas (swap) yok.** `munmap` cerceveleri geri veriyor (yukari
+  bkz.) ama kullanilan bir sayfayi diske atip yerini bosaltmak yok;
+  havuz dolarsa `fork`/`execve` reddedilir. `mmap` penceresi de surec
+  basina sabit 512 KiB ve yalnizca anonim -- dosya destekli esleme yok.
 - **Boru okumasi bloke etmez** ve boru sayisi dorttur. `dup`/`dup2` ve
   `poll` var (yukari bkz.); `select` yok -- `poll` onu kapsadigi icin
   ayrica yazilmadi. `poll` bir bekleme kuyrugu degil, tik cozunurluklu

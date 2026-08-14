@@ -72,6 +72,9 @@ mod i386_numbers {
     pub const SYS_SIGRETURN: u32 = 119;
     pub const SYS_SIGPROCMASK: u32 = 126;
     pub const SYS_ALARM: u32 = 27;
+    /// i386'da `mmap2` -- eski `mmap`(90) argumanlari bir yapida alirdi.
+    pub const SYS_MMAP: u32 = 192;
+    pub const SYS_MUNMAP: u32 = 91;
     pub const SYS_GETPRIORITY: u32 = 96;
     pub const SYS_SETPRIORITY: u32 = 97;
 }
@@ -101,6 +104,8 @@ mod x86_64_numbers {
     /// x86_64'te klasik `sigprocmask` yoktur; `rt_sigprocmask` gecer.
     pub const SYS_SIGPROCMASK: u32 = 14;
     pub const SYS_ALARM: u32 = 37;
+    pub const SYS_MMAP: u32 = 9;
+    pub const SYS_MUNMAP: u32 = 11;
     pub const SYS_GETPRIORITY: u32 = 140;
     pub const SYS_SETPRIORITY: u32 = 141;
 }
@@ -119,6 +124,8 @@ const EAGAIN: i32 = 11;
 const ECHILD: i32 = 10;
 /// Boyle bir surec yok (`kill` hedefi).
 const ESRCH: i32 = 3;
+/// Bellek yetmedi (`mmap`).
+const ENOMEM: i32 = 12;
 
 /// `setpriority`/`getpriority` icin desteklenen tek `which` degeri.
 const PRIO_PROCESS: usize = 0;
@@ -555,6 +562,44 @@ pub fn dispatch(frame: &mut SyscallFrame) {
             let task = crate::level0a::core::scheduler::current_id();
             frame.set_return(signal::alarm(task, arg1 as u32) as usize);
             return;
+        }
+
+        // `mmap(addr, len, prot, ...)` -- yalnizca anonim/ozel.
+        //
+        // POSIX imzasi alti argumanlidir; TCMK'nin cerceve yapisi bes
+        // tasir ve dosya destekli esleme zaten yok. Bu yuzden `addr`
+        // sifir olmak zorunda (cekirdek yeri secer), `prot` yok sayilir
+        // (butun kullanici sayfalari okuma+yazma) ve dosya alanlari hic
+        // gelmez. Desteklenmeyen bir cagriyi sessizce baska bir sey gibi
+        // davranmak yerine reddetmek dogru olan.
+        SYS_MMAP => {
+            let space = crate::level0a::core::scheduler::address_space_of(
+                crate::level0a::core::scheduler::current_id(),
+            );
+            if arg1 != 0 || space == 0 {
+                -EINVAL
+            } else {
+                match unsafe { mmu::mmap_user(space, arg2) } {
+                    Some(addr) => {
+                        frame.set_return(addr);
+                        return;
+                    }
+                    // POSIX `mmap` hatada MAP_FAILED (-1) doner; Linux
+                    // ABI'sinde bu negatif errno'dur.
+                    None => -ENOMEM,
+                }
+            }
+        }
+
+        SYS_MUNMAP => {
+            let space = crate::level0a::core::scheduler::address_space_of(
+                crate::level0a::core::scheduler::current_id(),
+            );
+            if space != 0 && unsafe { mmu::munmap_user(space, arg1, arg2) } {
+                0
+            } else {
+                -EINVAL
+            }
         }
 
         SYS_SLEEP => {

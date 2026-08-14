@@ -176,9 +176,13 @@ pub fn status_line() -> StatusLine {
     };
     let _ = write!(
         line,
-        "gorev:{}  pencere:{}  tick:{}  nabiz:{}",
+        "gorev:{}  pencere:{}  cerceve:{}  tick:{}  nabiz:{}",
         crate::level0a::core::scheduler::task_count(),
         wm::window_count(),
+        // Cerceve sayisi durum cubugunda: bellek davranisi (talep
+        // uzerine dolma, `munmap` ile geri verme) boylece komut yazmadan
+        // izlenebiliyor.
+        crate::level0a::core::frames::used(),
         crate::level0a::pit::ticks(),
         crate::level0a::pit::heartbeat(),
     );

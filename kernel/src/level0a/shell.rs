@@ -384,6 +384,12 @@ fn execute(line: &str) {
                     write_num(mmu::user_pages(space));
                     write_str("+");
                     write_num(mmu::reserved_pages(space));
+                    let mapped = mmu::mmap_pages(space);
+                    if mapped > 0 {
+                        write_str("+");
+                        write_num(mapped);
+                        write_str("m");
+                    }
                     write_str(" sayfa)");
                 }
                 newline();
@@ -733,6 +739,11 @@ fn execute(line: &str) {
             write_hex(mmu::USER_MEM_START, 8);
             write_str(" + ");
             write_num(mmu::USER_MAP_SIZE / 1024);
+            write_line(" KiB / surec");
+            write_str("mmap penceresi: ");
+            write_hex(mmu::USER_MMAP_START, 8);
+            write_str(" + ");
+            write_num(mmu::USER_MMAP_SIZE / 1024);
             write_line(" KiB / surec");
             write_str("cerceve havuzu: ");
             write_num(frames::used());

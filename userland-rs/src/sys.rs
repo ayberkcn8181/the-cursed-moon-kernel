@@ -45,6 +45,8 @@ mod i386_numbers {
     pub const SYS_SIGRETURN: usize = 119;
     pub const SYS_SIGPROCMASK: usize = 126;
     pub const SYS_ALARM: usize = 27;
+    pub const SYS_MMAP: usize = 192;
+    pub const SYS_MUNMAP: usize = 91;
     pub const SYS_GETPRIORITY: usize = 96;
     pub const SYS_SETPRIORITY: usize = 97;
 }
@@ -71,6 +73,8 @@ mod x86_64_numbers {
     pub const SYS_SIGRETURN: usize = 15;
     pub const SYS_SIGPROCMASK: usize = 14;
     pub const SYS_ALARM: usize = 37;
+    pub const SYS_MMAP: usize = 9;
+    pub const SYS_MUNMAP: usize = 11;
     pub const SYS_GETPRIORITY: usize = 140;
     pub const SYS_SETPRIORITY: usize = 141;
 }
@@ -263,6 +267,27 @@ pub fn poll(fds: &mut [PollFd], timeout_ms: isize) -> isize {
             timeout_ms as usize,
         ) as isize
     }
+}
+
+/// Anonim bellek ayirir (`mmap(NULL, len, ...)`); adresi doner.
+///
+/// `brk`'ten farki: `brk` tek bir siniri iter, `mmap` bagimsiz bloklar
+/// verir ve `munmap` **cerceveleri havuza geri dondurur**.
+///
+/// TCMK yalnizca anonim/ozel eslemeyi destekler: `addr` sifir olmak
+/// zorunda, `prot` yok sayilir, dosya destekli esleme yok.
+pub fn mmap(len: usize) -> Option<*mut u8> {
+    let r = unsafe { syscall3(SYS_MMAP, 0, len, 0) as isize };
+    if r < 0 {
+        None
+    } else {
+        Some(r as usize as *mut u8)
+    }
+}
+
+/// Ayrilan bolgeyi birakir; cerceveler havuza doner.
+pub fn munmap(addr: *mut u8, len: usize) -> isize {
+    unsafe { syscall2(SYS_MUNMAP, addr as usize, len) as isize }
 }
 
 /// POSIX `dup`: tanimlayiciyi en kucuk bos numaraya kopyalar.

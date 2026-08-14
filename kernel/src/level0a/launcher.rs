@@ -92,6 +92,7 @@ static KNOWN_APPS: &[(&str, &str, &str)] = &[
     ("redirect", "/bin/redirect", "redirect"),
     ("mux", "/bin/mux", "mux"),
     ("masked", "/bin/masked", "masked"),
+    ("arena", "/bin/arena", "arena"),
     // Windows ikilisi: yol .exe ile biter, cekirdek bicimi magic'ten
     // anlar (bkz. vfs::format) ve PE yukleyicisine yonlendirir. Yol iki
     // mimaride de aynidir; VFS'te duran ikilinin PE32 mi PE32+ mi oldugu

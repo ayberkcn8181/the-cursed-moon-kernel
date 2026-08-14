@@ -399,6 +399,109 @@ pub unsafe fn reserve_user_range(cr3: usize, start: usize, len: usize) -> bool {
     true
 }
 
+/// Anonim, ozel (`MAP_ANONYMOUS | MAP_PRIVATE`) bir bolge ayirir.
+///
+/// ## Defter neden yok
+///
+/// Ayri bir "hangi sayfa bos" tablosu tutulmuyor: **sayfa tablosunun
+/// kendisi zaten o defter**. Bir PTE'nin uc hali var ve ucu de ayirt
+/// edilebilir:
+///
+/// | PTE | anlam |
+/// |---|---|
+/// | 0 | bos -- `mmap` buradan verebilir |
+/// | `PTE_DEMAND` | ayrildi, henuz dokunulmadi |
+/// | `PRESENT` | ayrildi ve cerceve verildi |
+///
+/// Yani `mmap` ardisik sifir girdi arar, bulunca `PTE_DEMAND` yazar;
+/// cerceveyi ilk dokunusta sayfa hatasi verir. Ikinci bir veri yapisi
+/// tutmak, `fork`/`execve`/surec olumu yollarinin hepsinde ayrica
+/// guncellenmesi gereken bir sey demek olurdu -- ve senkron kalmadigi
+/// gun sessizce yanlis cevap verirdi.
+///
+/// # Safety
+/// `cr3` bu modulun urettigi bir adres uzayi olmalidir.
+pub unsafe fn mmap_user(cr3: usize, len: usize) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    let pages = (len + PAGE_SIZE - 1) / PAGE_SIZE;
+    let total = USER_MMAP_SIZE / PAGE_SIZE;
+    if pages > total {
+        return None;
+    }
+
+    // Ardisik bos girdi ara (first-fit).
+    let mut run = 0usize;
+    for i in 0..total {
+        let entry = user_pte(cr3, USER_MMAP_START + i * PAGE_SIZE)?;
+        if entry.read() != 0 {
+            run = 0;
+            continue;
+        }
+        run += 1;
+        if run < pages {
+            continue;
+        }
+        let first = i + 1 - pages;
+        for j in first..first + pages {
+            user_pte(cr3, USER_MMAP_START + j * PAGE_SIZE)?.write(PTE_DEMAND);
+        }
+        flush_tlb();
+        return Some(USER_MMAP_START + first * PAGE_SIZE);
+    }
+    None
+}
+
+/// `munmap`: bolgeyi birakir ve **cerceveleri havuza geri verir**.
+///
+/// Sistemdeki ilk gercek "geri verme" yolu budur: `brk` kuculdugunde
+/// cerceve iade edilmez (adres hala surecin), surec olunce hepsi birden
+/// gider. `munmap` ise calisma aninda geri verir.
+///
+/// # Safety
+/// `cr3` bu modulun urettigi bir adres uzayi olmalidir.
+pub unsafe fn munmap_user(cr3: usize, addr: usize, len: usize) -> bool {
+    if len == 0 || addr % PAGE_SIZE != 0 {
+        return false;
+    }
+    // Yalnizca `mmap` penceresi: imaj/yigin bolgesini bosaltmak surecin
+    // ayaginin altindaki halyi cekmek olurdu.
+    if addr < USER_MMAP_START || addr + len > USER_MMAP_START + USER_MMAP_SIZE {
+        return false;
+    }
+
+    let pages = (len + PAGE_SIZE - 1) / PAGE_SIZE;
+    for i in 0..pages {
+        let entry_ptr = match user_pte(cr3, addr + i * PAGE_SIZE) {
+            Some(e) => e,
+            None => return false,
+        };
+        let entry = entry_ptr.read();
+        if entry & PTE_PRESENT != 0 {
+            frames::free((entry & ADDR_MASK) as usize);
+        }
+        entry_ptr.write(0);
+    }
+    flush_tlb();
+    true
+}
+
+/// `mmap` penceresinde ayrilmis (bos olmayan) sayfa sayisi.
+pub fn mmap_pages(cr3: usize) -> usize {
+    if cr3 == 0 || cr3 == kernel_cr3() {
+        return 0;
+    }
+    unsafe {
+        (0..USER_MMAP_SIZE / PAGE_SIZE)
+            .filter(|i| match user_pte(cr3, USER_MMAP_START + i * PAGE_SIZE) {
+                Some(e) => e.read() != 0,
+                None => false,
+            })
+            .count()
+    }
+}
+
 /// Talep uzerine sayfalama hatasini cozer; cozduyse `true` doner.
 ///
 /// # Safety
@@ -696,3 +799,14 @@ unsafe fn copy_table(src: usize, dst: usize) {
 /// 512 KiB, imaj + yigin icin fazlasiyla yeter; pencere tamponlari bunun
 /// disinda, kendi yuvalarina eslenir.
 pub const USER_MAP_SIZE: usize = 512 * 1024;
+
+/// **Anonim `mmap` penceresi**: surecin talep uzerine buyuyebilecegi
+/// ikinci bolge.
+///
+/// `USER_MAP_SIZE`'lik ilk pencere imaj + yigin + `brk` icindir ve
+/// yukleyici tarafindan bastan ayrilir. `mmap` ise **calisma aninda**
+/// yer ister; ayri bir pencere olmasi ikisinin birbirine girmesini
+/// engeller. Ustundeki bolge (0x00D00000) pencere tamponlarina ait.
+pub const USER_MMAP_START: usize = USER_MEM_START + USER_MAP_SIZE;
+pub const USER_MMAP_SIZE: usize = 512 * 1024;
+
