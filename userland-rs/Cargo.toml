@@ -20,6 +20,10 @@ path = "src/win/clock.rs"
 name = "winpad"
 path = "src/win/notepad.rs"
 
+[[bin]]
+name = "winfiles"
+path = "src/win/explorer.rs"
+
 [profile.dev]
 panic = "abort"
 opt-level = 1

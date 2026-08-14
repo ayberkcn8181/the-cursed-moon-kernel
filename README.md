@@ -43,6 +43,7 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 9c | **IRQ14**: disk kesmeyle bekler (`TaskState::IoWait`) | ✅ |
 | 7e | **`WriteFile`**: PE ikilisi diske yazar (`CreateFileA`+`WriteFile`) | ✅ (PE32 + PE32+) |
 | 5b | **`lseek`/`fstat`** + Win32 ikizleri (`SetFilePointer`/`GetFileSize`) | ✅ (i386 + x86_64) |
+| 5c | **Dizin gezinmesi**: `getdents` + `FindFirstFileA`/`FindNextFileA` | ✅ (i386 + x86_64, ELF + PE) |
 | — | **Kendi onyukleyicisi** + diske kurulum (`install`) | ✅ (i386) |
 | 8 | **`execve`** (surec kendi yerine program yukler) | ✅ (i386 + x86_64) |
 | 8 | **`fork`** (adres uzayi kopyasi + iki kez donen cagri) | ✅ (i386 + x86_64) |
@@ -83,8 +84,8 @@ Ekranda gorunenler:
   | bellek/disk | `mem` `disk` `df` `format onayla` `sync` `install onayla` |
   | dosya | `ls [dizin]` `mkdir <yol>` `rmdir <yol>` `cat <yol>` `save <yol> <metin>` `cp <kaynak> <hedef>` `rm <yol>` |
   | uygulama/pencere | `apps` `run <ad>` `win` `focus <id>` `mouse` |
-  | uygulamalar (ELF) | `paint` `plasma` `notes` `menu` `twins` `relay` `echo2` `sigdemo` `race` `reaper` `redirect` `mux` `masked` `arena` `seeker` `crash` `hog` `spin` |
-  | uygulamalar (PE) | `winclock` (ham `int 0x2E`) `winpad` (IAT) -- i386'da PE32, x86_64'te PE32+ |
+  | uygulamalar (ELF) | `paint` `plasma` `notes` `menu` `twins` `relay` `echo2` `sigdemo` `race` `reaper` `redirect` `mux` `masked` `arena` `seeker` `browse` `crash` `hog` `spin` |
+  | uygulamalar (PE) | `winclock` (ham `int 0x2E`) `winpad` `winfiles` (IAT) -- i386'da PE32, x86_64'te PE32+ |
   | diger | `echo <metin>` `pipes` `clear` `help` |
 - **Sistem Gunlugu** -- cekirdek kaydinin canli goruntusu (konsol halka
   tamponu her karede pencereye cizilir).
@@ -1419,6 +1420,98 @@ Level-0b1'in butun mesele ettigi sey bu: iki ABI, tek Level-0a API'si.
 * **Boru bir akistir**, konumu yoktur: boru ucunda `lseek` reddedilir
   (POSIX de `ESPIPE` doner).
 
+## Dizin gezinmesi: `getdents` ve `FindFirstFileA`
+
+Bu cagriya kadar bir uygulama dosya sistemini **goremiyordu**. Adini
+onceden bildigi bir dosyayi acabiliyordu (`open`), okuyabiliyordu
+(`read`), boyutunu ogrenebiliyordu (`fstat`) -- ama "burada ne var?"
+diye soramiyordu. Dizin listesini yalnizca cekirdegin kendi kabugu
+biliyordu, ve o da listeyi kendi icinde, iki ayri dongude uretiyordu.
+
+### Tek gezinme, iki ABI
+
+Gezinme `kernel_api::next_entry` icinde **bir kez** yazildi; iki alt
+sistem de oraya iner:
+
+| POSIX (ELF) | Win32 (PE) | Level-0a |
+|---|---|---|
+| `open(yol)` -> dizin fd'si | `FindFirstFileA(desen, &data)` | `kernel_api::open_dir` |
+| `getdents(fd, buf, n)` | `FindNextFileA(h, &data)` | `kernel_api::next_entry` |
+| `close(fd)` | `FindClose(h)` | `kernel_api::close` |
+
+Goruntuleri farkli -- POSIX tampona **birden cok** kayit paketler, Win32
+her cagride bir `WIN32_FIND_DATAA` doldurur -- ama iki listenin
+ayrisabilmesi icin cekirdekte ikinci bir gezinme kodu olmasi gerekirdi.
+Yok. Kabugun `ls` komutu da ayni cagriyi kullanir, yani `ls` ile bir
+Ring 3 tarayicisinin ayni dizinde farkli sey gormesi mumkun degil.
+
+Solda `browse` (ELF, x86_64), sagda `winfiles` (PE32, i386):
+
+![browse](docs/screenshot-browse.png)
+![winfiles](docs/screenshot-winfiles.png)
+
+`winfiles` ekranindaki ucuncu sutun olcunun kendisi: cekirdek zaman
+damgasini gercek bir `FILETIME`a cevirip yaziyor (1601'den beri gecen
+100 ns'lik araliklar), uygulama onu Unix zamanina geri ceviriyor.
+Ekrandaki `1786748782`, kabugun `ls` ciktisindaki `2026-08-14 23:06`
+ile ayni an -- cevrim iki yonde de dogru.
+
+### Imlec uzayi: uc kaynak, tek sayi
+
+TCMK'de "dizin icerigi" tek bir tabloda durmaz:
+
+| bolge | kaynak | ornek |
+|---|---|---|
+| 1 | TCMKFS'in alt dizinleri (diskteki inode agaci) | `/notlar/alt` |
+| 2 | RAMFS yollarinin **ima ettigi** dizinler | `/bin` |
+| 3 | VFS dosyalari (RAMFS + TCMKFS birlesik) | `/notlar/bir.txt` |
+
+Ikinci bolge yeni ve gerekli: RAMFS duz bir isim tablosudur, `/bin`
+diye bir kayit **yoktur** -- yalnizca `/bin/paint` yolunun icinde ima
+edilir. Oncesinde `ls /` bu yuzden hicbir dizin gostermiyordu.
+
+Uc kaynak tek bir sayi uzayina diziliyor ve imleci **cagiran** tasiyor
+(dizin tanimlayicisinin `offset` alaninda). Cagri boylece durumsuz
+kaliyor: cekirdek gezinmenin yarisini bir yerde tutmuyor, ve ayni
+dizini iki kez acan bir surec iki bagimsiz imlec aliyor.
+
+### Kayit bicimi
+
+```text
+  +0  u16 reclen     kaydin toplam uzunlugu (4'un kati)
+  +2  u8  kind       1 = dosya, 2 = dizin
+  +3  u8  name_len   ad uzunlugu
+  +4  u32 size       dosya boyutu (dizinlerde 0)
+  +8  u32 mtime      son degisiklik (Unix epoch), bilinmiyorsa 0
+ +12  ad             name_len bayt, sonda NUL yok
+```
+
+Linux'un `linux_dirent64`u degil: oradaki `d_ino` ve `d_off` 64 bit
+alanlarin TCMK'de karsiligi yok (inode numarasi iki arka uc arasinda
+anlamli degil, imleci de tanimlayici tasiyor). Buna karsilik `size` ve
+`mtime` **var**: bir tarayici boyut ve tarih gostermek icin her girdide
+ayri bir `fstat` cagirmak zorunda kalmasin diye. Win32'nin
+`WIN32_FIND_DATAA`si da ayni iki alani tasir.
+
+`WIN32_FIND_DATAA` ise **birebir** Windows yerlesiminde doldurulur
+(320 bayt, `cFileName` +44'te, `FILETIME` iki `DWORD`): bir PE'nin
+derlendigi basliklar bu ofsetleri varsayar, sadelestirilmis bir kayit
+ikili uyumu bozardi.
+
+### Bilerek yapilmayanlar
+
+* **Desen esleme yok.** `FindFirstFileA("C:\\dizin\\*.dll")` cagrisinda
+  sondaki desen atilir ve dizinin tamami listelenir -- yani her desen
+  `*` gibi davranir. Bastaki surucu harfi (`C:`) ve ters bolu
+  isaretleri cekirdek tarafinda temizlenir.
+* **`.` ve `..` girdileri listelenmez.** TCMKFS'te diskte boyle kayitlar
+  yok; ikisi de `resolve` icinde `parent` alanindan cozuluyor. Windows
+  gercek dizinlerde bu ikisini listeler, TCMK listelemez.
+* **`rewinddir` yok.** Imleci geri sarmak icin dizin yeniden acilir --
+  POSIX'te de `rewinddir` ayri bir cagridir.
+* **Ayni anda 8 acik dizin** (`core::dir` havuzu). Dizin gezmek kisa
+  omurlu bir istir; sayi `df` ciktisinda gorunur.
+
 ## Kabuk komutlari artik ekrani dondurmuyor
 
 Kabuk masaustu gorevinde kosuyordu ve o gorev **uyutulamaz** (ekrani o
@@ -2563,7 +2656,9 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
   160 KiB (yalnizca dogrudan blok isaretcileri) ve azami 8 seviye
   derinlik. Dizin agaci gercek ve `.`/`..` calisiyor (yukari bkz.), ama
   sembolik baglar, izinler ve sahiplik yok. Calisma dizini **kabuga**
-  aittir: Ring 3 tarafinda `chdir`/`getcwd` yok.
+  aittir: Ring 3 tarafinda `chdir`/`getcwd` yok -- uygulamalar dizinleri
+  `getdents`/`FindFirstFileA` ile gezer ama mutlak yol kullanmak
+  zorundadir.
 - **DMA yok**: veri hala `in/out` ile kelime kelime tasinir. (Kabuk
   komutlari artik ayri bir gorevde kostugu icin kesmeyle bekliyor --
   yukari bkz.)

@@ -65,6 +65,8 @@ mod i386_numbers {
     pub const SYS_LSEEK: u32 = 19;
     /// i386'da `fstat64`. TCMK tam `struct stat` dondurmez (bkz. cagri).
     pub const SYS_FSTAT: u32 = 197;
+    /// Linux'ta `getdents64`. Kayit bicimi TCMK'ye ozgu (bkz. cagri).
+    pub const SYS_GETDENTS: u32 = 220;
     pub const SYS_BRK: u32 = 45;
     pub const SYS_GETPID: u32 = 20;
     pub const SYS_KILL: u32 = 37;
@@ -93,6 +95,8 @@ mod x86_64_numbers {
     pub const SYS_POLL: u32 = 7;
     pub const SYS_LSEEK: u32 = 8;
     pub const SYS_FSTAT: u32 = 5;
+    /// `getdents64`.
+    pub const SYS_GETDENTS: u32 = 217;
     pub const SYS_BRK: u32 = 12;
     pub const SYS_PIPE: u32 = 22;
     pub const SYS_FORK: u32 = 57;
@@ -627,6 +631,24 @@ pub fn dispatch(frame: &mut SyscallFrame) {
         SYS_FSTAT => match kernel_api::file_size(arg1 as u32) {
             Ok(size) => {
                 frame.set_return(size);
+                return;
+            }
+            Err(e) => errno_of(e),
+        },
+
+        // `getdents(fd, buf, count)` -- acik bir dizinden girdi paketleri
+        // okur; yazilan bayt sayisini, dizin bittiginde `0` doner.
+        //
+        // Bu cagriya kadar bir ELF dosya sistemini **goremiyordu**: adini
+        // onceden bildigi bir dosyayi acabiliyordu ama "burada ne var?"
+        // diye soramiyordu. Kayit bicimi ve gezinme cekirdegi
+        // `kernel_api::getdents` icinde tanimli; Win32'nin
+        // `FindFirstFileA`i da ayni koda baglanir.
+        SYS_GETDENTS => match unsafe {
+            kernel_api::getdents(arg1 as u32, arg2 as *mut u8, arg3)
+        } {
+            Ok(written) => {
+                frame.set_return(written);
                 return;
             }
             Err(e) => errno_of(e),

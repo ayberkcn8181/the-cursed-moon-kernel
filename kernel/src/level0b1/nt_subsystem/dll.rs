@@ -136,6 +136,27 @@ static KERNEL32: &[Export] = &[
         // hFile, lpFileSizeHigh
         stack_bytes: 8,
     },
+    Export {
+        name: "FindFirstFileA",
+        ordinal: 11,
+        service: nt::NT_FIND_FIRST_FILE,
+        // lpFileName, lpFindFileData
+        stack_bytes: 8,
+    },
+    Export {
+        name: "FindNextFileA",
+        ordinal: 12,
+        service: nt::NT_FIND_NEXT_FILE,
+        // hFindFile, lpFindFileData
+        stack_bytes: 8,
+    },
+    Export {
+        name: "FindClose",
+        ordinal: 13,
+        service: nt::NT_FIND_CLOSE,
+        // hFindFile
+        stack_bytes: 4,
+    },
 ];
 
 /// `TCMKGUI.dll` -- win32k cagrilarinin kullanici modundaki yuzu.

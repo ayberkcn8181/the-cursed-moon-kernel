@@ -94,12 +94,14 @@ static KNOWN_APPS: &[(&str, &str, &str)] = &[
     ("masked", "/bin/masked", "masked"),
     ("arena", "/bin/arena", "arena"),
     ("seeker", "/bin/seeker", "seeker"),
+    ("browse", "/bin/browse", "browse"),
     // Windows ikilisi: yol .exe ile biter, cekirdek bicimi magic'ten
     // anlar (bkz. vfs::format) ve PE yukleyicisine yonlendirir. Yol iki
     // mimaride de aynidir; VFS'te duran ikilinin PE32 mi PE32+ mi oldugu
     // derleme aninda secilir.
     ("winclock", "/bin/winclock.exe", "winclock"),
     ("winpad", "/bin/winpad.exe", "winpad"),
+    ("winfiles", "/bin/winfiles.exe", "winfiles"),
 ];
 
 /// Kabuktan gelen adi tam yola ve gorev adina cevirir.

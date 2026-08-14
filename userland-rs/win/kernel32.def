@@ -20,3 +20,6 @@ ReadFile@20 @7
 WriteFile@20 @8
 SetFilePointer@16 @9
 GetFileSize@8 @10
+FindFirstFileA@8 @11
+FindNextFileA@8 @12
+FindClose@4 @13

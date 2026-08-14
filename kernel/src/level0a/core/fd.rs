@@ -34,6 +34,12 @@ pub enum FdKind {
     PipeRead,
     /// Borunun yazma ucu.
     PipeWrite,
+    /// Acik bir dizin (`core::dir` havuzundaki yuva).
+    ///
+    /// POSIX'te dizin de bir tanimlayicidir: `open` ile acilir, `close`
+    /// ile kapanir, ama `read` yerine `getdents` ile okunur. `offset`
+    /// burada bayt konumu degil **gezinme imleci**dir.
+    Dir,
 }
 
 #[derive(Clone, Copy)]
@@ -179,6 +185,27 @@ pub fn allocate_pipe(pipe: usize, kind: FdKind) -> Option<usize> {
     })
 }
 
+/// Acik bir dizin yuvasini tanimlayiciya baglar.
+///
+/// `offset` sifirdan baslar: dizin imleci, ilk girdi.
+pub fn allocate_dir(slot: usize) -> Option<usize> {
+    crate::arch::cpu::without_interrupts(|| unsafe {
+        let table = current_table();
+        for fd in FIRST_FREE_FD..MAX_FDS {
+            if !(*table.add(fd)).used {
+                table.add(fd).write(FileDescriptor {
+                    used: true,
+                    kind: FdKind::Dir,
+                    node: slot,
+                    offset: 0,
+                });
+                return Some(fd);
+            }
+        }
+        None
+    })
+}
+
 /// Bir tanimlayicinin sahiplendigi nesnenin sayacini artirir.
 ///
 /// Kopyalanan her tanimlayici bir sahiptir: iki kopyadan biri kapaninca
@@ -187,6 +214,7 @@ fn retain(entry: FileDescriptor) {
     match entry.kind {
         FdKind::PipeRead => crate::level0a::core::pipe::add_ref(entry.node, false),
         FdKind::PipeWrite => crate::level0a::core::pipe::add_ref(entry.node, true),
+        FdKind::Dir => crate::level0a::core::dir::add_ref(entry.node),
         FdKind::File => {}
     }
 }
@@ -195,6 +223,7 @@ fn release(entry: FileDescriptor) {
     match entry.kind {
         FdKind::PipeRead => crate::level0a::core::pipe::close_end(entry.node, false),
         FdKind::PipeWrite => crate::level0a::core::pipe::close_end(entry.node, true),
+        FdKind::Dir => crate::level0a::core::dir::release(entry.node),
         FdKind::File => {}
     }
 }

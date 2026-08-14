@@ -108,6 +108,12 @@ static ARENA_ELF: &[u8] = include_bytes!("../../userland/arena.elf");
 /// lseek/fstat gosterimi.
 #[cfg(target_arch = "x86")]
 static SEEKER_ELF: &[u8] = include_bytes!("../../userland/seeker.elf");
+/// getdents gosterimi (POSIX dizin gezgini).
+#[cfg(target_arch = "x86")]
+static BROWSE_ELF: &[u8] = include_bytes!("../../userland/browse.elf");
+/// FindFirstFileA gosterimi -- ayni dizinler, Win32 yuzu.
+#[cfg(target_arch = "x86")]
+static WINFILES_EXE: &[u8] = include_bytes!("../../userland/winfiles.exe");
 
 /// Linux (ELF64, x86_64) kullanici programi -- `tools/gen_hello_elf64.py`.
 /// Elle kodlanmis en kucuk ELF64: yukleyicinin dar yolunu sinar.
@@ -151,6 +157,8 @@ static MASKED64: &[u8] = include_bytes!("../../userland/masked.elf64");
 static ARENA64: &[u8] = include_bytes!("../../userland/arena.elf64");
 #[cfg(target_arch = "x86_64")]
 static SEEKER64: &[u8] = include_bytes!("../../userland/seeker.elf64");
+#[cfg(target_arch = "x86_64")]
+static BROWSE64: &[u8] = include_bytes!("../../userland/browse.elf64");
 
 /// **Windows (PE32+) uygulamalari** -- i386'dakilerle ayni kaynak, ayni
 /// ithal kutuphaneleri; degisen yalnizca hedef. Taban 0x140000000
@@ -160,6 +168,8 @@ static SEEKER64: &[u8] = include_bytes!("../../userland/seeker.elf64");
 static WINCLOCK_EXE64: &[u8] = include_bytes!("../../userland/winclock.exe64");
 #[cfg(target_arch = "x86_64")]
 static WINPAD_EXE64: &[u8] = include_bytes!("../../userland/winpad.exe64");
+#[cfg(target_arch = "x86_64")]
+static WINFILES_EXE64: &[u8] = include_bytes!("../../userland/winfiles.exe64");
 
 /// Kullanici programlarinin VFS uzerinden okudugu test dosyasi.
 static BOOT_MSG: &[u8] = b"/boot/msg.txt: VFS uzerinden okundu (RAMFS).\n";
@@ -187,8 +197,10 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/masked", MASKED_ELF),
     ("/bin/arena", ARENA_ELF),
     ("/bin/seeker", SEEKER_ELF),
+    ("/bin/browse", BROWSE_ELF),
     ("/bin/winclock.exe", WINCLOCK_EXE),
     ("/bin/winpad.exe", WINPAD_EXE),
+    ("/bin/winfiles.exe", WINFILES_EXE),
     ("/boot/msg.txt", BOOT_MSG),
 ];
 
@@ -212,8 +224,10 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/masked", MASKED64),
     ("/bin/arena", ARENA64),
     ("/bin/seeker", SEEKER64),
+    ("/bin/browse", BROWSE64),
     ("/bin/winclock.exe", WINCLOCK_EXE64),
     ("/bin/winpad.exe", WINPAD_EXE64),
+    ("/bin/winfiles.exe", WINFILES_EXE64),
     ("/boot/msg.txt", BOOT_MSG),
 ];
 

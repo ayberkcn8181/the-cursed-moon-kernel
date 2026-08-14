@@ -87,7 +87,108 @@ extern "system" {
         method: Dword,
     ) -> Dword;
     pub fn GetFileSize(file: Handle, size_high: *mut Dword) -> Dword;
+
+    /// Win32'nin dizin gezinmesi. POSIX'in `getdents`i ile **ayni**
+    /// cekirdek koduna iner, yalnizca goruntusu farklidir: "ilk"i acmakla
+    /// birlestirir ve her cagri bir [`Win32FindData`] doldurur.
+    ///
+    /// Desen esleme yok: sondaki `\*` atilir ve dizinin tamami listelenir,
+    /// yani her desen `*` gibi davranir. Ters bolu isaretleri ve bastaki
+    /// surucu harfi (`C:`) cekirdek tarafinda temizlenir.
+    ///
+    /// Bos dizinde (ya da yol yoksa) `INVALID_HANDLE_VALUE` doner --
+    /// Windows'ta da oyledir.
+    pub fn FindFirstFileA(file_name: *const u8, find_data: *mut Win32FindData) -> Handle;
+    /// Sonraki girdi; dizin bittiginde 0 (FALSE).
+    pub fn FindNextFileA(find: Handle, find_data: *mut Win32FindData) -> Bool;
+    pub fn FindClose(find: Handle) -> Bool;
 }
+
+/// `FILETIME` -- 1601-01-01'den beri gecen 100 nanosaniyelik araliklar.
+///
+/// Tek bir `u64` **degil** iki `DWORD`: Windows'ta da oyledir ve fark
+/// onemli -- `u64` alani 8'e hizalanip yapiya dolgu sokabilir, iki
+/// `DWORD` ise 4'e hizali kalir. `WIN32_FIND_DATAA`nin 320 baytlik
+/// yerlesimi buna bagli.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FileTime {
+    pub low: Dword,
+    pub high: Dword,
+}
+
+impl FileTime {
+    pub const ZERO: FileTime = FileTime { low: 0, high: 0 };
+
+    /// Iki yarimi tek sayida birlestirir.
+    pub fn value(&self) -> u64 {
+        ((self.high as u64) << 32) | self.low as u64
+    }
+
+    /// Unix zaman damgasina cevirir; bilgi yoksa 0.
+    pub fn to_unix(&self) -> u32 {
+        let raw = self.value();
+        if raw == 0 {
+            return 0;
+        }
+        (raw / 10_000_000).saturating_sub(11_644_473_600) as u32
+    }
+}
+
+/// `WIN32_FIND_DATAA` -- Windows'takiyle **birebir** yerlesim (320 bayt).
+///
+/// Sadelestirilmis bir kayit ikili uyumu bozardi: bir PE'nin derlendigi
+/// basliklar bu ofsetleri varsayar. Cekirdek doldurmadigi alanlari sifir
+/// birakir (Windows'ta da bilgi yoksa oyle olur).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Win32FindData {
+    pub attributes: Dword,
+    pub creation_time: FileTime,
+    pub last_access_time: FileTime,
+    pub last_write_time: FileTime,
+    pub size_high: Dword,
+    pub size_low: Dword,
+    pub reserved0: Dword,
+    pub reserved1: Dword,
+    pub file_name: [u8; 260],
+    pub alternate_file_name: [u8; 14],
+}
+
+impl Win32FindData {
+    pub const fn zeroed() -> Self {
+        Win32FindData {
+            attributes: 0,
+            creation_time: FileTime::ZERO,
+            last_access_time: FileTime::ZERO,
+            last_write_time: FileTime::ZERO,
+            size_high: 0,
+            size_low: 0,
+            reserved0: 0,
+            reserved1: 0,
+            file_name: [0; 260],
+            alternate_file_name: [0; 14],
+        }
+    }
+
+    pub fn is_directory(&self) -> bool {
+        self.attributes & FILE_ATTRIBUTE_DIRECTORY != 0
+    }
+
+    /// `cFileName`in NUL'a kadarki kismi.
+    pub fn name(&self) -> &str {
+        let end = self
+            .file_name
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(self.file_name.len());
+        core::str::from_utf8(&self.file_name[..end]).unwrap_or("?")
+    }
+}
+
+/// `dwFileAttributes` degerleri.
+pub const FILE_ATTRIBUTE_DIRECTORY: Dword = 0x10;
+pub const FILE_ATTRIBUTE_NORMAL: Dword = 0x80;
 
 /// `SetFilePointer` -- `dwMoveMethod`. Sayilar POSIX'in `SEEK_*`
 /// degerleriyle ayni.

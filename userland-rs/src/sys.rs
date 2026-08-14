@@ -38,6 +38,7 @@ mod i386_numbers {
     pub const SYS_POLL: usize = 168;
     pub const SYS_LSEEK: usize = 19;
     pub const SYS_FSTAT: usize = 197;
+    pub const SYS_GETDENTS: usize = 220;
     pub const SYS_WAITPID: usize = 7;
     pub const SYS_PIPE: usize = 42;
     pub const SYS_BRK: usize = 45;
@@ -64,6 +65,7 @@ mod x86_64_numbers {
     pub const SYS_POLL: usize = 7;
     pub const SYS_LSEEK: usize = 8;
     pub const SYS_FSTAT: usize = 5;
+    pub const SYS_GETDENTS: usize = 217;
     pub const SYS_BRK: usize = 12;
     pub const SYS_PIPE: usize = 22;
     pub const SYS_FORK: usize = 57;
@@ -293,6 +295,135 @@ pub fn lseek(fd: usize, offset: usize, whence: usize) -> isize {
 /// numarasi gibi alanlarin hicbiri bu dosya sisteminde yok.
 pub fn file_size(fd: usize) -> isize {
     unsafe { syscall1(SYS_FSTAT, fd) as isize }
+}
+
+// --- Dizin gezinmesi ---------------------------------------------------
+
+/// Girdi turu: dosya.
+pub const DIR_KIND_FILE: u8 = 1;
+/// Girdi turu: dizin.
+pub const DIR_KIND_DIR: u8 = 2;
+
+/// Paketlenmis bir dizin kaydinin basligi.
+pub const DIRENT_HEADER: usize = 12;
+
+/// `getdents(fd, buf, len)`: acik bir dizinden girdi paketleri okur.
+///
+/// Yazilan bayt sayisini doner; `0` dizinin bittigini gosterir. Kayitlari
+/// tek tek cozmek yerine [`ReadDir`] kullanmak daha kolaydir.
+pub fn getdents(fd: usize, buf: &mut [u8]) -> isize {
+    unsafe { syscall3(SYS_GETDENTS, fd, buf.as_mut_ptr() as usize, buf.len()) as isize }
+}
+
+/// Cozulmus tek bir dizin girdisi.
+#[derive(Clone, Copy)]
+pub struct DirEntry<'a> {
+    pub name: &'a str,
+    pub size: usize,
+    /// Son degisiklik (Unix epoch); RAMFS dosyalarinda 0.
+    pub mtime: u32,
+    pub kind: u8,
+}
+
+impl DirEntry<'_> {
+    pub fn is_dir(&self) -> bool {
+        self.kind == DIR_KIND_DIR
+    }
+}
+
+/// Bir dizinin girdilerini dolasan yineleyici.
+///
+/// Cekirdek tampona **birden cok** kayit paketler; bu tur tamponu
+/// doldurup kayitlari cozer, tampon bitince yeni bir `getdents` cagirir.
+/// Cagiran yalnizca `for entry in ReadDir::open(...)` yazar.
+///
+/// Tampon cagiranindir (`no_std`, yigin ayirmasi yok): 512 bayt yaklasik
+/// 25 girdi tutar, yani cogu dizin tek cagride biter.
+pub struct ReadDir<'a> {
+    fd: usize,
+    buf: &'a mut [u8],
+    /// Tamponda gecerli olan bayt sayisi.
+    filled: usize,
+    /// Tamponda cozulmus olan bayt sayisi.
+    used: usize,
+    done: bool,
+}
+
+impl<'a> ReadDir<'a> {
+    /// Dizini acar. `path` NUL ile sonlanmalidir.
+    ///
+    /// # Safety
+    /// `path` NUL sonlandirmali gecerli bir dizi olmalidir.
+    pub unsafe fn open(path: *const u8, buf: &'a mut [u8]) -> Option<Self> {
+        let fd = open_raw(path, 0);
+        if fd < 0 {
+            return None;
+        }
+        Some(ReadDir {
+            fd: fd as usize,
+            buf,
+            filled: 0,
+            used: 0,
+            done: false,
+        })
+    }
+
+    /// Bir sonraki girdi.
+    ///
+    /// `Iterator` degil bilerek: dondurulen dilim tamponu odunc alir, yani
+    /// omru `&mut self`e baglidir. `Iterator` bunu ifade edemez (odunc
+    /// veren yineleyici sorunu); dongu `while let` ile yazilir.
+    pub fn next(&mut self) -> Option<DirEntry<'_>> {
+        if self.used >= self.filled {
+            if self.done {
+                return None;
+            }
+            let n = getdents(self.fd, self.buf);
+            if n <= 0 {
+                self.done = true;
+                return None;
+            }
+            self.filled = n as usize;
+            self.used = 0;
+        }
+
+        // Baslik once **kopyalanir**: ad dilimi tamponu odunc alacak, ve
+        // odunc almadan once `used`in guncellenmis olmasi gerekiyor.
+        let start = self.used;
+        let available = self.filled - start;
+        if available < DIRENT_HEADER {
+            self.done = true;
+            return None;
+        }
+        let mut header = [0u8; DIRENT_HEADER];
+        header.copy_from_slice(&self.buf[start..start + DIRENT_HEADER]);
+        let reclen = u16::from_le_bytes([header[0], header[1]]) as usize;
+        let kind = header[2];
+        let name_len = header[3] as usize;
+        let size = u32::from_le_bytes([header[4], header[5], header[6], header[7]]) as usize;
+        let mtime = u32::from_le_bytes([header[8], header[9], header[10], header[11]]);
+        if reclen < DIRENT_HEADER + name_len || reclen > available {
+            self.done = true;
+            return None;
+        }
+        self.used = start + reclen;
+        let name = core::str::from_utf8(
+            &self.buf[start + DIRENT_HEADER..start + DIRENT_HEADER + name_len],
+        )
+        .ok()?;
+        Some(DirEntry {
+            name,
+            size,
+            mtime,
+            kind,
+        })
+    }
+}
+
+impl Drop for ReadDir<'_> {
+    fn drop(&mut self) {
+        close(self.fd);
+    }
 }
 
 /// Anonim bellek ayirir (`mmap(NULL, len, ...)`); adresi doner.

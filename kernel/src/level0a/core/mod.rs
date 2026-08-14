@@ -1,5 +1,6 @@
 //! Level-0a cekirdek modulleri (doc S.9: `kernel/level0a/core/`).
 
+pub mod dir;
 pub mod fd;
 pub mod frames;
 pub mod init;

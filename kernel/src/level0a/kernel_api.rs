@@ -7,7 +7,7 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::level0a::core::{fd, pipe, scheduler, vfs};
+use crate::level0a::core::{fd, pipe, scheduler, tcmkfs, vfs};
 
 /// Standart POSIX tanimlayicilari.
 pub const FD_STDIN: u32 = 0;
@@ -122,6 +122,8 @@ pub unsafe fn write(fd_num: u32, buf: *const u8, len: usize) -> Result<usize, Ke
             fd::FdKind::PipeWrite => Ok(pipe::write(entry.node, bytes)),
             // Borunun okuma ucuna yazmak POSIX'te de hatadir.
             fd::FdKind::PipeRead => Err(KernelError::BadFileDescriptor),
+            // Dizine yazmak da oyle: icerigi dosya sistemi belirler.
+            fd::FdKind::Dir => Err(KernelError::BadFileDescriptor),
             fd::FdKind::File => {
                 let written = vfs::write_at(entry.node, entry.offset, bytes)
                     .map_err(|_| KernelError::NotSupported)?;
@@ -145,7 +147,17 @@ pub unsafe fn write(fd_num: u32, buf: *const u8, len: usize) -> Result<usize, Ke
 /// `create` verilirse (POSIX `O_CREAT`) dosya yoksa kalici dosya
 /// sisteminde olusturulur. RAMFS'te olusturma yoktur: icerigi cekirdek
 /// imajinin icindedir.
+///
+/// Yol bir **dizinse** dizin tanimlayicisi doner (bkz. `open_dir`).
+/// POSIX'te de boyledir: `open` dizinlerde calisir, ayrim `read` ile
+/// `getdents` arasindadir.
 pub fn open(path: &str, create: bool) -> Result<usize, KernelError> {
+    // Once dizin sinanir: dosya aramasi bir dizin yolunda zaten
+    // basarisiz olur ve `create` verilmisse ayni adda bir **dosya**
+    // olusturmaya kalkardi.
+    if vfs::lookup(path).is_none() && is_dir_path(path) {
+        return open_dir(path);
+    }
     let node = match vfs::lookup(path) {
         Some(n) => n,
         None if create => vfs::create_file(path).map_err(|_| KernelError::NotFound)?,
@@ -172,6 +184,10 @@ pub unsafe fn read(fd_num: u32, buf: *mut u8, len: usize) -> Result<usize, Kerne
             // surec penceresini de dondururdu (bkz. `core::pipe`).
             fd::FdKind::PipeRead => Ok(pipe::read(entry.node, slice)),
             fd::FdKind::PipeWrite => Err(KernelError::BadFileDescriptor),
+            // POSIX EISDIR: bir dizin `read` ile okunmaz, `getdents` ile
+            // okunur. Ham bayt dondurmek, dizin bicimini ABI'ye kacak
+            // yoldan sizdirmak olurdu.
+            fd::FdKind::Dir => Err(KernelError::NotSupported),
             fd::FdKind::File => {
                 let n = vfs::read(entry.node, entry.offset, slice)
                     .ok_or(KernelError::BadFileDescriptor)?;
@@ -267,6 +283,9 @@ pub fn readiness(fd_num: u32) -> u16 {
     match fd::get(fd_num as usize) {
         Some(entry) => match entry.kind {
             fd::FdKind::File => POLLIN | POLLOUT,
+            // Dizin her zaman "okunabilir"dir: `getdents` bloke etmez,
+            // bitmisse sifir doner.
+            fd::FdKind::Dir => POLLIN,
             fd::FdKind::PipeRead => match pipe::info(entry.node) {
                 Some((pending, writers, _)) => {
                     let mut mask = 0;
@@ -355,6 +374,328 @@ pub fn file_size(fd_num: u32) -> Result<usize, KernelError> {
         return Err(KernelError::NotSupported);
     }
     vfs::size(entry.node).ok_or(KernelError::BadFileDescriptor)
+}
+
+// --- Dizin gezinmesi ---------------------------------------------------
+//
+// Bu cagriya kadar bir uygulama dosya sistemini **goremiyordu**: adini
+// onceden bildigi bir dosyayi acabiliyor, ama "burada ne var?" diye
+// soramiyordu. Dizin listesini yalnizca kabugun `ls` komutu biliyordu ve
+// o da listeyi kendi icinde, iki ayri dongude uretiyordu.
+//
+// ## Tek kaynak, iki ABI
+//
+// Gezinme burada **bir kez** yazilir; POSIX tarafi `getdents`, Win32
+// tarafi `FindFirstFileA`/`FindNextFileA` olarak ayni koda baglanir.
+// Ikisinin de gordugu liste bu yuzden ayni -- bir ELF ve bir PE ayni
+// dizini listeleyip farkli sonuc alamaz.
+//
+// ## Neden imlec (cursor) uzayi?
+//
+// TCMK'de "dizin icerigi" tek bir tabloda durmaz, uc kaynaktan toplanir:
+//
+//   1. TCMKFS'in alt dizinleri (diskteki inode agaci),
+//   2. RAMFS yollarinin **ima ettigi** dizinler (`/bin` gibi: karsiligi
+//      olan bir inode yoktur, yalnizca `/bin/paint` yolunun icinde gecer),
+//   3. VFS dosyalari (hem RAMFS hem TCMKFS dosyalari burada birlesir).
+//
+// Uc kaynak tek bir sayi uzayina dizilir; imlec hangi bolgede oldugumuzu
+// da tasir. Boylece cagri **durumsuzdur**: cekirdek gezinmenin yarisini
+// bir yerde tutmaz, imleci cagiran (tanimlayicinin `offset` alaninda)
+// tasir.
+
+/// Girdi turu: dosya.
+pub const DIR_KIND_FILE: u8 = 1;
+/// Girdi turu: dizin.
+pub const DIR_KIND_DIR: u8 = 2;
+
+/// Bir girdi adinin en fazla uzunlugu (TCMKFS ile ayni sinir).
+pub const MAX_DIR_NAME: usize = tcmkfs::MAX_NAME;
+
+/// Imlec uzayinin ikinci bolgesi: RAMFS'in ima ettigi dizinler.
+const CURSOR_IMPLIED: usize = tcmkfs::MAX_INODES;
+/// Ucuncu bolge: VFS dosyalari.
+const CURSOR_FILES: usize = CURSOR_IMPLIED + vfs::MAX_NODES;
+
+/// Tek bir dizin girdisi -- kaynagi ne olursa olsun ayni bicimde.
+#[derive(Clone, Copy)]
+pub struct DirEntry {
+    pub name: [u8; MAX_DIR_NAME],
+    pub name_len: usize,
+    pub size: usize,
+    /// Son degistirilme zamani (Unix epoch); bilinmiyorsa 0.
+    ///
+    /// RAMFS dosyalarinda **her zaman** 0'dir: icerikleri cekirdek
+    /// imajiyla gelir, dosya sisteminde bir zamanlari yoktur.
+    pub mtime: u32,
+    pub kind: u8,
+}
+
+impl DirEntry {
+    fn new(name: &str, size: usize, mtime: u32, kind: u8) -> Self {
+        let mut entry = DirEntry {
+            name: [0; MAX_DIR_NAME],
+            name_len: name.len().min(MAX_DIR_NAME),
+            size,
+            mtime,
+            kind,
+        };
+        entry.name[..entry.name_len].copy_from_slice(&name.as_bytes()[..entry.name_len]);
+        entry
+    }
+
+    pub fn name(&self) -> &str {
+        core::str::from_utf8(&self.name[..self.name_len]).unwrap_or("")
+    }
+}
+
+/// `path`in `prefix` dizinine gore kalani (bastaki `/` atilmis olarak).
+///
+/// `prefix` bir ust dizin degilse `None`. Ayirici sarti onemli:
+/// `/notlar` onekinin `/notlar2/x` yolunu yutmasini engeller.
+fn under<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
+    if prefix.is_empty() || prefix == "/" {
+        return path.strip_prefix('/');
+    }
+    path.strip_prefix(prefix)?.strip_prefix('/')
+}
+
+/// `path` dogrudan `prefix` dizininin **icinde** mi (alt dizinlerde degil)?
+///
+/// Bir dizini listelemek "altindaki her sey" degil, "icindekiler"
+/// demektir; ayrimi yapmayan bir liste `/` icin butun agaci dokerdi.
+pub fn is_direct_child(path: &str, prefix: &str) -> bool {
+    under(path, prefix).is_some_and(|rest| !rest.is_empty() && !rest.contains('/'))
+}
+
+/// `path`, `prefix` altindaki bir alt dizinin icindeyse o alt dizinin adi.
+///
+/// `/bin/paint` ile `prefix = "/"` icin `"bin"` doner. RAMFS'te dizin
+/// diye bir kayit yoktur -- dizinler yalnizca yol adlarinin icinde
+/// **ima edilir**, ve `ls /` icin gorunmeleri gereken sey de budur.
+fn implied_dir<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
+    let rest = under(path, prefix)?;
+    let slash = rest.find('/')?;
+    if slash == 0 {
+        return None;
+    }
+    Some(&rest[..slash])
+}
+
+/// Verilen yol bir dizin mi?
+///
+/// Uc kosuldan biri yeter: kok olmasi, TCMKFS'te dizin inode'u olmasi,
+/// ya da altinda en az bir VFS dosyasi bulunmasi (`/bin` boyledir).
+pub fn is_dir_path(path: &str) -> bool {
+    if path.is_empty() || path == "/" {
+        return true;
+    }
+    if tcmkfs::mounted()
+        && tcmkfs::resolve(path).and_then(tcmkfs::entry_kind) == Some(tcmkfs::KIND_DIR)
+    {
+        return true;
+    }
+    (0..vfs::node_count())
+        .filter_map(vfs::path_of)
+        .any(|p| under(p, path).is_some_and(|rest| !rest.is_empty()))
+}
+
+/// Imlecten sonraki ilk girdiyi ve **bir sonraki** imleci dondurur.
+///
+/// Dizin bittiginde `None`. Imlec bolgeler arasinda kendiliginden gecer,
+/// yani cagiran yalnizca dondurulen sayiyi geri vermekle yukumludur.
+pub fn next_entry(dir: &str, cursor: usize) -> Option<(DirEntry, usize)> {
+    let dir = if dir.is_empty() { "/" } else { dir };
+
+    // 1. bolge: diskteki alt dizinler.
+    if cursor < CURSOR_IMPLIED && tcmkfs::mounted() {
+        if let Some(parent) = tcmkfs::resolve(dir) {
+            let mut buf = [0u8; tcmkfs::PATH_MAX];
+            for i in cursor..CURSOR_IMPLIED {
+                if i == tcmkfs::ROOT_INODE
+                    || tcmkfs::entry_kind(i) != Some(tcmkfs::KIND_DIR)
+                    || tcmkfs::parent_of(i) != Some(parent)
+                {
+                    continue;
+                }
+                if let Some(path) = tcmkfs::path_of(i, &mut buf) {
+                    let name = path.rsplit('/').next().unwrap_or(path);
+                    let mtime = tcmkfs::entry_mtime(i).unwrap_or(0);
+                    return Some((DirEntry::new(name, 0, mtime, DIR_KIND_DIR), i + 1));
+                }
+            }
+        }
+    }
+
+    // 2. bolge: RAMFS yollarinin ima ettigi dizinler.
+    let disk_parent = if tcmkfs::mounted() {
+        tcmkfs::resolve(dir)
+    } else {
+        None
+    };
+    let start = cursor.saturating_sub(CURSOR_IMPLIED).min(vfs::MAX_NODES);
+    if cursor < CURSOR_FILES {
+        for i in start..vfs::node_count() {
+            let name = match vfs::path_of(i).and_then(|p| implied_dir(p, dir)) {
+                Some(n) => n,
+                None => continue,
+            };
+            // Ayni ad daha once ima edilmisse iki kez listelenmesin.
+            let seen = (0..i)
+                .filter_map(vfs::path_of)
+                .filter_map(|p| implied_dir(p, dir))
+                .any(|earlier| earlier == name);
+            // Diskte gercek bir dizin olarak varsa 1. bolge onu zaten verdi.
+            let on_disk = disk_parent
+                .and_then(|parent| tcmkfs::child_of(parent, name))
+                .is_some();
+            if seen || on_disk {
+                continue;
+            }
+            return Some((
+                DirEntry::new(name, 0, 0, DIR_KIND_DIR),
+                CURSOR_IMPLIED + i + 1,
+            ));
+        }
+    }
+
+    // 3. bolge: dosyalar.
+    let start = cursor.saturating_sub(CURSOR_FILES);
+    for i in start..vfs::node_count() {
+        let path = match vfs::path_of(i) {
+            Some(p) => p,
+            None => continue,
+        };
+        if !is_direct_child(path, dir) {
+            continue;
+        }
+        let name = path.rsplit('/').next().unwrap_or(path);
+        let size = vfs::size(i).unwrap_or(0);
+        let mtime = vfs::mtime(i).unwrap_or(0);
+        return Some((
+            DirEntry::new(name, size, mtime, DIR_KIND_FILE),
+            CURSOR_FILES + i + 1,
+        ));
+    }
+
+    None
+}
+
+/// Bir dizini acar ve gezinme tanimlayicisi dondurur.
+///
+/// POSIX'te `open` dizinlerde de calisir; ayrim `read` ile `getdents`
+/// arasindadir. TCMK de ayni yolu izler: `open` yol bir dizinse dizin
+/// tanimlayicisi verir, `read` onda hata doner, `getdents` okur.
+pub fn open_dir(path: &str) -> Result<usize, KernelError> {
+    if !is_dir_path(path) {
+        return Err(KernelError::NotFound);
+    }
+    let slot = crate::level0a::core::dir::open(if path.is_empty() { "/" } else { path })
+        .ok_or(KernelError::TooManyOpenFiles)?;
+    match fd::allocate_dir(slot) {
+        Some(fd_num) => Ok(fd_num),
+        None => {
+            crate::level0a::core::dir::release(slot);
+            Err(KernelError::TooManyOpenFiles)
+        }
+    }
+}
+
+/// Paketlenmis bir dizin kaydinin basligi (bayt cinsinden).
+pub const DIRENT_HEADER: usize = 12;
+
+/// Bir kaydin toplam uzunlugu: baslik + ad, 4'e hizalanmis.
+fn record_len(name_len: usize) -> usize {
+    (DIRENT_HEADER + name_len + 3) & !3
+}
+
+/// POSIX `getdents`: acik bir dizinden **birden cok** girdiyi tampona paketler.
+///
+/// Yazilan bayt sayisini doner; `0` dizinin bittigi anlamina gelir.
+///
+/// ## Kayit bicimi (TCMK'ye ozgu)
+///
+/// ```text
+///   +0  u16 reclen     kaydin toplam uzunlugu (4'un kati)
+///   +2  u8  kind       1 = dosya, 2 = dizin
+///   +3  u8  name_len   ad uzunlugu
+///   +4  u32 size       dosya boyutu (dizinlerde 0)
+///   +8  u32 mtime      son degisiklik (Unix epoch), bilinmiyorsa 0
+///  +12  ad             name_len bayt, sonda NUL **yok**
+/// ```
+///
+/// Linux'un `linux_dirent64` kaydi degil: oradaki `d_ino` ve `d_off`
+/// 64 bit alanlarin TCMK'de karsiligi yok (inode numarasi iki arka uc
+/// arasinda anlamli degil, imleci de tanimlayici tasiyor). Buna karsilik
+/// `size` ve `mtime` **var**: bir dosya tarayicisi boyut ve tarih
+/// gostermek icin her girdide ayri bir `fstat` cagirmak zorunda
+/// kalmasin diye. Win32'nin `WIN32_FIND_DATA`si da ayni iki alani
+/// tasir, yani ikinci ABI icin fazladan hicbir sey gerekmiyor.
+///
+/// # Safety
+/// `buf`/`len` gecerli, yazilabilir bir kullanici bolgesi olmalidir.
+pub unsafe fn getdents(fd_num: u32, buf: *mut u8, len: usize) -> Result<usize, KernelError> {
+    if buf.is_null() {
+        return Err(KernelError::Fault);
+    }
+    let entry = fd::get(fd_num as usize).ok_or(KernelError::BadFileDescriptor)?;
+    if entry.kind != fd::FdKind::Dir {
+        return Err(KernelError::NotSupported);
+    }
+    let path = crate::level0a::core::dir::path_of(entry.node)
+        .ok_or(KernelError::BadFileDescriptor)?;
+
+    let out = core::slice::from_raw_parts_mut(buf, len);
+    let mut written = 0usize;
+    let mut cursor = entry.offset;
+
+    while let Some((item, next)) = next_entry(path, cursor) {
+        let size = record_len(item.name_len);
+        if written + size > out.len() {
+            // Tek bir kayit bile sigmiyorsa cagiran sonsuza kadar bos
+            // donus alirdi; bunu hata olarak bildirmek gerekir.
+            if written == 0 {
+                return Err(KernelError::NotSupported);
+            }
+            break;
+        }
+        out[written..written + size].fill(0);
+        out[written] = size as u8;
+        out[written + 1] = (size >> 8) as u8;
+        out[written + 2] = item.kind;
+        out[written + 3] = item.name_len as u8;
+        out[written + 4..written + 8].copy_from_slice(&(item.size as u32).to_le_bytes());
+        out[written + 8..written + 12].copy_from_slice(&item.mtime.to_le_bytes());
+        out[written + DIRENT_HEADER..written + DIRENT_HEADER + item.name_len]
+            .copy_from_slice(&item.name[..item.name_len]);
+        written += size;
+        cursor = next;
+    }
+
+    // Imlec tanimlayicida yasar: bir sonraki cagri kaldigi yerden devam
+    // eder, iki ayri acilis birbirini etkilemez.
+    fd::advance(fd_num as usize, cursor - entry.offset);
+    Ok(written)
+}
+
+/// Win32 `FindFirstFileA`/`FindNextFileA` icin **tek** girdi okur.
+///
+/// Win32 tarafi kayit paketlemez: her cagri bir `WIN32_FIND_DATA` doldurur.
+/// Ayni gezinme cekirdeginin ikinci yuzu -- imlec yine tanimlayicida.
+pub fn next_dir_entry(fd_num: u32) -> Result<DirEntry, KernelError> {
+    let entry = fd::get(fd_num as usize).ok_or(KernelError::BadFileDescriptor)?;
+    if entry.kind != fd::FdKind::Dir {
+        return Err(KernelError::NotSupported);
+    }
+    let path = crate::level0a::core::dir::path_of(entry.node)
+        .ok_or(KernelError::BadFileDescriptor)?;
+    match next_entry(path, entry.offset) {
+        Some((item, next)) => {
+            fd::advance(fd_num as usize, next - entry.offset);
+            Ok(item)
+        }
+        None => Err(KernelError::NotFound),
+    }
 }
 
 pub fn close(fd_num: u32) -> Result<(), KernelError> {

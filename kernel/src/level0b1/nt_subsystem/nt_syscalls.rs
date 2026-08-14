@@ -68,6 +68,9 @@ pub const NT_READ_FILE_WIN32: u32 = 0x3006;
 pub const NT_WRITE_FILE_WIN32: u32 = 0x3007;
 pub const NT_SET_FILE_POINTER: u32 = 0x3008;
 pub const NT_GET_FILE_SIZE: u32 = 0x3009;
+pub const NT_FIND_FIRST_FILE: u32 = 0x300A;
+pub const NT_FIND_NEXT_FILE: u32 = 0x300B;
+pub const NT_FIND_CLOSE: u32 = 0x300C;
 
 pub const NT_USER_CREATE_WINDOW_W32: u32 = 0x3010;
 pub const NT_GDI_GET_BITS_W32: u32 = 0x3011;
@@ -477,6 +480,68 @@ fn dispatch_win32_api(frame: &mut SyscallFrame) {
             }
         }
 
+        NT_FIND_FIRST_FILE => {
+            // FindFirstFileA(lpFileName, lpFindFileData) -> HANDLE
+            //
+            // Win32'nin dizin gezinmesi POSIX'inkinden farkli goruntu
+            // verir -- "ilk"i acmakla birlestirir, kayit paketlemez, her
+            // cagri bir `WIN32_FIND_DATAA` doldurur -- ama altinda ayni
+            // cekirdek gezinmesi calisir (`kernel_api::next_dir_entry`).
+            // Bir ELF ile bir PE ayni dizini listeleyip farkli sonuc
+            // alamaz; Level-0b1'in varlik sebebi de tam olarak bu.
+            let mut storage = [0u8; PATH_MAX];
+            let length = arg_ptr(args, 0)
+                .and_then(|p| unsafe { copy_user_cstr(p, &mut storage) })
+                .map(|pattern| pattern.len());
+            // Windows uygulamalari yollari `\` ile yazar, TCMK'nin isim
+            // uzayi `/` kullanir. Cevrim yerinde yapilir: yeni bir tampon
+            // ayirmadan tek gecis.
+            if let Some(length) = length {
+                for byte in &mut storage[..length] {
+                    if *byte == b'\\' {
+                        *byte = b'/';
+                    }
+                }
+            }
+            let opened = length
+                .and_then(|length| core::str::from_utf8(&storage[..length]).ok())
+                .and_then(|pattern| kernel_api::open_dir(strip_wildcard(pattern)).ok());
+            match opened {
+                Some(handle) => match kernel_api::next_dir_entry(handle as u32) {
+                    Ok(entry) if store_find_data(args, 1, &entry) => handle,
+                    // Bos dizin (ya da bozuk cikti isaretcisi): Win32'de de
+                    // INVALID_HANDLE_VALUE'dur. Tutamac sizmasin diye
+                    // burada kapatilir.
+                    _ => {
+                        let _ = kernel_api::close(handle as u32);
+                        INVALID_HANDLE_VALUE
+                    }
+                },
+                None => INVALID_HANDLE_VALUE,
+            }
+        }
+
+        NT_FIND_NEXT_FILE => {
+            // FindNextFileA(hFindFile, lpFindFileData) -> BOOL
+            match arg(args, 0) {
+                Some(handle) => match kernel_api::next_dir_entry(handle) {
+                    Ok(entry) if store_find_data(args, 1, &entry) => WIN32_TRUE,
+                    _ => WIN32_FALSE,
+                },
+                None => WIN32_FALSE,
+            }
+        }
+
+        // FindClose(hFindFile) -> BOOL. Tutamac normal bir tanimlayici
+        // oldugu icin kapatmasi da normal `close`.
+        NT_FIND_CLOSE => match arg(args, 0) {
+            Some(handle) => match kernel_api::close(handle) {
+                Ok(()) => WIN32_TRUE,
+                Err(_) => WIN32_FALSE,
+            },
+            None => WIN32_FALSE,
+        },
+
         // --- TCMKGUI.dll: pencere cagrilari ---
         NT_USER_CREATE_WINDOW_W32 => {
             // TcmkCreateWindow(lpTitle, x, y, cx, cy) -> HWND
@@ -596,6 +661,101 @@ fn arg_ptr(block: usize, index: usize) -> Option<usize> {
 /// isaretciler ise `arg_ptr` ile okunur.
 fn arg(block: usize, index: usize) -> Option<u32> {
     arg_ptr(block, index).map(|v| v as u32)
+}
+
+/// `FindFirstFileA`'nin desenini gezilecek **dizin yoluna** indirger.
+///
+/// Windows'ta cagri bir desen alir (`C:\Windows\*.dll`), yol degil.
+/// TCMK'de desen esleme yok: sondaki `\*`, `/*` ya da yalin `*` atilir,
+/// geri kalan yol dizin olarak acilir -- yani her desen `*` gibi davranir.
+/// Bastaki surucu harfi (`C:`) de atilir; TCMK'nin tek isim uzayi vardir.
+///
+/// Ters bolu isaretlerini bolu isaretine cevirmek cagirana kalir
+/// (yerinde yapilir, bkz. `NT_FIND_FIRST_FILE`), cunku burada yeni bir
+/// tampon ayirmadan degistirilemez.
+fn strip_wildcard(pattern: &str) -> &str {
+    // "C:\dizin\*" -> "\dizin\*"
+    let path = match pattern.as_bytes() {
+        [drive, b':', ..] if drive.is_ascii_alphabetic() => &pattern[2..],
+        _ => pattern,
+    };
+    let trimmed = match path.strip_suffix('*') {
+        Some(head) => head.trim_end_matches(['\\', '/']),
+        None => path.trim_end_matches(['\\', '/']),
+    };
+    if trimmed.is_empty() {
+        "/"
+    } else {
+        trimmed
+    }
+}
+
+/// `WIN32_FIND_DATAA` yapisinin boyutu (Windows ile birebir).
+const FIND_DATA_SIZE: usize = 320;
+/// `cFileName` alaninin yapidaki konumu.
+const FIND_DATA_NAME: usize = 44;
+/// `nFileSizeLow` alaninin konumu.
+const FIND_DATA_SIZE_LOW: usize = 32;
+/// `ftLastWriteTime` alaninin konumu.
+const FIND_DATA_WRITE_TIME: usize = 20;
+
+/// Unix epoch (1970) ile Windows epoch (1601) arasindaki saniye farki.
+const FILETIME_EPOCH_DELTA: u64 = 11_644_473_600;
+
+/// Unix zaman damgasini Windows `FILETIME`'ina cevirir.
+///
+/// `FILETIME`, 1601-01-01'den beri gecen **100 nanosaniyelik** araliklarin
+/// sayisidir. Cevrim gercek olsun diye yapiliyor: bir Win32 uygulamasi bu
+/// alani `FileTimeToSystemTime`a verdiginde dogru tarihi gormeli, TCMK'ye
+/// ozel bir sayi degil.
+fn filetime_of(unix: u32) -> u64 {
+    if unix == 0 {
+        return 0;
+    }
+    (unix as u64 + FILETIME_EPOCH_DELTA) * 10_000_000
+}
+/// `dwFileAttributes` degerleri (Windows ile ayni sayilar).
+const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
+
+/// Bir dizin girdisini kullanicinin `WIN32_FIND_DATAA` yapisina yazar.
+///
+/// Yapi Windows'takiyle **ayni yerlesimde** doldurulur (320 bayt,
+/// `cFileName` +44'te): bir PE'nin derlendigi basliklar bu ofsetleri
+/// varsayar, yani sadelestirilmis bir kayit ikili uyumu bozardi.
+/// Doldurulmayan alanlar (zaman damgalari, `cAlternateFileName`) sifir
+/// birakilir -- Windows'ta da bilgi yoksa oyle yapilir.
+fn store_find_data(block: usize, index: usize, entry: &kernel_api::DirEntry) -> bool {
+    let Some(addr) = arg_ptr(block, index) else {
+        return false;
+    };
+    if addr == 0
+        || !mmu::is_user_accessible(addr)
+        || !mmu::is_user_accessible(addr + FIND_DATA_SIZE - 1)
+    {
+        return false;
+    }
+    // Ad, alanin sonundaki NUL icin bir bayt birakmalidir.
+    let name_len = entry.name_len.min(FIND_DATA_SIZE - FIND_DATA_NAME - 1);
+    unsafe {
+        core::ptr::write_bytes(addr as *mut u8, 0, FIND_DATA_SIZE);
+        let attributes = if entry.kind == kernel_api::DIR_KIND_DIR {
+            FILE_ATTRIBUTE_DIRECTORY
+        } else {
+            FILE_ATTRIBUTE_NORMAL
+        };
+        (addr as *mut u32).write_unaligned(attributes);
+        ((addr + FIND_DATA_SIZE_LOW) as *mut u32).write_unaligned(entry.size as u32);
+        // FILETIME hizali olmayabilir ve iki DWORD'dur; 64 bitlik tek bir
+        // yazma her iki mimarida da dogru sirayi (kucuk-endian) verir.
+        ((addr + FIND_DATA_WRITE_TIME) as *mut u64).write_unaligned(filetime_of(entry.mtime));
+        core::ptr::copy_nonoverlapping(
+            entry.name.as_ptr(),
+            (addr + FIND_DATA_NAME) as *mut u8,
+            name_len,
+        );
+    }
+    true
 }
 
 /// Cikti parametresini doldurur (`lpNumberOfBytesWritten` gibi).

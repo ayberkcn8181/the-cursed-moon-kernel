@@ -8,9 +8,9 @@
 
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use crate::level0a::core::{fd, frames, init, kmalloc, mmu, pipe, scheduler, tcmkfs, vfs};
+use crate::level0a::core::{dir, fd, frames, init, kmalloc, mmu, pipe, scheduler, tcmkfs, vfs};
 use crate::level0a::drivers::{ata, block, gfx, partition, rtc};
-use crate::level0a::{exceptions, input, launcher, pit, wm};
+use crate::level0a::{exceptions, input, kernel_api, launcher, pit, wm};
 use crate::level0b1::signal;
 use crate::level0b2::{ipc, load_balancer, state_monitor};
 
@@ -463,27 +463,40 @@ fn path_under(path: &str, prefix: &str) -> bool {
     }
 }
 
-/// `path` dogrudan `prefix` dizininin altinda mi (alt dizinlerde degil)?
+/// `dizin` + `ad`i tek bir yola birlestirir.
 ///
-/// `ls` bunu kullanir: bir dizini listelemek "altindaki her sey" degil,
-/// "icindekiler" demektir. Ayrimi yapmadan `ls /` butun agaci dokuyordu.
-fn direct_child(path: &str, prefix: &str) -> bool {
-    let rest = if prefix.is_empty() || prefix == "/" {
-        match path.strip_prefix('/') {
-            Some(r) => r,
-            None => return false,
-        }
-    } else {
-        match path.strip_prefix(prefix) {
-            // "/notlar" ile "/notlar2/x" karismasin diye ayirici sart.
-            Some(r) => match r.strip_prefix('/') {
-                Some(r) => r,
-                None => return false,
-            },
-            None => return false,
-        }
-    };
-    !rest.is_empty() && !rest.contains('/')
+/// Girdi kayitlari yalnizca **ad** tasir (POSIX'in `dirent`i de oyle);
+/// VFS'e sormak icin tam yol gerekir.
+fn join<'a>(dir: &str, name: &str, buf: &'a mut [u8; tcmkfs::PATH_MAX]) -> Option<&'a str> {
+    let dir = dir.trim_end_matches('/');
+    if dir.len() + 1 + name.len() >= buf.len() {
+        return None;
+    }
+    buf[..dir.len()].copy_from_slice(dir.as_bytes());
+    buf[dir.len()] = b'/';
+    buf[dir.len() + 1..dir.len() + 1 + name.len()].copy_from_slice(name.as_bytes());
+    core::str::from_utf8(&buf[..dir.len() + 1 + name.len()]).ok()
+}
+
+/// Zaman damgasini `YYYY-AA-GG SS:DD` olarak yazar; sifirsa hicbir sey.
+///
+/// Sifir olmasi bilgi yoklugudur: RAMFS dosyalari cekirdek imajiyla gelir,
+/// dosya sisteminde bir zamanlari yoktur.
+fn write_stamp(epoch: u32) {
+    if epoch == 0 {
+        return;
+    }
+    let t = rtc::from_unix(epoch);
+    write_str("  ");
+    write_num_right(t.year as usize, 4);
+    put(b'-');
+    write_pad2(t.month as usize);
+    put(b'-');
+    write_pad2(t.day as usize);
+    put(b' ');
+    write_pad2(t.hour as usize);
+    put(b':');
+    write_pad2(t.minute as usize);
 }
 
 fn state_name(state: scheduler::TaskState) -> &'static str {
@@ -986,35 +999,18 @@ fn execute(line: &str) {
                 }
             };
             let mut dirs = 0usize;
-            if tcmkfs::mounted() {
-                if let Some(dir) = tcmkfs::resolve(if prefix.is_empty() { "/" } else { prefix }) {
-                    let mut buf = [0u8; tcmkfs::PATH_MAX];
-                    for i in 0..tcmkfs::MAX_INODES {
-                        if tcmkfs::entry_kind(i) != Some(tcmkfs::KIND_DIR)
-                            || i == tcmkfs::ROOT_INODE
-                            || tcmkfs::parent_of(i) != Some(dir)
-                        {
-                            continue;
-                        }
-                        if let Some(path) = tcmkfs::path_of(i, &mut buf) {
-                            write_str("  ");
-                            write_padded("dizin", 6);
-                            write_padded(path, 22);
-                            newline();
-                            dirs += 1;
-                        }
-                    }
-                }
-            }
             let mut files = 0usize;
-            for i in 0..vfs::node_count() {
-                if let Some(path) = vfs::path_of(i) {
-                    let visible = if recursive {
-                        path_under(path, prefix)
-                    } else {
-                        direct_child(path, prefix)
+
+            if recursive {
+                // `-a`: butun agaci **tam yollariyla** dok. Bu bir hata
+                // ayiklama dokumu; dizin dizin gezmek yerine isim uzayinin
+                // ham halini gosterir, o yuzden `next_entry` kullanmaz.
+                for i in 0..vfs::node_count() {
+                    let path = match vfs::path_of(i) {
+                        Some(p) => p,
+                        None => continue,
                     };
-                    if !visible {
+                    if !path_under(path, prefix) {
                         continue;
                     }
                     files += 1;
@@ -1029,26 +1025,44 @@ fn execute(line: &str) {
                     write_padded(path, 22);
                     write_num_right(vfs::size(i).unwrap_or(0), 7);
                     write_str(" bayt");
-                    // Yalnizca diskteki dosyalarin zaman damgasi vardir;
-                    // RAMFS dosyalari cekirdek imajiyla birlikte gelir.
-                    if let Some(epoch) = vfs::mtime(i) {
-                        if epoch != 0 {
-                            let t = rtc::from_unix(epoch);
-                            write_str("  ");
-                            write_num_right(t.year as usize, 4);
-                            put(b'-');
-                            write_pad2(t.month as usize);
-                            put(b'-');
-                            write_pad2(t.day as usize);
-                            put(b' ');
-                            write_pad2(t.hour as usize);
-                            put(b':');
-                            write_pad2(t.minute as usize);
-                        }
+                    write_stamp(vfs::mtime(i).unwrap_or(0));
+                    newline();
+                }
+            } else {
+                // Gezinme cekirdegi Level-0a'da, `kernel_api::next_entry`
+                // icinde. Kabuk onu Ring 3 uygulamalariyla **ayni** yerden
+                // cagirir: `ls` ile bir dosya tarayicisinin ayni dizinde
+                // farkli sey gormesi mumkun degil.
+                let mut cursor = 0usize;
+                while let Some((entry, next)) = kernel_api::next_entry(prefix, cursor) {
+                    cursor = next;
+                    write_str("  ");
+                    if entry.kind == kernel_api::DIR_KIND_DIR {
+                        dirs += 1;
+                        write_padded("dizin", 6);
+                        write_padded(entry.name(), 22);
+                    } else {
+                        files += 1;
+                        // Kaynak (ram/disk) girdi kaydinda yok; adi tam
+                        // yola cevirip VFS'e sormak gerekiyor.
+                        let mut full = [0u8; tcmkfs::PATH_MAX];
+                        let source = match join(prefix, entry.name(), &mut full)
+                            .and_then(vfs::lookup)
+                            .and_then(vfs::source)
+                        {
+                            Some(vfs::Source::Disk) => "disk",
+                            _ => "ram",
+                        };
+                        write_padded(source, 6);
+                        write_padded(entry.name(), 22);
+                        write_num_right(entry.size, 7);
+                        write_str(" bayt");
                     }
+                    write_stamp(entry.mtime);
                     newline();
                 }
             }
+
             write_str(" toplam ");
             write_num(files);
             write_str(" dosya");
@@ -1200,6 +1214,8 @@ fn execute(line: &str) {
                 write_num(ata::irq_count() as usize);
                 write_str("  io beklemesi: ");
                 write_num(scheduler::io_waits());
+                write_str("  acik dizin: ");
+                write_num(dir::open_count());
                 newline();
             }
         }
