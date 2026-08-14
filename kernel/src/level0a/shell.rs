@@ -378,8 +378,12 @@ fn execute(line: &str) {
                 } else {
                     write_str("  ");
                     write_hex(space, 8);
+                    // "yerlesik + ayrilmis": ikincisi henuz cerceve
+                    // almamis, yalnizca adresi gecerli olan sayfalar.
                     write_str(" (");
                     write_num(mmu::user_pages(space));
+                    write_str("+");
+                    write_num(mmu::reserved_pages(space));
                     write_str(" sayfa)");
                 }
                 newline();
@@ -737,6 +741,9 @@ fn execute(line: &str) {
             write_str(" kopya, ");
             write_num(frames::cow_reuses());
             write_line(" son-sahip");
+            write_str("talep uzerine doldurulan sayfa: ");
+            write_num(frames::demand_fills());
+            newline();
             write_str("identity esleme: ");
             write_num(mmu::identity_mapped_bytes() / (1024 * 1024));
             write_line(" MiB");

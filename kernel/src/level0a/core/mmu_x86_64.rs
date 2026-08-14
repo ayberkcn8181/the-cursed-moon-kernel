@@ -33,6 +33,9 @@ const PTE_COW: u64 = 1 << 9;
 /// Cekirdege ait paylasilan cerceve (pencere tamponu); `fork`'ta cocuga
 /// eslenmez.
 const PTE_SHARED: u64 = 1 << 10;
+/// Ayrilmis ama henuz cerceve verilmemis sayfa (talep uzerine
+/// sayfalama). Girdi `PRESENT` olmadigi icin donanim bu biti yok sayar.
+const PTE_DEMAND: u64 = 1 << 11;
 
 const CR0_PG: u64 = 1 << 31;
 /// Write Protect -- bkz. i386 karsiligi. Acik olmadan cekirdek yazmalari
@@ -369,41 +372,91 @@ pub fn kernel_cr3() -> usize {
     KERNEL_CR3.load(Ordering::Relaxed)
 }
 
-/// Surecin kullanici bolgesine cerceve tahsis edip esler.
+/// Kullanici bolgesinde bir araligi **ayirir**, cerceve vermez.
+/// (Gerekce icin i386 karsiligina bakiniz.)
 ///
 /// # Safety
 /// `cr3` bu modulun urettigi bir uzay olmalidir.
-pub unsafe fn map_user_range(cr3: usize, start: usize, len: usize) -> bool {
+pub unsafe fn reserve_user_range(cr3: usize, start: usize, len: usize) -> bool {
     if len == 0 {
         return true;
     }
-    if cr3 == 0 || cr3 == kernel_cr3() {
-        // Paylasimli yol (adres uzayi olmayan cagiran).
-        protect_user_range(start, len);
-        return true;
-    }
-
     let first = start / PAGE_SIZE;
     let last = (start + len - 1) / PAGE_SIZE;
 
     for page in first..=last {
-        let addr = page * PAGE_SIZE;
-        let entry = match user_pte(cr3, addr) {
+        let entry = match user_pte(cr3, page * PAGE_SIZE) {
             Some(e) => e,
             None => return false,
         };
         if entry.read() & PTE_PRESENT != 0 {
             continue;
         }
-        let frame = match frames::alloc() {
-            Some(f) => f,
-            None => return false,
-        };
-        entry.write(frame as u64 | PTE_PRESENT | PTE_WRITABLE | PTE_USER);
+        entry.write(PTE_DEMAND);
     }
 
     flush_tlb();
     true
+}
+
+/// Talep uzerine sayfalama hatasini cozer; cozduyse `true` doner.
+///
+/// # Safety
+/// Yalnizca sayfa hatasi isleyicisinden cagrilmalidir.
+pub unsafe fn handle_demand_fault(vaddr: usize) -> bool {
+    let cr3 = (read_cr3() & ADDR_MASK) as usize;
+    if cr3 == 0 || cr3 == kernel_cr3() {
+        return false;
+    }
+    let entry_ptr = match user_pte(cr3, vaddr) {
+        Some(e) => e,
+        None => return false,
+    };
+    let entry = entry_ptr.read();
+    if entry & PTE_PRESENT != 0 || entry & PTE_DEMAND == 0 {
+        return false;
+    }
+
+    let frame = match frames::alloc() {
+        Some(f) => f,
+        None => return false,
+    };
+    entry_ptr.write(frame as u64 | PTE_PRESENT | PTE_WRITABLE | PTE_USER);
+    flush_tlb();
+    frames::note_demand_fill();
+    true
+}
+
+/// Ayrilmis ama henuz cerceve verilmemis sayfa sayisi (kabuk raporu).
+pub fn reserved_pages(cr3: usize) -> usize {
+    if cr3 == 0 || cr3 == kernel_cr3() {
+        return 0;
+    }
+    unsafe {
+        let pdpt = (table_entry(cr3 as u64, 0).read() & ADDR_MASK) as usize;
+        if pdpt == 0 {
+            return 0;
+        }
+        let pd = (table_entry(pdpt as u64, 0).read() & ADDR_MASK) as usize;
+        if pd == 0 {
+            return 0;
+        }
+        let mut total = 0;
+        for pd_index in USER_PD_FIRST..=USER_PD_LAST {
+            let entry = table_entry(pd as u64, pd_index).read();
+            if entry & PTE_PRESENT == 0 || entry & PTE_HUGE != 0 {
+                continue;
+            }
+            let pt = entry & ADDR_MASK;
+            total += (0..ENTRIES)
+                .filter(|&i| {
+                    let e = table_entry(pt, i).read();
+                    e & PTE_PRESENT == 0 && e & PTE_DEMAND != 0
+                })
+                .count();
+        }
+        total
+    }
 }
 
 /// **Var olan** fiziksel sayfalari surecin adres uzayina esler
@@ -511,10 +564,11 @@ pub unsafe fn clone_user_space(src_cr3: usize) -> Option<usize> {
         for i in 0..ENTRIES {
             let page_ptr = table_entry(src_pt, i);
             let page = page_ptr.read();
-            if page & PTE_PRESENT == 0 {
+            if page & PTE_SHARED != 0 {
                 continue;
             }
-            if page & PTE_SHARED != 0 {
+            // Ayrilmis ama verilmemis sayfa: cocuk ayni hakki devralir.
+            if page & PTE_PRESENT == 0 && page & PTE_DEMAND == 0 {
                 continue;
             }
 
@@ -526,6 +580,11 @@ pub unsafe fn clone_user_space(src_cr3: usize) -> Option<usize> {
                     return None;
                 }
             };
+
+            if page & PTE_PRESENT == 0 {
+                dst_entry.write(page);
+                continue;
+            }
 
             let frame = (page & ADDR_MASK) as usize;
 

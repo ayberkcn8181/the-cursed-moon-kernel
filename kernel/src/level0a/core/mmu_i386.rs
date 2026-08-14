@@ -57,6 +57,12 @@ const PTE_COW: u32 = 1 << 9;
 /// piksel tamponu). `fork`'ta ne kopyalanir ne paylasilir: cocuga hic
 /// eslenmez, cunku cocuk pencereyi miras almaz.
 const PTE_SHARED: u32 = 1 << 10;
+/// Bu sayfa **ayrilmis ama henuz yok**: adres gecerli, cerceve ilk
+/// dokunusta verilecek (talep uzerine sayfalama). Girdi `PRESENT`
+/// olmadigi icin donanim geri kalan butun bitleri yok sayar -- yani bu
+/// bayrak yalnizca yok olan bir sayfada anlamlidir ve `PTE_COW` ile
+/// karisamaz.
+const PTE_DEMAND: u32 = 1 << 11;
 
 const CR0_PG: u32 = 1 << 31;
 /// Write Protect. Acik olmadiginda **cekirdek** salt okunur sayfalara
@@ -285,13 +291,25 @@ pub unsafe fn switch_to(cr3: usize) {
     }
 }
 
-/// Kullanici bolgesinde `[start, start+len)` icin cerceve tahsis edip esler.
+/// Kullanici bolgesinde `[start, start+len)` araligini **ayirir**, ama
+/// cerceve vermez (talep uzerine sayfalama).
 ///
-/// Zaten eslenmis sayfalar atlanir; bu sayede cagri yinelenebilir.
+/// ## Neden
+///
+/// Onceden bu aralik `map_user_range` ile pesin eslenirdi: her surec,
+/// tek bir bayta bile dokunmadan, pencerenin tamami kadar cerceve
+/// tuketirdi (512 KiB = 128 cerceve). Oysa tipik bir uygulama imaji,
+/// yigininin tepesi ve biraz veri disinda hicbir yere dokunmaz.
+///
+/// Artik girdi "yok" olarak ama `PTE_DEMAND` isaretiyle yazilir. Adres
+/// gecerlidir; ilk dokunus bir sayfa hatasi uretir ve
+/// `handle_demand_fault` o sayfaya -- yalnizca ona -- cerceve verir.
+/// Ayrilmamis bir adrese dokunmak ise hala gercek bir hatadir; ikisini
+/// ayiran sey bu bayraktir.
 ///
 /// # Safety
 /// `cr3` bu modulun urettigi bir adres uzayi olmalidir.
-pub unsafe fn map_user_range(cr3: usize, start: usize, len: usize) -> bool {
+pub unsafe fn reserve_user_range(cr3: usize, start: usize, len: usize) -> bool {
     if len == 0 {
         return true;
     }
@@ -299,23 +317,72 @@ pub unsafe fn map_user_range(cr3: usize, start: usize, len: usize) -> bool {
     let last = (start + len - 1) / PAGE_SIZE;
 
     for page in first..=last {
-        let addr = page * PAGE_SIZE;
-        let entry = match user_pte(cr3, addr) {
+        let entry = match user_pte(cr3, page * PAGE_SIZE) {
             Some(e) => e,
             None => return false, // kullanici bolgesi disinda
         };
         if entry.read() & PTE_PRESENT != 0 {
             continue;
         }
-        let frame = match frames::alloc() {
-            Some(f) => f,
-            None => return false,
-        };
-        entry.write(frame as u32 | PTE_PRESENT | PTE_WRITABLE | PTE_USER);
+        entry.write(PTE_DEMAND);
     }
 
     flush_tlb();
     true
+}
+
+/// Talep uzerine sayfalama hatasini cozer; cozduyse `true` doner.
+///
+/// Sayfa hatasi isleyicisinden, sayfanin **yok** oldugu (bit 0 = 0)
+/// hatalar icin cagrilir.
+///
+/// # Safety
+/// Yalnizca sayfa hatasi isleyicisinden cagrilmalidir.
+pub unsafe fn handle_demand_fault(vaddr: usize) -> bool {
+    let cr3 = read_cr3() as usize;
+    if cr3 == 0 || cr3 == kernel_cr3() {
+        return false;
+    }
+    let entry_ptr = match user_pte(cr3, vaddr) {
+        Some(e) => e,
+        None => return false,
+    };
+    let entry = entry_ptr.read();
+    if entry & PTE_PRESENT != 0 || entry & PTE_DEMAND == 0 {
+        return false;
+    }
+
+    // `frames::alloc` cerceveyi sifirlar. Bu pazarlik konusu degil: aksi
+    // halde onceki surecin verisi yeni surece gorunurdu.
+    let frame = match frames::alloc() {
+        Some(f) => f,
+        None => return false, // havuz doldu: hata normal yoluna gitsin
+    };
+    entry_ptr.write(frame as u32 | PTE_PRESENT | PTE_WRITABLE | PTE_USER);
+    flush_tlb();
+    frames::note_demand_fill();
+    true
+}
+
+/// Ayrilmis ama henuz cerceve verilmemis sayfa sayisi (kabuk raporu).
+pub fn reserved_pages(cr3: usize) -> usize {
+    if cr3 == 0 || cr3 == kernel_cr3() {
+        return 0;
+    }
+    unsafe {
+        let pd = cr3 as *const u32;
+        let pde = pd.add(USER_PDE).read();
+        if pde & PTE_PRESENT == 0 {
+            return 0;
+        }
+        let pt = (pde & !0xFFF) as *const u32;
+        (0..ENTRIES)
+            .filter(|i| {
+                let e = pt.add(*i).read();
+                e & PTE_PRESENT == 0 && e & PTE_DEMAND != 0
+            })
+            .count()
+    }
 }
 
 /// **Var olan** fiziksel sayfalari surecin adres uzayina esler.
@@ -401,10 +468,13 @@ pub unsafe fn clone_user_space(src_cr3: usize) -> Option<usize> {
 
     for i in 0..ENTRIES {
         let entry = src_pt.add(i).read();
-        if entry & PTE_PRESENT == 0 {
+        if entry & PTE_SHARED != 0 {
             continue;
         }
-        if entry & PTE_SHARED != 0 {
+        // Ayrilmis ama henuz verilmemis sayfa: cocuk da ayni hakki
+        // devralir. Aktarilmasaydi cocugun yiginini buyutmesi gecerli
+        // bir adreste "sayfa yok" hatasi verirdi.
+        if entry & PTE_PRESENT == 0 && entry & PTE_DEMAND == 0 {
             continue;
         }
 
@@ -416,6 +486,11 @@ pub unsafe fn clone_user_space(src_cr3: usize) -> Option<usize> {
                 return None;
             }
         };
+
+        if entry & PTE_PRESENT == 0 {
+            dst_entry.write(entry);
+            continue;
+        }
 
         let frame = (entry & !0xFFF) as usize;
 

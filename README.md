@@ -44,6 +44,7 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 8 | **`execve`** (surec kendi yerine program yukler) | ✅ (i386 + x86_64) |
 | 8 | **`fork`** (adres uzayi kopyasi + iki kez donen cagri) | ✅ (i386 + x86_64) |
 | 8 | **Copy-on-write `fork`** (referans sayaci, `CR0.WP`, #PF'te cogaltma) | ✅ (i386 + x86_64) |
+| 8 | **Talep uzerine sayfalama** (`PTE_DEMAND`, ilk dokunusta cerceve) | ✅ (i386 + x86_64) |
 | 8 | **`waitpid`** (`Waiting` durumu, cikis kodu, `WNOHANG`, `-1`) | ✅ (i386 + x86_64) |
 | 8 | **Gorev yuvasi geri kazanimi** + zombi/oksuz toplama | ✅ |
 | 8 | **`pipe`** + surec basina fd tablosu | ✅ |
@@ -1352,6 +1353,64 @@ olan bir surec penceresini de dondurur, oysa buradaki uygulamalar kendi
 cizim dongulerini surer. `relay`'in ebeveyni her karede yoklar ve grafik
 akici kalir.
 
+## Talep uzerine sayfalama
+
+`fork` COW oldu ama `execve` hala pahaliydi: her surec, tek bir bayta
+bile dokunmadan, pencerenin tamami kadar cerceve tuketiyordu -- 512 KiB
+= 128 cerceve. Oysa tipik bir uygulama imaji, yigininin tepesi ve biraz
+veri disinda hicbir yere dokunmaz.
+
+Artik esleme degil **ayirma** yapiliyor: girdi "yok" olarak ama
+`PTE_DEMAND` isaretiyle yaziliyor. Adres gecerlidir; ilk dokunus bir
+sayfa hatasi uretir ve cekirdek o sayfaya -- yalnizca ona -- cerceve
+verir. Ayrilmamis bir adrese dokunmak ise hala gercek bir hatadir;
+ikisini ayiran sey bu bayraktir.
+
+Altyapi zaten hazirdi: copy-on-write, vektor 14'u **geri donebilen** tek
+istisna haline getirmisti. Talep uzerine sayfalama ayni kapiya ikinci bir
+dal ekliyor; hata kodunun 0. biti ikisini ayiriyor.
+
+| hata kodu | anlam | dal |
+|---|---|---|
+| bit 0 = 0 | sayfa yok | talep uzerine doldur |
+| bit 0 = 1, bit 1 = 1 | var ama yazma reddedildi | copy-on-write |
+| digerleri | gercek hata | surec sonlandirilir |
+
+![talep uzerine sayfalama](docs/screenshot-demand.png)
+
+### Olcum
+
+Ayni ikili (`twins`), ayni an: uygulama yuklendi ve catallandi, ebeveyn
+ve cocuk ikisi de yasiyor. Uc cekirdek, ayni test:
+
+| | acilis tabani | `run twins` sonrasi | toplam |
+|---|---|---|---|
+| tam kopya | 260 cerceve | 520 | 2,0 MiB |
+| + copy-on-write | 260 cerceve | 393 | 1,5 MiB |
+| + talep uzerine | **10 cerceve** | **19** | **76 KiB** |
+
+Acilis tabaninin 260'tan 10'a dusmesi rastlanti degil: masaustu
+uygulamalari da (paint, plasma) ayni yoldan geciyor. `fork` gunlugu de
+degisti -- eskiden "128 sayfa", simdi **"4 sayfa paylasildi/COW"**:
+`twins` gercekten dort sayfaya dokunuyor (imajin uc sayfasi + yigin).
+
+Bes Ring 3 sureci (winclock, notes, mux, paint, plasma) ve yedi pencere
+ayni anda acikken sistemin tamami **31 cerceve** kullaniyor.
+
+`ps` tablosu ikisini ayri gosteriyor: `(51+121 sayfa)` = 51 yerlesik,
+121 ayrilmis-ama-verilmemis.
+
+### Ring 0'dan gelen hatalar da bu yoldan geciyor
+
+`CR0.WP` copy-on-write icin aciktir; talep uzerine sayfalamada ise
+"sayfa yok" hatasi zaten ayricalik seviyesine bakmaz. Yani cekirdegin
+kullanici bellegine yazdigi her yol -- `waitpid`'in durum kelimesi,
+`poll`'un `revents` geri yazimi, sinyal cercevesi, ELF/PE yukleyicisinin
+imaji kopyalamasi -- ayrilmis bir sayfaya denk geldiginde hatayi alir ve
+sayfa doldurulup komut tekrarlanir. Yukleyicinin kendisi de boyle
+calisiyor: imaji kopyalarken dokundugu sayfalar aninda doluyor, geri
+kalan pencere bos kaliyor.
+
 ## Copy-on-write `fork`
 
 `fork`'un tanimi "adres uzayini kopyala"dir, ama **kopyalamak** tanimin
@@ -2057,9 +2116,10 @@ kapandikca sekiz pencerelik tablo dolardi.
 
 ### Sinirlar
 
-- Surec basina **512 KiB** eslenir (`USER_MAP_SIZE`), tum 2 MiB degil.
-  Talep uzerine sayfalama (demand paging) olmadigi icin pesin esleme
-  havuzu bosuna tuketirdi.
+- Surec basina **512 KiB** ayrilir (`USER_MAP_SIZE`), tum 2 MiB degil.
+  Bu bir *ayirma*dir, esleme degil: cerceveler ilk dokunusta veriliyor
+  (bkz. "Talep uzerine sayfalama"). Pencerenin kendisi hala sabit --
+  `mmap` ile buyutulemez.
 - Pencere tamponlari da **surece ozeldir**: WM tamponu cekirdek
   heap'inden ayirir ama Ring 3'e yalnizca **sahibinin** adres uzayinda,
   `0x00D00000`'den itibaren eslenir. Cekirdek ayni bellegi identity
@@ -2195,9 +2255,11 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
   kullanici bolgesinin basina koyar; `/fixed:no` ile linklenmemis, yani
   yeniden yerlesim tablosu tasimayan bir ikili yuklenemez. Windows'ta bu
   ikilinin tercih ettigi tabana bagli olarak calisabilirdi.
-- **Talep uzerine sayfalama yok.** `fork` copy-on-write (yukari bkz.)
-  ama ilk `execve` hala surec basina sabit 512 KiB'lik pencerenin
-  tamamini esler; hic dokunulmayacak sayfalar da cerceve tuketir.
+- **Sayfa disari atilamaz.** Talep uzerine sayfalama var (yukari bkz.)
+  ama tek yon: sayfa dolar, bir daha bosalmaz. Diske takas (swap) ve
+  kullanilmayan sayfayi geri alma yok; havuz dolarsa `fork`/`execve`
+  reddedilir. Ayrica surec basina pencere sabit 512 KiB -- `mmap` ile
+  buyutulemez.
 - **Boru okumasi bloke etmez** ve boru sayisi dorttur. `dup`/`dup2` ve
   `poll` var (yukari bkz.); `select` yok -- `poll` onu kapsadigi icin
   ayrica yazilmadi. `poll` bir bekleme kuyrugu degil, tik cozunurluklu

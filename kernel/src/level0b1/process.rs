@@ -108,7 +108,12 @@ pub unsafe fn run_image(name: &str, image: &[u8]) -> Result<(), SpawnError> {
     if let Some(cr3) = space {
         mmu::switch_to(cr3);
         scheduler::set_current_address_space(cr3);
-        if !mmu::map_user_range(cr3, mmu::USER_MEM_START, mmu::USER_MAP_SIZE) {
+        // Pesin ESLEME degil, **ayirma**: cerceveler ilk dokunusta
+        // veriliyor (bkz. `mmu::reserve_user_range`). Yukleyicinin imaji
+        // kopyalarken yaptigi yazmalar da bu yoldan geciyor -- yani
+        // gercekten kullanilan sayfalar aninda doluyor, gerisi bos
+        // kaliyor.
+        if !mmu::reserve_user_range(cr3, mmu::USER_MEM_START, mmu::USER_MAP_SIZE) {
             release_space(space);
             return Err(SpawnError::OutOfMemory);
         }

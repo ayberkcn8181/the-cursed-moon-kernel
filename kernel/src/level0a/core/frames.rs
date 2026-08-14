@@ -48,6 +48,9 @@ static COW_COPIES: AtomicUsize = AtomicUsize::new(0);
 /// COW hatasinda kopyalamaya **gerek kalmayan** sayfa sayisi: son sahip
 /// kaldigi icin sayfa yalnizca yeniden yazilabilir yapildi.
 static COW_REUSES: AtomicUsize = AtomicUsize::new(0);
+/// Talep uzerine doldurulan sayfa sayisi: ayrilmis bir adrese ilk kez
+/// dokunuldugu icin cerceve verildi.
+static DEMAND_FILLS: AtomicUsize = AtomicUsize::new(0);
 
 fn bit(index: usize) -> bool {
     unsafe {
@@ -192,6 +195,14 @@ pub fn cow_copies() -> usize {
 
 pub fn cow_reuses() -> usize {
     COW_REUSES.load(Ordering::Relaxed)
+}
+
+pub fn note_demand_fill() {
+    DEMAND_FILLS.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn demand_fills() -> usize {
+    DEMAND_FILLS.load(Ordering::Relaxed)
 }
 
 pub fn used() -> usize {

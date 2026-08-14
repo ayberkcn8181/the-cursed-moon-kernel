@@ -175,9 +175,20 @@ extern "x86-interrupt" fn ex14(frame: InterruptStackFrame, error_code: u32) {
 
     const PRESENT: u32 = 1 << 0;
     const WRITE: u32 = 1 << 1;
-    if error_code & (PRESENT | WRITE) == (PRESENT | WRITE)
-        && unsafe { crate::level0a::core::mmu::handle_cow_fault(fault_addr) }
-    {
+
+    // Iki kurtarilabilir durum var ve hata kodunun 0. biti ikisini
+    // ayirir: sayfa YOK ise talep uzerine sayfalama, sayfa VAR ama
+    // yazma reddedildiyse copy-on-write.
+    let recovered = unsafe {
+        if error_code & PRESENT == 0 {
+            crate::level0a::core::mmu::handle_demand_fault(fault_addr)
+        } else if error_code & WRITE != 0 {
+            crate::level0a::core::mmu::handle_cow_fault(fault_addr)
+        } else {
+            false
+        }
+    };
+    if recovered {
         return;
     }
 
