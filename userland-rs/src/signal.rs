@@ -107,3 +107,40 @@ pub fn kill(pid: usize, signo: u32) -> isize {
 pub fn getpid() -> usize {
     unsafe { sys::syscall0(sys::SYS_GETPID) }
 }
+
+// --- Engel maskesi ---
+
+/// Verilen sinyalleri **ekle** (engelle).
+pub const SIG_BLOCK: usize = 0;
+/// Verilen sinyalleri **cikar** (engeli kaldir).
+pub const SIG_UNBLOCK: usize = 1;
+/// Maskeyi verilenle **degistir**.
+pub const SIG_SETMASK: usize = 2;
+
+/// Sinyal numarasini maske bitine cevirir.
+pub const fn mask_of(signo: u32) -> u32 {
+    1 << signo
+}
+
+/// POSIX `sigprocmask`: engel maskesini degistirir, **eskisini** doner.
+///
+/// Bloke bir sinyal kaybolmaz -- bekler ve maske acilinca teslim edilir.
+/// Kritik bolge kalibi budur: maskele, isi yap, maskeyi ac.
+///
+/// Tasima farki: gercek POSIX iki `sigset_t` isaretcisi alir; burada
+/// maske deger olarak gecer (32 sinyal tek kelimeye sigiyor).
+pub fn sigprocmask(how: usize, set: u32) -> u32 {
+    unsafe { sys::syscall2(sys::SYS_SIGPROCMASK, how, set as usize) as u32 }
+}
+
+/// Mevcut engel maskesini okur (hicbir seyi degistirmeden).
+pub fn current_mask() -> u32 {
+    sigprocmask(SIG_BLOCK, 0)
+}
+
+/// POSIX `alarm`: `seconds` sonra kendine `SIGALRM` gonderir.
+///
+/// Onceki alarmdan kalan saniyeyi doner; `0` alarmi iptal eder.
+pub fn alarm(seconds: u32) -> u32 {
+    unsafe { sys::syscall1(sys::SYS_ALARM, seconds as usize) as u32 }
+}

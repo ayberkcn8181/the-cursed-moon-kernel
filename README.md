@@ -52,6 +52,7 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 8 | **`poll`** (`POLLIN`/`POLLOUT`/`POLLHUP`, zaman asimi) | ✅ (i386 + x86_64) |
 | 8 | **Surec basina program break** (`brk`) + **`read(0)` = klavye** | ✅ |
 | 8 | **POSIX sinyalleri** (`kill`/`signal`/`sigreturn`, isleyici cagrisi) | ✅ (i386 + x86_64) |
+| 8 | **Sinyal maskesi + `alarm`** (`sigprocmask`, PIT'ten `SIGALRM`) | ✅ (i386 + x86_64) |
 | 8+ | musl/busybox | ⏳ yapilmadi |
 
 ## Grafiksel Alfa
@@ -78,7 +79,7 @@ Ekranda gorunenler:
   | bellek/disk | `mem` `disk` `df` `format onayla` `sync` `install onayla` |
   | dosya | `ls [dizin]` `mkdir <yol>` `rmdir <yol>` `cat <yol>` `save <yol> <metin>` `cp <kaynak> <hedef>` `rm <yol>` |
   | uygulama/pencere | `apps` `run <ad>` `win` `focus <id>` `mouse` |
-  | uygulamalar (ELF) | `paint` `plasma` `notes` `menu` `twins` `relay` `echo2` `sigdemo` `race` `reaper` `redirect` `mux` `crash` `hog` `spin` |
+  | uygulamalar (ELF) | `paint` `plasma` `notes` `menu` `twins` `relay` `echo2` `sigdemo` `race` `reaper` `redirect` `mux` `masked` `crash` `hog` `spin` |
   | uygulamalar (PE) | `winclock` (ham `int 0x2E`) `winpad` (IAT) -- i386'da PE32, x86_64'te PE32+ |
   | diger | `echo <metin>` `pipes` `clear` `help` |
 - **Sistem Gunlugu** -- cekirdek kaydinin canli goruntusu (konsol halka
@@ -1353,6 +1354,57 @@ olan bir surec penceresini de dondurur, oysa buradaki uygulamalar kendi
 cizim dongulerini surer. `relay`'in ebeveyni her karede yoklar ve grafik
 akici kalir.
 
+## Sinyal maskesi ve `alarm`
+
+Sinyaller teslim ediliyordu ama **ertelenemiyordu**. POSIX'te bir
+sinyali engellemek onu yok saymak degildir: engelli sinyal bekleyenler
+maskesinde durur ve engel kalkinca teslim edilir. Kritik bolge kalibi
+budur -- bolunmemesi gereken is maskeyle cevrelenir, sinyal kaybolmaz,
+yalnizca **ertelenir**.
+
+```
+sigprocmask(SIG_BLOCK,   1<<SIGUSR1)   -> artik gelmez, birikir
+... kritik bolge ...
+sigprocmask(SIG_UNBLOCK, 1<<SIGUSR1)   -> biriken ANINDA teslim
+```
+
+`masked` uygulamasi SIGUSR1 **engelli** baslar. Kabuktan uc kez sinyal
+gonderildiginde:
+
+![sinyal maskesi](docs/screenshot-mask.png)
+
+**Gonderilen 3, teslim edilen 0.** Sinyal kaybolmadi -- `bekleyen`
+sutununda duruyor, `engelli` sutunu nedenini soyluyor. Odak uygulamaya
+verilip engel kaldirilinca sayac aninda 1 oluyor.
+
+Ikinci kanit da orada: uc sinyal gonderildi, sayac **bir** artti.
+Standart sinyaller siraya girmez; maske bir bittir, sayac degil.
+
+### `alarm`: zamanlayici da bir sinyal kaynagi
+
+`alarm(3)` cagiran gorev icin PIT tik'i cinsinden bir uyanma ani
+saklanir. Her tikte suresi dolan gorevlere `SIGALRM` konur -- kesme
+baglaminda yalnizca bir bit; teslim, hedef Ring 3'e donerken olur. Yani
+zamanlayici ayri bir mekanizma degil, var olan sinyal yolunun bir
+kaynagi.
+
+POSIX sozlesmesi de yerinde: `alarm` **onceki alarmdan kalan saniyeyi**
+doner. Ust uste iki `alarm(3)` cagrisinin ikincisi `3` donuyor, `alarm(0)`
+iptal edip kalani veriyor.
+
+### Bilerek yapilan tasima farki
+
+Gercek POSIX `sigprocmask` iki `sigset_t` **isaretcisi** alir. TCMK
+maskeyi deger olarak gecirir ve eskisini donus degeriyle verir: 32
+sinyal tek bir kelimeye sigdigi icin isaretci dogrulamak gereksiz bir
+yol olurdu (ayni sadelestirme `pipe` ve `poll`'da da yapildi).
+
+`SIGKILL` maskeye **giremez**. Girebilseydi bir surec kendini
+oldurulemez yapabilirdi; POSIX'in bu yasagi da tam olarak bunun icin.
+
+`fork` maskeyi devralir (bekleyenleri ve alarmi almaz); `execve` maskeyi
+ve alarmi korur, isleyicileri sifirlar -- adresleri eski imaja aitti.
+
 ## Talep uzerine sayfalama
 
 `fork` COW oldu ama `execve` hala pahaliydi: her surec, tek bir bayta
@@ -2272,9 +2324,11 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
 - **Sinyal teslimi syscall donusune baglidir.** Hicbir syscall yapmayan
   saf hesap dongusu sinyali gormez (`spin` boyle); `SIGKILL` ise
   isbirligi gerektirmedigi icin her zaman calisir. Ayrica maskeleme
-  (`sigprocmask`), `siginfo`/`sigaction` bayraklari, `alarm` ve
+  `siginfo`/`sigaction` bayraklari ve
   gercek-zamanli sinyaller yok; isleyici icinde ikinci bir sinyal teslim
-  edilmez (ic ice cagri yok).
+  edilmez (ic ice cagri yok). Maskeleme (`sigprocmask`) ve `alarm` var
+  (yukari bkz.), ama `sigaction` bayraklari (`SA_RESTART`, `SA_SIGINFO`)
+  ve `sigsuspend`/`sigwait` yok.
 - **Surec gruplari yok.** `waitpid` belirli bir cocugu ve `-1`
   ("herhangi bir cocuk") bicimlerini destekler, ama `pid < -1` (surec
   grubu) ve `WUNTRACED`/`WCONTINUED` yok.

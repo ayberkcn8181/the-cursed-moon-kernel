@@ -99,6 +99,9 @@ static REDIRECT_ELF: &[u8] = include_bytes!("../../userland/redirect.elf");
 /// poll gosterimi: boru ile klavye ayni cagriyla beklenir.
 #[cfg(target_arch = "x86")]
 static MUX_ELF: &[u8] = include_bytes!("../../userland/mux.elf");
+/// sigprocmask/alarm gosterimi.
+#[cfg(target_arch = "x86")]
+static MASKED_ELF: &[u8] = include_bytes!("../../userland/masked.elf");
 
 /// Linux (ELF64, x86_64) kullanici programi -- `tools/gen_hello_elf64.py`.
 /// Elle kodlanmis en kucuk ELF64: yukleyicinin dar yolunu sinar.
@@ -136,6 +139,8 @@ static REAPER64: &[u8] = include_bytes!("../../userland/reaper.elf64");
 static REDIRECT64: &[u8] = include_bytes!("../../userland/redirect.elf64");
 #[cfg(target_arch = "x86_64")]
 static MUX64: &[u8] = include_bytes!("../../userland/mux.elf64");
+#[cfg(target_arch = "x86_64")]
+static MASKED64: &[u8] = include_bytes!("../../userland/masked.elf64");
 
 /// **Windows (PE32+) uygulamalari** -- i386'dakilerle ayni kaynak, ayni
 /// ithal kutuphaneleri; degisen yalnizca hedef. Taban 0x140000000
@@ -169,6 +174,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/reaper", REAPER_ELF),
     ("/bin/redirect", REDIRECT_ELF),
     ("/bin/mux", MUX_ELF),
+    ("/bin/masked", MASKED_ELF),
     ("/bin/winclock.exe", WINCLOCK_EXE),
     ("/bin/winpad.exe", WINPAD_EXE),
     ("/boot/msg.txt", BOOT_MSG),
@@ -191,6 +197,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/reaper", REAPER64),
     ("/bin/redirect", REDIRECT64),
     ("/bin/mux", MUX64),
+    ("/bin/masked", MASKED64),
     ("/bin/winclock.exe", WINCLOCK_EXE64),
     ("/bin/winpad.exe", WINPAD_EXE64),
     ("/boot/msg.txt", BOOT_MSG),

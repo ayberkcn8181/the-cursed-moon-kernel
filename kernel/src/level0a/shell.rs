@@ -677,23 +677,34 @@ fn execute(line: &str) {
             write_num(signal::sent_count() as usize);
             write_str("   teslim edilen: ");
             write_num(signal::delivered_count() as usize);
+            write_str("   maskede bekleyen: ");
+            write_num(signal::blocked_hits() as usize);
             newline();
-            write_line("  id  gorev        isleyicili        bekleyen");
+            write_line("  id  gorev        isleyicili       bekleyen        engelli");
             for i in 0..scheduler::MAX_TASKS {
                 if scheduler::state_of(i) == scheduler::TaskState::Unused {
                     continue;
                 }
                 let handled = signal::handled_mask(i);
                 let pending = signal::pending_mask(i);
-                if handled == 0 && pending == 0 {
+                let blocked = signal::blocked_mask(i);
+                if handled == 0 && pending == 0 && blocked == 0 {
                     continue;
                 }
                 write_num_right(i, 4);
                 write_str("  ");
                 write_padded(scheduler::name_of(i), 12);
                 write_str(" ");
-                write_sig_list(handled, 17);
-                write_sig_list(pending, 0);
+                write_sig_list(handled, 16);
+                write_sig_list(pending, 16);
+                write_sig_list(blocked, 0);
+                // Kurulu bir alarm varsa kalan sure de gorunsun.
+                let remaining = signal::alarm_remaining(i);
+                if remaining > 0 {
+                    write_str("  alarm:");
+                    write_num(remaining as usize / 100);
+                    write_str("s");
+                }
                 newline();
             }
         }

@@ -32,6 +32,9 @@ pub fn init(hz: u32) {
 pub fn on_tick() {
     let ticks = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
     crate::level0a::core::scheduler::on_timer_tick();
+    // Suresi dolan `alarm`'lar SIGALRM uretir. Kesme baglaminda yalnizca
+    // bir bit konur; teslim, hedef Ring 3'e donerken olur.
+    crate::level0b1::signal::on_tick(ticks);
 
     // Paylasimli bolgeyi tazele (doc S.10): Level-0b2 durum bilgisini
     // Level-0a'nin fonksiyonlarini cagirarak degil, buradan okur.

@@ -43,6 +43,8 @@ mod i386_numbers {
     pub const SYS_KILL: usize = 37;
     pub const SYS_SIGNAL: usize = 48;
     pub const SYS_SIGRETURN: usize = 119;
+    pub const SYS_SIGPROCMASK: usize = 126;
+    pub const SYS_ALARM: usize = 27;
     pub const SYS_GETPRIORITY: usize = 96;
     pub const SYS_SETPRIORITY: usize = 97;
 }
@@ -67,6 +69,8 @@ mod x86_64_numbers {
     /// x86_64'te klasik `signal` yoktur; yerini `rt_sigaction` alir.
     pub const SYS_SIGNAL: usize = 13;
     pub const SYS_SIGRETURN: usize = 15;
+    pub const SYS_SIGPROCMASK: usize = 14;
+    pub const SYS_ALARM: usize = 37;
     pub const SYS_GETPRIORITY: usize = 140;
     pub const SYS_SETPRIORITY: usize = 141;
 }

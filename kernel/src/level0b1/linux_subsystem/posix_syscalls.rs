@@ -70,6 +70,8 @@ mod i386_numbers {
     /// alanindan gelir -- yani fikir ayni, tasima yolu farkli.
     pub const SYS_SIGNAL: u32 = 48;
     pub const SYS_SIGRETURN: u32 = 119;
+    pub const SYS_SIGPROCMASK: u32 = 126;
+    pub const SYS_ALARM: u32 = 27;
     pub const SYS_GETPRIORITY: u32 = 96;
     pub const SYS_SETPRIORITY: u32 = 97;
 }
@@ -96,6 +98,9 @@ mod x86_64_numbers {
     /// kullanir (isleyici, tramplen) -- `sigaction` yapisi kopyalanmaz.
     pub const SYS_SIGNAL: u32 = 13;
     pub const SYS_SIGRETURN: u32 = 15;
+    /// x86_64'te klasik `sigprocmask` yoktur; `rt_sigprocmask` gecer.
+    pub const SYS_SIGPROCMASK: u32 = 14;
+    pub const SYS_ALARM: u32 = 37;
     pub const SYS_GETPRIORITY: u32 = 140;
     pub const SYS_SETPRIORITY: u32 = 141;
 }
@@ -526,6 +531,29 @@ pub fn dispatch(frame: &mut SyscallFrame) {
             }
 
             frame.set_return(ready);
+            return;
+        }
+
+        // `sigprocmask(how, maske)` -- ESKI maskeyi doner.
+        //
+        // Gercek POSIX iki `sigset_t` isaretcisi alir; 32 sinyal tek bir
+        // kelimeye sigdigi icin burada maske deger olarak gecirilir
+        // (ayni sadelestirme `pipe`'ta da yapildi).
+        SYS_SIGPROCMASK => {
+            let task = crate::level0a::core::scheduler::current_id();
+            match signal::sigprocmask(task, arg1, arg2 as u32) {
+                Some(old) => {
+                    frame.set_return(old as usize);
+                    return;
+                }
+                None => -EINVAL,
+            }
+        }
+
+        // `alarm(saniye)` -- onceki alarmdan KALAN saniyeyi doner.
+        SYS_ALARM => {
+            let task = crate::level0a::core::scheduler::current_id();
+            frame.set_return(signal::alarm(task, arg1 as u32) as usize);
             return;
         }
 

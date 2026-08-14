@@ -102,9 +102,33 @@ static mut SAVED: [UserContext; scheduler::MAX_TASKS] =
     [UserContext::ZERO; scheduler::MAX_TASKS];
 static mut IN_HANDLER: [bool; scheduler::MAX_TASKS] = [false; scheduler::MAX_TASKS];
 
+/// Surec basina **engellenen** sinyaller: bit N = sinyal N bloke.
+///
+/// Bloke bir sinyal kaybolmaz; `PENDING`'de bekler ve maske acildiginda
+/// teslim edilir. POSIX'in "kritik bolge" araci budur -- uygulama
+/// bolunmemesi gereken isi maskeyi kapatarak yapar.
+static BLOCKED: [AtomicU32; scheduler::MAX_TASKS] = [ZERO_PENDING; scheduler::MAX_TASKS];
+
+/// `alarm` icin uyanma ani (PIT tik'i, mutlak). 0 = kurulu degil.
+static ALARM_AT: [AtomicU32; scheduler::MAX_TASKS] = [ZERO_PENDING; scheduler::MAX_TASKS];
+
 /// Teslim edilen sinyal sayaci (kabuk `sigs` komutu icin).
 static DELIVERED: AtomicU32 = AtomicU32::new(0);
 static SENT: AtomicU32 = AtomicU32::new(0);
+/// Bloke oldugu icin bekletilen teslim sayisi.
+static BLOCKED_HITS: AtomicU32 = AtomicU32::new(0);
+
+/// `sigprocmask` islemleri (Linux ile ayni sayilar).
+pub const SIG_BLOCK: usize = 0;
+pub const SIG_UNBLOCK: usize = 1;
+pub const SIG_SETMASK: usize = 2;
+
+/// Engellenemeyen sinyaller. POSIX `SIGKILL` ve `SIGSTOP`'u maskeye
+/// almaz; alsaydi bir surec kendini oldurulemez yapabilirdi.
+const UNBLOCKABLE: u32 = 1 << SIGKILL;
+
+/// PIT tik'i basina saniye (100 Hz).
+const TICKS_PER_SECOND: u32 = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignalError {
@@ -202,6 +226,104 @@ pub fn set_handler(
     })
 }
 
+/// POSIX `sigprocmask`: engel maskesini okur/degistirir; **eski** maskeyi
+/// doner.
+///
+/// ## Tasima farki
+///
+/// Gercek POSIX iki `sigset_t` **isaretcisi** alir. TCMK maskeyi
+/// dogrudan deger olarak gecirir ve eskisini donus degeriyle verir:
+/// 32 sinyal tek bir kelimeye sigdigi icin isaretci dogrulamak gereksiz
+/// bir yol olurdu (ayni sadelestirme `pipe`'ta da yapildi).
+pub fn sigprocmask(task: usize, how: usize, set: u32) -> Option<u32> {
+    if task >= scheduler::MAX_TASKS {
+        return None;
+    }
+    let old = BLOCKED[task].load(Ordering::SeqCst);
+    let next = match how {
+        SIG_BLOCK => old | set,
+        SIG_UNBLOCK => old & !set,
+        SIG_SETMASK => set,
+        _ => return None,
+    };
+    // SIGKILL maskeye giremez: girebilseydi bir surec kendini
+    // oldurulemez yapabilirdi.
+    BLOCKED[task].store(next & !UNBLOCKABLE, Ordering::SeqCst);
+    Some(old)
+}
+
+pub fn blocked_mask(task: usize) -> u32 {
+    if task >= scheduler::MAX_TASKS {
+        return 0;
+    }
+    BLOCKED[task].load(Ordering::Relaxed)
+}
+
+pub fn blocked_hits() -> u32 {
+    BLOCKED_HITS.load(Ordering::Relaxed)
+}
+
+/// POSIX `alarm`: `seconds` sonra `SIGALRM` gonderilmesini ister.
+///
+/// Onceki alarmdan **kalan saniyeyi** doner (POSIX boyle tanimlar);
+/// `seconds == 0` alarmi iptal eder. Cozunurluk PIT tik'idir (10 ms).
+pub fn alarm(task: usize, seconds: u32) -> u32 {
+    if task >= scheduler::MAX_TASKS {
+        return 0;
+    }
+    let now = crate::level0a::pit::ticks();
+    let previous = ALARM_AT[task].load(Ordering::SeqCst);
+    let remaining = if previous > now {
+        (previous - now + TICKS_PER_SECOND - 1) / TICKS_PER_SECOND
+    } else {
+        0
+    };
+
+    if seconds == 0 {
+        ALARM_AT[task].store(0, Ordering::SeqCst);
+    } else {
+        ALARM_AT[task].store(now + seconds * TICKS_PER_SECOND, Ordering::SeqCst);
+    }
+    remaining
+}
+
+/// Kalan alarm suresi, tik cinsinden (kabuk raporu). 0 = kurulu degil.
+pub fn alarm_remaining(task: usize) -> u32 {
+    if task >= scheduler::MAX_TASKS {
+        return 0;
+    }
+    let at = ALARM_AT[task].load(Ordering::Relaxed);
+    let now = crate::level0a::pit::ticks();
+    if at > now {
+        at - now
+    } else {
+        0
+    }
+}
+
+/// PIT kesmesinden cagrilir: suresi dolan alarmlar `SIGALRM` uretir.
+///
+/// Kesme baglamindan cagrildigi icin yalnizca atomik islem yapiyor --
+/// `raise` de bir bit koymaktan ibarettir; teslim, hedef Ring 3'e
+/// donerken olur.
+pub fn on_tick(now: u32) {
+    for task in 0..scheduler::MAX_TASKS {
+        let at = ALARM_AT[task].load(Ordering::Relaxed);
+        if at == 0 || now < at {
+            continue;
+        }
+        // Once sifirla, sonra gonder: `raise` sirasinda uygulama yeni bir
+        // alarm kurarsa ezmemek icin karsilastirmali degisim.
+        if ALARM_AT[task]
+            .compare_exchange(at, 0, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            continue;
+        }
+        let _ = raise(task, SIGALRM);
+    }
+}
+
 /// `fork`: yerlestirmeler cocuga **kopyalanir** (POSIX boyle der), ama
 /// bekleyen sinyaller kopyalanmaz -- cocuk temiz baslar.
 pub fn clone_into(child: usize) {
@@ -222,6 +344,10 @@ pub fn clone_into(child: usize) {
             .write(false);
     });
     PENDING[child].store(0, Ordering::SeqCst);
+    // POSIX: cocuk ebeveynin engel maskesini **devralir**, ama bekleyen
+    // sinyalleri ve alarmini almaz.
+    BLOCKED[child].store(BLOCKED[parent].load(Ordering::SeqCst), Ordering::SeqCst);
+    ALARM_AT[child].store(0, Ordering::SeqCst);
 }
 
 /// `execve` ve gorev cikisi: yeni imaj eski isleyicileri devralmaz --
@@ -241,6 +367,10 @@ pub fn reset(task: usize) {
             .write(false);
     });
     PENDING[task].store(0, Ordering::SeqCst);
+    // Engel maskesi POSIX'te `execve`'yi **asar** (yeni imaj ayni
+    // maskeyle baslar); isleyiciler asmaz, cunku adresleri eski imaja
+    // aitti. Alarm da korunur -- kurulmus bir zamanlayici, program
+    // degisti diye iptal olmaz.
 }
 
 /// Bekleyen sinyal maskesi (kabuk icin).
@@ -318,8 +448,14 @@ pub unsafe fn deliver_pending(frame: &mut SyscallFrame) {
     }
 
     loop {
-        let mask = PENDING[task].load(Ordering::SeqCst);
+        // Bloke olanlar **elenir**, silinmez: maskede duran bir sinyal
+        // kaybolmaz, `sigprocmask` acildiginda teslim edilir.
+        let blocked = BLOCKED[task].load(Ordering::SeqCst);
+        let mask = PENDING[task].load(Ordering::SeqCst) & !blocked;
         if mask == 0 {
+            if PENDING[task].load(Ordering::SeqCst) != 0 {
+                BLOCKED_HITS.fetch_add(1, Ordering::Relaxed);
+            }
             return;
         }
         let signo = mask.trailing_zeros();

@@ -91,6 +91,7 @@ static KNOWN_APPS: &[(&str, &str, &str)] = &[
     ("reaper", "/bin/reaper", "reaper"),
     ("redirect", "/bin/redirect", "redirect"),
     ("mux", "/bin/mux", "mux"),
+    ("masked", "/bin/masked", "masked"),
     // Windows ikilisi: yol .exe ile biter, cekirdek bicimi magic'ten
     // anlar (bkz. vfs::format) ve PE yukleyicisine yonlendirir. Yol iki
     // mimaride de aynidir; VFS'te duran ikilinin PE32 mi PE32+ mi oldugu
