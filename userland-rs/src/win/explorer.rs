@@ -29,6 +29,15 @@
 //!   * Butun cagrilar ithal tablosu (IAT) uzerinden gider -- bu ikili tek
 //!     bir elle yazilmis sistem cagrisi icermez.
 //!
+//! ## Yolu artik program tasimiyor
+//!
+//! Ilk surumde bu program gezdigi yolu kendi icinde tutuyordu: `Path`
+//! diye bir yapi, `push`/`pop`, ve her cagri icin yol birlestirmesi.
+//! `SetCurrentDirectoryA` geldikten sonra o kodun tamami silindi --
+//! dizine girmek `SetCurrentDirectoryA(ad)`, listelemek
+//! `FindFirstFileA("*")`, dizin acmak `CreateDirectoryA("win321")`.
+//! Ustteki yol satiri da tahmin degil, `GetCurrentDirectoryA`nin cevabi.
+//!
 //! Gezinmenin yaninda **yazma** da var: `n` `CreateDirectoryA` ile yeni
 //! bir dizin acar, `d` secili girdiyi `RemoveDirectoryA`/`DeleteFileA`
 //! ile siler. Olusturulan dizinlerin adi `win32N`'dir; POSIX tarafindaki
@@ -87,100 +96,32 @@ impl Row {
     }
 }
 
-/// Gezilen dizin. Windows tarzinda tutulur (`\` ile), cunku cagri
-/// Win32'dir; cekirdek ayirici cevrimini kendisi yapar.
-struct Path {
-    bytes: [u8; MAX_PATH],
-    len: usize,
-}
-
-impl Path {
-    fn root() -> Self {
-        let mut path = Path {
-            bytes: [0; MAX_PATH],
-            len: 1,
-        };
-        path.bytes[0] = b'\\';
-        path
+/// Calisma dizinini `GetCurrentDirectoryA` ile sorar.
+///
+/// Ilk surumde bu program gezdigi yolu **kendi icinde** tutuyordu:
+/// `Path` diye bir yapi, `push`/`pop`, ve her cagri icin
+/// `dizin + "\\" + ad` birlestirmesi. `SetCurrentDirectoryA` geldikten
+/// sonra o kodun tamami silindi -- ekrandaki yol da artik tahmin degil,
+/// cekirdegin cevabi.
+fn cwd(buf: &mut [u8; MAX_PATH]) -> &str {
+    let n = unsafe { winapi::GetCurrentDirectoryA(MAX_PATH as u32, buf.as_mut_ptr()) } as usize;
+    // Sifir gercek bir hata; tampon yetmediyse **gereken** boyut doner
+    // ve o da MAX_PATH'ten buyuk olur.
+    if n == 0 || n >= MAX_PATH {
+        return "\\";
     }
-
-    fn as_str(&self) -> &str {
-        core::str::from_utf8(&self.bytes[..self.len]).unwrap_or("\\")
-    }
-
-    /// Yola `\*` ekleyip NUL ile kapatan bir desen uretir.
-    ///
-    /// `FindFirstFileA` yol degil **desen** alir; TCMK'de desen esleme
-    /// olmadigi icin `*` "hepsi" demektir.
-    fn pattern(&self, buf: &mut [u8; MAX_PATH + 4]) -> *const u8 {
-        let mut len = 0usize;
-        buf[..self.len].copy_from_slice(&self.bytes[..self.len]);
-        len += self.len;
-        if self.bytes[self.len - 1] != b'\\' {
-            buf[len] = b'\\';
-            len += 1;
-        }
-        buf[len] = b'*';
-        buf[len + 1] = 0;
-        buf.as_ptr()
-    }
-
-    fn push(&mut self, name: &str) {
-        let separator = if self.bytes[self.len - 1] == b'\\' { 0 } else { 1 };
-        if self.len + separator + name.len() >= MAX_PATH {
-            return;
-        }
-        if separator == 1 {
-            self.bytes[self.len] = b'\\';
-            self.len += 1;
-        }
-        self.bytes[self.len..self.len + name.len()].copy_from_slice(name.as_bytes());
-        self.len += name.len();
-    }
-
-    fn pop(&mut self) {
-        if self.len <= 1 {
-            return;
-        }
-        while self.len > 1 && self.bytes[self.len - 1] != b'\\' {
-            self.len -= 1;
-        }
-        if self.len > 1 {
-            self.len -= 1;
-        }
-    }
-
-    /// `dizin\ad` + NUL uretir. Ayirici Windows tarzinda kalir; cevrimi
-    /// cekirdek yapar (`normalize_win_path`).
-    fn child(&self, name: &str, buf: &mut [u8; MAX_PATH + 4]) -> *const u8 {
-        buf[..self.len].copy_from_slice(&self.bytes[..self.len]);
-        let mut len = self.len;
-        if self.bytes[self.len - 1] != b'\\' {
-            buf[len] = b'\\';
-            len += 1;
-        }
-        let taken = name.len().min(MAX_PATH + 3 - len);
-        buf[len..len + taken].copy_from_slice(&name.as_bytes()[..taken]);
-        buf[len + taken] = 0;
-        buf.as_ptr()
-    }
+    core::str::from_utf8(&buf[..n]).unwrap_or("\\")
 }
 
 /// Bos bir numara bulup `win32N` dizinini acar.
-fn make_dir(path: &Path) -> (&'static str, u32) {
-    let mut buf = [0u8; MAX_PATH + 4];
-    let mut name = *b"win320";
+fn make_dir() -> (&'static str, u32) {
+    let mut name = *b"win320\0";
     for digit in b'1'..=b'9' {
         name[5] = digit;
-        let text = match core::str::from_utf8(&name) {
-            Ok(t) => t,
-            Err(_) => break,
-        };
         // Win32 sozlesmesi: basari TRUE, hata FALSE. Zaten varsa FALSE
-        // doner ve dongu bir sonraki numaraya gecer.
-        if unsafe { winapi::CreateDirectoryA(path.child(text, &mut buf), core::ptr::null_mut()) }
-            != 0
-        {
+        // doner ve dongu bir sonraki numaraya gecer. Yol birlestirmesi
+        // yok -- goreli adi cekirdek calisma dizinine gore cozuyor.
+        if unsafe { winapi::CreateDirectoryA(name.as_ptr(), core::ptr::null_mut()) } != 0 {
             return ("CreateDirectoryA: olusturuldu", OK);
         }
     }
@@ -198,18 +139,11 @@ fn make_dir(path: &Path) -> (&'static str, u32) {
 ///
 /// Win32'de "yeniden adlandir" ve "tasi" ayni cagridir; TCMK'de de oyle,
 /// cunku ikisi de tek bir inode alani degisikligi.
-fn rename_entry(path: &Path, row: &Row) -> (&'static str, u32) {
-    let mut from = [0u8; MAX_PATH + 4];
-    let mut to = [0u8; MAX_PATH + 4];
-    let source = path.child(row.name(), &mut from);
-    let mut name = *b"tasindi0";
+fn rename_entry(row: &Row) -> (&'static str, u32) {
+    let mut name = *b"tasindi0\0";
     for digit in b'1'..=b'9' {
         name[7] = digit;
-        let text = match core::str::from_utf8(&name) {
-            Ok(t) => t,
-            Err(_) => break,
-        };
-        if unsafe { winapi::MoveFileA(source, path.child(text, &mut to)) } != 0 {
+        if unsafe { winapi::MoveFileA(row.name.as_ptr(), name.as_ptr()) } != 0 {
             return ("MoveFileA: tasindi", OK);
         }
     }
@@ -224,13 +158,11 @@ fn rename_entry(path: &Path, row: &Row) -> (&'static str, u32) {
 }
 
 /// Secili girdiyi siler: dizinse `RemoveDirectoryA`, dosyaysa `DeleteFileA`.
-fn remove(path: &Path, row: &Row) -> (&'static str, u32) {
-    let mut buf = [0u8; MAX_PATH + 4];
-    let target = path.child(row.name(), &mut buf);
+fn remove(row: &Row) -> (&'static str, u32) {
     let ok = if row.is_dir {
-        unsafe { winapi::RemoveDirectoryA(target) }
+        unsafe { winapi::RemoveDirectoryA(row.name.as_ptr()) }
     } else {
-        unsafe { winapi::DeleteFileA(target) }
+        unsafe { winapi::DeleteFileA(row.name.as_ptr()) }
     };
     if ok != 0 {
         return ("silindi", OK);
@@ -252,9 +184,9 @@ fn remove(path: &Path, row: &Row) -> (&'static str, u32) {
 fn main() {
     let mut console = winapi::Console;
 
-    let mut path = Path::root();
+    let mut path = [0u8; MAX_PATH];
     let mut rows = [Row::empty(); MAX_ROWS];
-    let mut count = scan(&path, &mut rows);
+    let mut count = scan(&mut rows);
     let mut selected = 0usize;
     let mut status = ("j/k sec  Enter gir  u ust", DIM);
 
@@ -280,41 +212,42 @@ fn main() {
             b'k' => selected = selected.saturating_sub(1),
             b'\n' | b'\r' => {
                 if selected < count && rows[selected].is_dir {
-                    path.push(rows[selected].name());
-                    count = scan(&path, &mut rows);
+                    // Yol birlestirmesi yok: goreli adi cekirdek cozuyor.
+                    unsafe { winapi::SetCurrentDirectoryA(rows[selected].name.as_ptr()) };
+                    count = scan(&mut rows);
                     selected = 0;
                 }
             }
             b'u' => {
-                path.pop();
-                count = scan(&path, &mut rows);
+                unsafe { winapi::SetCurrentDirectoryA(b"..\0".as_ptr()) };
+                count = scan(&mut rows);
                 selected = 0;
             }
             b'r' => {
-                count = scan(&path, &mut rows);
+                count = scan(&mut rows);
                 selected = selected.min(count.saturating_sub(1));
             }
             b'n' => {
-                status = make_dir(&path);
-                count = scan(&path, &mut rows);
+                status = make_dir();
+                count = scan(&mut rows);
             }
             b'm' => {
                 if selected < count {
-                    status = rename_entry(&path, &rows[selected]);
-                    count = scan(&path, &mut rows);
+                    status = rename_entry(&rows[selected]);
+                    count = scan(&mut rows);
                 }
             }
             b'd' => {
                 if selected < count {
-                    status = remove(&path, &rows[selected]);
-                    count = scan(&path, &mut rows);
+                    status = remove(&rows[selected]);
+                    count = scan(&mut rows);
                     selected = selected.min(count.saturating_sub(1));
                 }
             }
             _ => {}
         }
 
-        draw(&mut win, &path, &rows[..count], selected, status);
+        draw(&mut win, cwd(&mut path), &rows[..count], selected, status);
         win.frame(40);
     }
 
@@ -322,11 +255,11 @@ fn main() {
 }
 
 /// Dizini `FindFirstFileA`/`FindNextFileA` ile dolasir.
-fn scan(path: &Path, rows: &mut [Row; MAX_ROWS]) -> usize {
-    let mut pattern = [0u8; MAX_PATH + 4];
+fn scan(rows: &mut [Row; MAX_ROWS]) -> usize {
     let mut data = Win32FindData::zeroed();
 
-    let find = unsafe { winapi::FindFirstFileA(path.pattern(&mut pattern), &mut data) };
+    // `*` -- calisma dizininin tamami. Mutlak yol tasimaya gerek yok.
+    let find = unsafe { winapi::FindFirstFileA(b"*\0".as_ptr(), &mut data) };
     if find == winapi::INVALID_HANDLE_VALUE {
         return 0;
     }
@@ -336,7 +269,10 @@ fn scan(path: &Path, rows: &mut [Row; MAX_ROWS]) -> usize {
         if count < rows.len() {
             let name = data.name();
             let row = &mut rows[count];
-            row.len = name.len().min(MAX_NAME);
+            // Sondaki NUL icin bir bayt ayrilir: ad dogrudan
+            // `CreateDirectoryA`/`DeleteFileA`ya verilebilsin diye.
+            row.len = name.len().min(MAX_NAME - 1);
+            row.name = [0; MAX_NAME];
             row.name[..row.len].copy_from_slice(&name.as_bytes()[..row.len]);
             row.size = data.size_low;
             row.unix_time = data.last_write_time.to_unix();
@@ -353,13 +289,13 @@ fn scan(path: &Path, rows: &mut [Row; MAX_ROWS]) -> usize {
     count
 }
 
-fn draw(win: &mut Window, path: &Path, rows: &[Row], selected: usize, status: (&str, u32)) {
+fn draw(win: &mut Window, path: &str, rows: &[Row], selected: usize, status: (&str, u32)) {
     let (w, h) = (win.width(), win.height());
     win.clear(BG);
 
     win.fill(0, 0, w, 22, PANEL);
     win.text(6, 3, "C:", DIM);
-    win.text(24, 3, path.as_str(), ACCENT);
+    win.text(24, 3, path, ACCENT);
 
     if rows.is_empty() {
         win.text(6, 40, "(bos dizin)", DIM);

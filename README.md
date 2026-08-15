@@ -47,6 +47,7 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 5d | **Dosya sistemi yazma**: `mkdir`/`rmdir`/`unlink` + Win32 ikizleri | ✅ (i386 + x86_64, ELF + PE) |
 | 5e | **`rename`/`MoveFileA`** (tasima = tek inode alani; veri kopyalanmaz) | ✅ (i386 + x86_64, ELF + PE) |
 | 7f | **`GetLastError`/`SetLastError`** (surec basina Win32 hata kodu) | ✅ (PE32 + PE32+) |
+| 9e | **`chdir`/`getcwd`** + Win32 ikizleri (surec basina calisma dizini) | ✅ (i386 + x86_64, ELF + PE) |
 | — | **Kendi onyukleyicisi** + diske kurulum (`install`) | ✅ (i386) |
 | 8 | **`execve`** (surec kendi yerine program yukler) | ✅ (i386 + x86_64) |
 | 8 | **`fork`** (adres uzayi kopyasi + iki kez donen cagri) | ✅ (i386 + x86_64) |
@@ -1755,6 +1756,81 @@ belirlenimli. Seri gunlukte, iki mimaride de:
 16384 = `1 << SIGALRM`: maske gecici bosaldi, sinyal teslim edildi, ve
 eski maske geri geldi.
 
+## `chdir` / `getcwd`: yolu artik uygulama tasimiyor
+
+Calisma dizini bugune kadar yalnizca **kabuga** aitti: kabuk yolu
+cagirmadan once mutlaklastiriyor, uygulama her zaman mutlak yol
+goruyordu. Ring 3'te karsiligi yoktu, yani bir uygulama "bulundugum
+dizin" diye bir sey bilemiyordu.
+
+| POSIX (ELF) | Win32 (PE) | Level-0a |
+|---|---|---|
+| `chdir(yol)` | `SetCurrentDirectoryA(yol)` | `kernel_api::chdir` |
+| `getcwd(buf, n)` | `GetCurrentDirectoryA(n, buf)` | `kernel_api::getcwd` |
+
+Iki ABI'nin donus sozlesmesi farkli ve **ikisi de** korundu: POSIX
+uzunlugu (NUL dahil) doner, tampon kucukse `-ERANGE`; Win32 yer yeterse
+**yazilan** uzunlugu (NUL haric), yetmezse **gereken** uzunlugu doner
+ki cagiran tamponu buyutup yeniden denesin.
+
+### Olcu: iki gezginden de kod **silindi**
+
+Iki gezgin de gezdikleri yolu kendi iclerinde tutuyordu -- `Path` diye
+bir yapi, `push`/`pop`, ve her cagri icin `dizin + "/" + ad`
+birlestirmesi. `chdir` geldikten sonra o kodun tamami silindi:
+
+| is | onceden | simdi |
+|---|---|---|
+| dizine gir | `path.push(ad)` + yol birlestir | `chdir(ad)` |
+| ust dizin | `path.pop()` | `chdir("..")` |
+| listele | `open(tam_yol)` | `open(".")` |
+| dizin ac | `mkdir(dizin + "/" + "posix1")` | `mkdir("posix1")` |
+| yolu goster | programin kendi tahmini | `getcwd`in cevabi |
+
+Son satir onemli: ekranda gorunen yol ile cekirdegin cozdugu yol artik
+**ayni kaynaktan** geliyor, dolayisiyla ayrisamazlar.
+
+`browse` (ELF) iki seviye inip goreli adla dizin acti:
+
+![chdir](docs/screenshot-chdir.png)
+
+`winfiles` (PE32) aynisini Win32 yuzuyle yapiyor -- `C:/home` icinde,
+`CreateDirectoryA("win321")` ile:
+
+![chdir win](docs/screenshot-chdir-win.png)
+
+### Sifirlama neden **yuvada**, imajda degil
+
+`cwd::reset` gorev yuvasi ayrilirken cagriliyor, imaj yuklenirken degil.
+Bu tek karar POSIX'in iki kuralini birden karsiliyor:
+
+* `execve` yuvayi **yeniden kullanir**, yeni yuva ayirmaz -- yani cwd
+  kendiliginden korunuyor, ki POSIX'in istedigi de bu.
+* Yeni bir surec her zaman `/`'da baslar; yuvalar geri kazanildigi icin
+  bu sart, yoksa yeni surec oncekinin dizininde acilirdi.
+
+`fork` ayri yuva aldigi icin ebeveynin dizinini ayrica kopyalar
+(`cwd::clone_into`).
+
+### Olcum bir hata daha buldu
+
+Win32 tarafinda `FindFirstFileA("*")` -- yalin yildiz -- **koku**
+listeliyordu. `SetCurrentDirectoryA` gorunuste calisiyor, ust satirdaki
+yol degisiyor, ama liste hep ayni kaliyordu. Sebep, desen atildiktan
+sonra geriye kalan bos dizeyi kok saymakti. Iki ayri anlam var ve
+ayirmak sart: `\*` (ya da `C:\*`) **mutlak** bir desendir, koku
+gosterir; yalin `*` ise gorelidir, "bulundugum dizin" demektir.
+
+### Bilerek yapilmayanlar
+
+* **Kabugun dizini surec dizinlerinden ayri.** Kabuk bir cekirdek
+  gorevidir ve komutlari ayri bir gorevde kosturur; "kabugun dizini" ile
+  "komutun gorev yuvasinin dizini" ayni sey degil. Buna karsilik
+  normallestirme tek yerde (`core::cwd::normalize`) -- yoksa kabuktan
+  calisan bir yol ile uygulamadan calisan ayni yol ayrisabilirdi.
+* **`fdopendir`/`openat` yok.** Goreli cozum yol adiyla yapilir, dizin
+  tanimlayicisina gore degil.
+
 ## Kabuk komutlari artik ekrani dondurmuyor
 
 Kabuk masaustu gorevinde kosuyordu ve o gorev **uyutulamaz** (ekrani o
@@ -2899,9 +2975,7 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
   160 KiB (yalnizca dogrudan blok isaretcileri) ve azami 8 seviye
   derinlik. Dizin agaci gercek ve `.`/`..` calisiyor (yukari bkz.), ama
   sembolik baglar, izinler ve sahiplik yok. Calisma dizini **kabuga**
-  aittir: Ring 3 tarafinda `chdir`/`getcwd` yok -- uygulamalar dizinleri
-  `getdents`/`FindFirstFileA` ile gezer ama mutlak yol kullanmak
-  zorundadir.
+  aittir **degil**: her surecin kendi dizini var (yukari bkz.).
 - **DMA yok**: veri hala `in/out` ile kelime kelime tasinir. (Kabuk
   komutlari artik ayri bir gorevde kostugu icin kesmeyle bekliyor --
   yukari bkz.)

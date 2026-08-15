@@ -198,6 +198,20 @@ static KERNEL32: &[Export] = &[
         // dwErrCode
         stack_bytes: 4,
     },
+    Export {
+        name: "SetCurrentDirectoryA",
+        ordinal: 20,
+        service: nt::NT_SET_CURRENT_DIRECTORY,
+        // lpPathName
+        stack_bytes: 4,
+    },
+    Export {
+        name: "GetCurrentDirectoryA",
+        ordinal: 21,
+        service: nt::NT_GET_CURRENT_DIRECTORY,
+        // nBufferLength, lpBuffer
+        stack_bytes: 8,
+    },
 ];
 
 /// `TCMKGUI.dll` -- win32k cagrilarinin kullanici modundaki yuzu.

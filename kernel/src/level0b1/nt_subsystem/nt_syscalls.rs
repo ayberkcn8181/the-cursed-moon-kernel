@@ -77,6 +77,8 @@ pub const NT_DELETE_FILE_A: u32 = 0x300F;
 pub const NT_MOVE_FILE_A: u32 = 0x3017;
 pub const NT_GET_LAST_ERROR: u32 = 0x3018;
 pub const NT_SET_LAST_ERROR: u32 = 0x3019;
+pub const NT_SET_CURRENT_DIRECTORY: u32 = 0x301A;
+pub const NT_GET_CURRENT_DIRECTORY: u32 = 0x301B;
 
 pub const NT_USER_CREATE_WINDOW_W32: u32 = 0x3010;
 pub const NT_GDI_GET_BITS_W32: u32 = 0x3011;
@@ -687,6 +689,45 @@ fn dispatch_win32_api(frame: &mut SyscallFrame) {
             0
         }
 
+        // SetCurrentDirectoryA(lpPathName) -> BOOL.
+        // POSIX'teki `chdir` ile ayni cekirdek cagrisina iner.
+        NT_SET_CURRENT_DIRECTORY => win32_path_action(args, kernel_api::chdir),
+
+        // GetCurrentDirectoryA(nBufferLength, lpBuffer) -> DWORD
+        //
+        // Win32 sozlesmesi POSIX'inkinden farkli ve **ikisi de** burada
+        // korunuyor: yeterli yer varsa yazilan uzunluk (NUL haric),
+        // yetmiyorsa **gereken** uzunluk (NUL dahil) doner. Cagiran
+        // boylece tamponu buyutup yeniden deneyebilir.
+        NT_GET_CURRENT_DIRECTORY => {
+            let path = kernel_api::getcwd();
+            let capacity = arg(args, 0).unwrap_or(0) as usize;
+            match arg_ptr(args, 1) {
+                Some(buffer) if buffer != 0 => {
+                    if capacity < path.len() + 1 {
+                        // Yer yetmedi: **gereken** boyut doner, tampona
+                        // dokunulmaz. Cagiran buyutup yeniden dener.
+                        path.len() + 1
+                    } else if !mmu::is_user_accessible(buffer)
+                        || !mmu::is_user_accessible(buffer + path.len())
+                    {
+                        0
+                    } else {
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(
+                                path.as_ptr(),
+                                buffer as *mut u8,
+                                path.len(),
+                            );
+                            (buffer as *mut u8).add(path.len()).write(0);
+                        }
+                        path.len()
+                    }
+                }
+                _ => 0,
+            }
+        }
+
         // --- TCMKGUI.dll: pencere cagrilari ---
         NT_USER_CREATE_WINDOW_W32 => {
             // TcmkCreateWindow(lpTitle, x, y, cx, cy) -> HWND
@@ -815,6 +856,15 @@ fn arg(block: usize, index: usize) -> Option<u32> {
 /// geri kalan yol dizin olarak acilir -- yani her desen `*` gibi davranir.
 /// Bastaki surucu harfi (`C:`) de atilir; TCMK'nin tek isim uzayi vardir.
 ///
+/// ## Yalin `*` koku degil, **calisma dizinini** gosterir
+///
+/// Desen atildiktan sonra geriye bos dize kalabilir. Iki ayri anlami
+/// var ve ayirmak sart: `\*` (ya da `C:\*`) **mutlak** bir desendir,
+/// koku gosterir; yalin `*` ise gorelidir, "bulundugum dizin" demektir.
+/// Ikisi de koke cevrildiginde `SetCurrentDirectoryA` gorunuste
+/// calisiyor ama listeleme hep koku gosteriyordu -- gezginin yolu
+/// degisiyor, icerigi degismiyordu.
+///
 /// Ters bolu isaretlerini bolu isaretine cevirmek cagirana kalir
 /// (yerinde yapilir, bkz. `NT_FIND_FIRST_FILE`), cunku burada yeni bir
 /// tampon ayirmadan degistirilemez.
@@ -829,7 +879,11 @@ fn strip_wildcard(pattern: &str) -> &str {
         None => path.trim_end_matches(['\\', '/']),
     };
     if trimmed.is_empty() {
-        "/"
+        if path.starts_with('/') {
+            "/"
+        } else {
+            "."
+        }
     } else {
         trimmed
     }

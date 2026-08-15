@@ -8,7 +8,9 @@
 
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use crate::level0a::core::{dir, fd, frames, init, kmalloc, mmu, pipe, scheduler, tcmkfs, vfs};
+use crate::level0a::core::{
+    cwd, dir, fd, frames, init, kmalloc, mmu, pipe, scheduler, tcmkfs, vfs,
+};
 use crate::level0a::drivers::{ata, block, gfx, partition, rtc};
 use crate::level0a::{exceptions, input, kernel_api, launcher, pit, wm};
 use crate::level0b1::signal;
@@ -37,7 +39,7 @@ static WINDOW: AtomicUsize = AtomicUsize::new(usize::MAX);
 static mut CWD: [u8; tcmkfs::PATH_MAX] = [b'/'; tcmkfs::PATH_MAX];
 static CWD_LEN: AtomicUsize = AtomicUsize::new(1);
 
-fn cwd() -> &'static str {
+fn shell_cwd() -> &'static str {
     unsafe {
         let base = core::ptr::addr_of!(CWD) as *const u8;
         core::str::from_utf8(core::slice::from_raw_parts(
@@ -48,7 +50,7 @@ fn cwd() -> &'static str {
     }
 }
 
-fn set_cwd(path: &str) -> bool {
+fn set_shell_cwd(path: &str) -> bool {
     if path.len() >= tcmkfs::PATH_MAX {
         return false;
     }
@@ -62,63 +64,16 @@ fn set_cwd(path: &str) -> bool {
     true
 }
 
-/// Goreli yolu calisma dizinine gore mutlaklastirir **ve
-/// sadelestirir**: `.` atilir, `..` bir onceki bileseni siler.
+/// Goreli yolu kabugun calisma dizinine gore mutlaklastirir.
 ///
-/// ## Sadelestirme neden burada
-///
-/// `tcmkfs::resolve` `.`/`..` bilesenlerini zaten anliyor -- ama VFS'in
-/// oteki ucu, cekirdek imajina gomulu **RAMFS**, duz bir isim tablosudur
-/// ve yolu birebir karsilastirir. Yani `/./bin/hello` TCMKFS'te
-/// calisirken RAMFS'te bulunamazdi.
-///
-/// Kabuk yolu **tek bir yerde** sadelestirerek iki dosya sistemini de
-/// ayni girdiyle beslemis oluyor. `tcmkfs`'teki destek yine gerekli:
-/// Ring 3 uygulamalari kabuktan gecmeden `open("../x")` diyebilir.
+/// Sadelestirme mantigi `core::cwd::normalize`da; burasi yalnizca tabani
+/// veriyor. Kabugun kendi dizini surec dizinlerinden **ayri** tutulur:
+/// kabuk bir cekirdek gorevidir ve komutlari ayri bir gorevde kosturur,
+/// yani "kabugun dizini" ile "komutun gorev yuvasinin dizini" ayni sey
+/// degildir. Buna karsilik normallestirme tek yerde -- yoksa kabuktan
+/// calisan bir yol ile uygulamadan calisan ayni yol ayrisabilirdi.
 fn absolute<'a>(path: &str, buf: &'a mut [u8; tcmkfs::PATH_MAX]) -> Option<&'a str> {
-    // Mutlak yol verildiyse calisma dizini hic karismaz.
-    let base = if path.starts_with('/') { "" } else { cwd() };
-
-    buf[0] = b'/';
-    let mut len = 1usize;
-    // Her bilesenin **basladigi** uzunluk; `..` buraya geri sarar.
-    let mut starts = [0usize; tcmkfs::MAX_DEPTH + 2];
-    let mut depth = 0usize;
-
-    for part in base.split('/').chain(path.split('/')) {
-        if part.is_empty() || part == "." {
-            continue;
-        }
-        if part == ".." {
-            // Kokun ustune cikilmaz -- POSIX'te de `/..` koktur.
-            if depth > 0 {
-                depth -= 1;
-                len = starts[depth];
-            }
-            continue;
-        }
-        if depth + 1 >= starts.len() {
-            return None; // cok derin
-        }
-        starts[depth] = len;
-        depth += 1;
-
-        // Ilk bilesen zaten bastaki egik cizginin ardina gelir.
-        if len > 1 {
-            if len >= buf.len() {
-                return None;
-            }
-            buf[len] = b'/';
-            len += 1;
-        }
-        if len + part.len() >= buf.len() {
-            return None;
-        }
-        buf[len..len + part.len()].copy_from_slice(part.as_bytes());
-        len += part.len();
-    }
-
-    core::str::from_utf8(&buf[..len]).ok()
+    cwd::normalize(shell_cwd(), path, buf)
 }
 
 /// Kabuk penceresini olusturur.
@@ -195,7 +150,7 @@ pub fn write_line(s: &str) {
 static PROMPT_LEN: AtomicUsize = AtomicUsize::new(PROMPT.len());
 
 fn prompt() {
-    let dir = cwd();
+    let dir = shell_cwd();
     if dir == "/" {
         write_str(PROMPT);
         PROMPT_LEN.store(PROMPT.len(), Ordering::Relaxed);
@@ -998,7 +953,7 @@ fn execute(line: &str) {
             // Argumansiz: calisma dizini. Goreli yol da kabul edilir.
             let mut pbuf = [0u8; tcmkfs::PATH_MAX];
             let prefix = if arg.is_empty() {
-                cwd()
+                shell_cwd()
             } else {
                 match absolute(arg.trim_end_matches('/'), &mut pbuf) {
                     Some(p) => p,
@@ -1083,7 +1038,7 @@ fn execute(line: &str) {
             }
             newline();
         }
-        "pwd" => write_line(cwd()),
+        "pwd" => write_line(shell_cwd()),
         "cd" => {
             let target = if arg.is_empty() { "/" } else { arg };
             let mut buf = [0u8; tcmkfs::PATH_MAX];
@@ -1095,7 +1050,7 @@ fn execute(line: &str) {
                         != Some(Some(tcmkfs::KIND_DIR))
                     {
                         write_line("boyle bir dizin yok");
-                    } else if !set_cwd(path) {
+                    } else if !set_shell_cwd(path) {
                         // `absolute` yolu zaten sadelestirdi: `cd ..`
                         // sonrasi `pwd` "/home/.." degil "/" der.
                         write_line("yol cok uzun");

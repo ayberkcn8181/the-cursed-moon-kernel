@@ -43,6 +43,8 @@ mod i386_numbers {
     pub const SYS_RMDIR: usize = 40;
     pub const SYS_UNLINK: usize = 10;
     pub const SYS_RENAME: usize = 38;
+    pub const SYS_CHDIR: usize = 12;
+    pub const SYS_GETCWD: usize = 183;
     pub const SYS_WAITPID: usize = 7;
     pub const SYS_PIPE: usize = 42;
     pub const SYS_BRK: usize = 45;
@@ -77,6 +79,8 @@ mod x86_64_numbers {
     pub const SYS_RMDIR: usize = 84;
     pub const SYS_UNLINK: usize = 87;
     pub const SYS_RENAME: usize = 82;
+    pub const SYS_CHDIR: usize = 80;
+    pub const SYS_GETCWD: usize = 79;
     pub const SYS_BRK: usize = 12;
     pub const SYS_PIPE: usize = 22;
     pub const SYS_FORK: usize = 57;
@@ -437,6 +441,29 @@ impl Drop for ReadDir<'_> {
     fn drop(&mut self) {
         close(self.fd);
     }
+}
+
+/// POSIX `chdir`: surecin calisma dizinini degistirir.
+///
+/// Bu cagriya kadar calisma dizini yalnizca **kabuga** aitti; bir
+/// uygulama "bulundugum dizin" diye bir sey bilemiyordu ve her cagriya
+/// mutlak yol vermek zorundaydi. Artik goreli yollari cekirdek surecin
+/// dizinine gore cozuyor.
+///
+/// Dizin yoksa `-ENOENT`.
+///
+/// # Safety
+/// `path` NUL sonlandirmali gecerli bir dizi olmalidir.
+pub unsafe fn chdir(path: *const u8) -> isize {
+    syscall1(SYS_CHDIR, path as usize) as isize
+}
+
+/// POSIX `getcwd`: calisma dizinini `buf`a yazar.
+///
+/// Linux sozlesmesi: **uzunlugu** (sondaki NUL dahil) doner; tampon
+/// kucukse `-ERANGE`.
+pub fn getcwd(buf: &mut [u8]) -> isize {
+    unsafe { syscall2(SYS_GETCWD, buf.as_mut_ptr() as usize, buf.len()) as isize }
 }
 
 /// POSIX `pause`: teslim edilebilir bir sinyal gelene kadar **uyur**.

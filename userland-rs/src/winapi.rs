@@ -134,6 +134,16 @@ extern "system" {
     pub fn GetLastError() -> Dword;
     /// Uygulamanin kendi hatasini bildirmesi icin.
     pub fn SetLastError(error_code: Dword);
+
+    /// Calisma dizinini degistirir. POSIX'teki `chdir` ile ayni cekirdek
+    /// cagrisina iner.
+    pub fn SetCurrentDirectoryA(path_name: *const u8) -> Bool;
+    /// Calisma dizinini `lpBuffer`a yazar.
+    ///
+    /// Win32 sozlesmesi POSIX'inkinden farkli: yer yeterse **yazilan**
+    /// uzunluk (NUL haric), yetmezse **gereken** uzunluk (NUL dahil)
+    /// doner. Sifir donmesi gercek bir hatadir.
+    pub fn GetCurrentDirectoryA(buffer_length: Dword, buffer: *mut u8) -> Dword;
 }
 
 // --- `GetLastError` kodlari (Windows ile ayni sayilar) ----------------

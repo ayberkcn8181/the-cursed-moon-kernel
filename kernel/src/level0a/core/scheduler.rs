@@ -272,6 +272,13 @@ fn spawn_inner(
         (*tasks.add(index)).parent = CURRENT.load(Ordering::Relaxed);
         (*tasks.add(index)).waitable = waitable;
 
+        // Calisma dizini yuvaya baglidir, imaja degil. Sifirlamanin
+        // burada olmasi `execve`nin cwd'yi **korumasini** kendiliginden
+        // saglar -- POSIX'in istedigi de budur: exec yuvayi yeniden
+        // kullanir, yeni bir yuva ayirmaz. `fork` ise ayri yuva aldigi
+        // icin ebeveynin dizinini ayrica kopyalar (bkz. `cwd::clone_into`).
+        crate::level0a::core::cwd::reset(index);
+
         Some(index)
     })
 }

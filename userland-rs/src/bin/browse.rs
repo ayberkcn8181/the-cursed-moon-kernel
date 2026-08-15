@@ -1,31 +1,38 @@
-//! `browse` -- `getdents` gosterimi: dosya sistemini gezmek.
+//! `browse` -- `getdents` + `chdir`/`getcwd` gosterimi.
 //!
 //! Bu cagriya kadar bir uygulama dosya sistemini **goremiyordu**. Adini
 //! onceden bildigi bir dosyayi acabiliyordu (`open`), okuyabiliyordu
 //! (`read`), boyutunu ogrenebiliyordu (`fstat`) -- ama "burada ne var?"
-//! diye soramiyordu. Dizin listesini yalnizca cekirdegin kendi kabugu
-//! biliyordu; Ring 3'te karsiligi yoktu.
-//!
-//! `getdents` o bosluktur. Bir dizin de dosya gibi `open` ile acilir,
-//! ama `read` yerine `getdents` ile okunur: cekirdek tampona arka arkaya
-//! kayitlar paketler, uygulama onlari cozer.
+//! diye soramiyordu. `getdents` o bosluktur: bir dizin de dosya gibi
+//! `open` ile acilir, ama `read` yerine `getdents` ile okunur.
 //!
 //! ```text
-//!   fd = open("/", 0)          -> dizin tanimlayicisi
+//!   fd = open(".", 0)          -> dizin tanimlayicisi
 //!   getdents(fd, buf, 512)     -> 96   (kayitlar)
 //!   getdents(fd, buf, 512)     -> 0    (bitti)
 //! ```
 //!
-//! Ekrandaki listenin her satiri boyle bir kayittir. Bir dizine girip
-//! cikmak imleci sifirlar -- yani `open` yeniden cagrilir; POSIX'te de
-//! bir dizin tanimlayicisi geriye sarilmaz (`rewinddir` ayri bir cagridir).
+//! ## Yolu artik program tasimiyor
 //!
-//! Gezinmenin yaninda **yazma** da var: `n` yeni bir dizin acar
-//! (`mkdir`), `d` secili girdiyi siler (`rmdir` / `unlink`). Olusturulan
-//! dizinlerin adi `posixN`'dir; Win32 tarafindaki `winfiles` de `win32N`
-//! yaratir. Iki uygulamayi yan yana calistirip birinin yarattigini
-//! otekinde gormek, iki ABI'nin ayni dosya sistemine baktiginin
-//! dogrudan kanitidir.
+//! Ilk surumde bu program gezdigi yolu **kendi icinde** tutuyordu:
+//! `Path` diye bir yapi, `push`/`pop`, ve her cagri icin `dizin + "/" +
+//! ad` birlestirmesi. Sebep basitti -- Ring 3'te calisma dizini diye bir
+//! sey yoktu, cekirdek yalnizca mutlak yol kabul ediyordu.
+//!
+//! `chdir`/`getcwd` geldikten sonra o kodun tamami **silindi**. Dizine
+//! girmek `chdir(ad)`, cikmak `chdir("..")`, listelemek `open(".")`,
+//! dizin acmak `mkdir("posix1")`. Hicbirinde yol birlestirmesi yok:
+//! goreli adlari cekirdek surecin dizinine gore cozuyor.
+//!
+//! Ustteki yol satiri da tahmin degil, `getcwd`in cevabi. Yani ekranda
+//! gorunen yol ile cekirdegin cozdugu yol **ayni kaynaktan** geliyor;
+//! ayrisamazlar.
+//!
+//! Yazma da var: `n` yeni dizin (`mkdir`), `m` yeniden adlandir
+//! (`rename`), `d` sil (`rmdir`/`unlink`). Olusturulan dizinlerin adi
+//! `posixN`; Win32 tarafindaki `winfiles` de `win32N` yaratir. Iki
+//! uygulamayi yan yana calistirip birinin yarattigini otekinde gormek,
+//! iki ABI'nin ayni dosya sistemine baktiginin dogrudan kanitidir.
 //!
 //! Ad uretimi ayrica `EEXIST`i sinar: `posix1` varken tekrar denemek
 //! hata doner, program bir sonraki numaraya gecer.
@@ -61,12 +68,16 @@ const EROFS: isize = 30;
 /// Ekranda tutulan en fazla girdi. Daha fazlasi varsa listelenmeyenlerin
 /// sayisi alt satirda gosterilir -- sessizce kirpmak yaniltici olurdu.
 const MAX_ROWS: usize = 14;
-/// Bir ad icin ayrilan yer.
-const MAX_NAME: usize = 28;
-/// Gezilen yolun en fazla uzunlugu (sondaki NUL dahil).
-const MAX_PATH: usize = 96;
+/// Bir ad icin ayrilan yer (sondaki NUL dahil).
+const MAX_NAME: usize = 32;
+/// `getcwd` icin tampon.
+const MAX_PATH: usize = 128;
 
 /// Onbellege alinmis tek bir girdi.
+///
+/// Ad **NUL ile kapatilir**: dogrudan `mkdir`/`unlink`e verilebilsin
+/// diye. Yol birlestirmesi artik yok, cunku cekirdek goreli adi surecin
+/// dizinine gore cozuyor.
 #[derive(Clone, Copy)]
 struct Row {
     name: [u8; MAX_NAME],
@@ -90,90 +101,15 @@ impl Row {
     }
 }
 
-/// Gezilen dizin: her zaman NUL ile sonlanan, mutlak bir yol.
-struct Path {
-    bytes: [u8; MAX_PATH],
-    len: usize,
-}
-
-impl Path {
-    fn root() -> Self {
-        let mut path = Path {
-            bytes: [0; MAX_PATH],
-            len: 1,
-        };
-        path.bytes[0] = b'/';
-        path
-    }
-
-    fn as_str(&self) -> &str {
-        core::str::from_utf8(&self.bytes[..self.len]).unwrap_or("/")
-    }
-
-    /// Alt dizine iner. Sigmazsa hicbir sey yapmaz.
-    fn push(&mut self, name: &str) {
-        // Kokte zaten bir egik cizgi var; ikincisini eklemeyelim.
-        let separator = if self.len > 1 { 1 } else { 0 };
-        if self.len + separator + name.len() >= MAX_PATH {
-            return;
-        }
-        if separator == 1 {
-            self.bytes[self.len] = b'/';
-            self.len += 1;
-        }
-        self.bytes[self.len..self.len + name.len()].copy_from_slice(name.as_bytes());
-        self.len += name.len();
-        self.bytes[self.len] = 0;
-    }
-
-    /// Ust dizine cikar. Kokten yukari cikilmaz.
-    fn pop(&mut self) {
-        if self.len <= 1 {
-            return;
-        }
-        while self.len > 1 && self.bytes[self.len - 1] != b'/' {
-            self.len -= 1;
-        }
-        // Bulunan egik cizgi de atilir; kok icin bir tane birakilir.
-        if self.len > 1 {
-            self.len -= 1;
-        }
-        self.bytes[self.len] = 0;
-    }
-
-    /// `dizin/ad` + NUL uretir; cekirdek cagrilari icin isaretci doner.
-    ///
-    /// Girdi kayitlari yalnizca **ad** tasir (POSIX `dirent`i de oyle),
-    /// ama `mkdir`/`unlink` tam yol ister.
-    fn child(&self, name: &str, buf: &mut [u8; MAX_PATH]) -> *const u8 {
-        buf[..self.len].copy_from_slice(&self.bytes[..self.len]);
-        let mut len = self.len;
-        if self.bytes[self.len - 1] != b'/' {
-            buf[len] = b'/';
-            len += 1;
-        }
-        // Sondaki NUL icin bir bayt ayrilir.
-        let taken = name.len().min(MAX_PATH - len - 1);
-        buf[len..len + taken].copy_from_slice(&name.as_bytes()[..taken]);
-        buf[len + taken] = 0;
-        buf.as_ptr()
-    }
-}
-
-/// Bos bir numara bulup `posixN` dizinini acar.
+/// Bos bir numara bulup `posixN` dizinini acar -- **goreli adla**.
 ///
 /// Numara arama `EEXIST`in gercekten dondugunu de sinar: `posix1` varken
 /// cagri hata verir ve dongu bir sonrakine gecer.
-fn make_dir(path: &Path) -> (&'static str, u32) {
-    let mut buf = [0u8; MAX_PATH];
-    let mut name = *b"posix0";
+fn make_dir() -> (&'static str, u32) {
+    let mut name = *b"posix0\0";
     for digit in b'1'..=b'9' {
         name[5] = digit;
-        let text = match core::str::from_utf8(&name) {
-            Ok(t) => t,
-            Err(_) => break,
-        };
-        if unsafe { sys::mkdir(path.child(text, &mut buf)) } == 0 {
+        if unsafe { sys::mkdir(name.as_ptr()) } == 0 {
             return ("mkdir: olusturuldu", OK);
         }
     }
@@ -183,21 +119,12 @@ fn make_dir(path: &Path) -> (&'static str, u32) {
 /// Secili girdiyi `tasindiN` adiyla yeniden adlandirir.
 ///
 /// `rename` veriyi **kopyalamaz**: TCMKFS'te ad ve ebeveyn ayni inode
-/// alaninda oldugu icin islem tek bir alan degisikligidir. Bir dizini
-/// yeniden adlandirmak da bu yuzden bedavadir -- icindeki dosyalara hic
-/// dokunulmaz.
-fn rename_entry(path: &Path, row: &Row) -> (&'static str, u32) {
-    let mut from = [0u8; MAX_PATH];
-    let mut to = [0u8; MAX_PATH];
-    let source = path.child(row.name(), &mut from);
-    let mut name = *b"tasindi0";
+/// alaninda oldugu icin islem tek bir alan degisikligidir.
+fn rename_entry(row: &Row) -> (&'static str, u32) {
+    let mut name = *b"tasindi0\0";
     for digit in b'1'..=b'9' {
         name[7] = digit;
-        let text = match core::str::from_utf8(&name) {
-            Ok(t) => t,
-            Err(_) => break,
-        };
-        if unsafe { sys::rename(source, path.child(text, &mut to)) } == 0 {
+        if unsafe { sys::rename(row.name.as_ptr(), name.as_ptr()) } == 0 {
             return ("rename: tasindi", OK);
         }
     }
@@ -205,13 +132,11 @@ fn rename_entry(path: &Path, row: &Row) -> (&'static str, u32) {
 }
 
 /// Secili girdiyi siler: dizinse `rmdir`, dosyaysa `unlink`.
-fn remove(path: &Path, row: &Row) -> (&'static str, u32) {
-    let mut buf = [0u8; MAX_PATH];
-    let target = path.child(row.name(), &mut buf);
+fn remove(row: &Row) -> (&'static str, u32) {
     let result = if row.is_dir {
-        unsafe { sys::rmdir(target) }
+        unsafe { sys::rmdir(row.name.as_ptr()) }
     } else {
-        unsafe { sys::unlink(target) }
+        unsafe { sys::unlink(row.name.as_ptr()) }
     };
     match result {
         0 => ("silindi", OK),
@@ -227,16 +152,16 @@ fn main() {
     use core::fmt::Write;
     let mut out = Stdout;
 
-    let mut path = Path::root();
     let mut rows = [Row::empty(); MAX_ROWS];
     let mut count = 0usize;
     let mut selected = 0usize;
-
-    let mut total = scan(&path, &mut rows, &mut count);
+    let mut path = [0u8; MAX_PATH];
     let mut status = ("j/k sec  Enter gir  u ust", DIM);
-    let _ = writeln!(out, "[browse] / icinde {} girdi.", total);
 
-    let mut win = match Window::open("browse -- getdents", 250, 120, 420, 300) {
+    let mut total = scan(&mut rows, &mut count);
+    let _ = writeln!(out, "[browse] {} icinde {} girdi.", cwd(&mut path), total);
+
+    let mut win = match Window::open("browse -- getdents / chdir", 250, 120, 420, 300) {
         Some(w) => w,
         None => return,
     };
@@ -250,58 +175,73 @@ fn main() {
                 }
             }
             b'k' => selected = selected.saturating_sub(1),
-            // Enter: secili girdi bir dizinse icine gir.
+            // Enter: secili girdi bir dizinse **icine gir**. Yol
+            // birlestirmesi yok -- cekirdek goreli adi cozuyor.
             b'\n' | b'\r' => {
                 if selected < count && rows[selected].is_dir {
-                    path.push(rows[selected].name());
+                    unsafe { sys::chdir(rows[selected].name.as_ptr()) };
                     selected = 0;
-                    total = scan(&path, &mut rows, &mut count);
+                    total = scan(&mut rows, &mut count);
                 }
             }
             b'u' => {
-                path.pop();
+                unsafe { sys::chdir(b"..\0".as_ptr()) };
                 selected = 0;
-                total = scan(&path, &mut rows, &mut count);
+                total = scan(&mut rows, &mut count);
             }
             b'r' => {
-                total = scan(&path, &mut rows, &mut count);
+                total = scan(&mut rows, &mut count);
                 selected = selected.min(count.saturating_sub(1));
             }
             b'n' => {
-                status = make_dir(&path);
-                total = scan(&path, &mut rows, &mut count);
+                status = make_dir();
+                total = scan(&mut rows, &mut count);
             }
             b'm' => {
                 if selected < count {
-                    status = rename_entry(&path, &rows[selected]);
-                    total = scan(&path, &mut rows, &mut count);
+                    status = rename_entry(&rows[selected]);
+                    total = scan(&mut rows, &mut count);
                 }
             }
             b'd' => {
                 if selected < count {
-                    status = remove(&path, &rows[selected]);
-                    total = scan(&path, &mut rows, &mut count);
+                    status = remove(&rows[selected]);
+                    total = scan(&mut rows, &mut count);
                     selected = selected.min(count.saturating_sub(1));
                 }
             }
             _ => {}
         }
 
-        draw(&mut win, &path, &rows[..count], selected, total, status);
+        draw(&mut win, cwd(&mut path), &rows[..count], selected, total, status);
         win.frame(60);
     }
 }
 
-/// Dizini bastan okur; onbellege sigan girdileri `rows`'a doldurur.
+/// Calisma dizinini `getcwd` ile sorar.
+///
+/// Ekranda gorunen yol ile cekirdegin cozdugu yol boylece **ayni
+/// kaynaktan** geliyor; program kendi tahminini gostermiyor.
+fn cwd(buf: &mut [u8; MAX_PATH]) -> &str {
+    let n = sys::getcwd(buf);
+    if n <= 1 {
+        return "/";
+    }
+    // Donus NUL'u da sayar; metin onun oncesinde biter.
+    core::str::from_utf8(&buf[..n as usize - 1]).unwrap_or("/")
+}
+
+/// Calisma dizinini bastan okur; onbellege sigan girdileri doldurur.
 ///
 /// **Toplam** girdi sayisini doner -- onbellege sigmayanlar da sayilir,
 /// cunku kullaniciya "12 girdi daha var" demek icin gereken sayi budur.
-fn scan(path: &Path, rows: &mut [Row; MAX_ROWS], count: &mut usize) -> usize {
+fn scan(rows: &mut [Row; MAX_ROWS], count: &mut usize) -> usize {
     *count = 0;
     // Tampon cagiranindir: `no_std`'de yigin ayirmasi yok. 512 bayt
     // yaklasik 25 kayit tasir, yani cogu dizin tek `getdents` ile biter.
     let mut buf = [0u8; 512];
-    let mut dir = match unsafe { ReadDir::open(path.bytes.as_ptr(), &mut buf) } {
+    // `.` -- calisma dizini. Mutlak yol tasimaya gerek yok.
+    let mut dir = match unsafe { ReadDir::open(b".\0".as_ptr(), &mut buf) } {
         Some(d) => d,
         None => return 0,
     };
@@ -313,7 +253,9 @@ fn scan(path: &Path, rows: &mut [Row; MAX_ROWS], count: &mut usize) -> usize {
             continue;
         }
         let row = &mut rows[*count];
-        row.len = entry.name.len().min(MAX_NAME);
+        // Sondaki NUL icin bir bayt ayrilir.
+        row.len = entry.name.len().min(MAX_NAME - 1);
+        row.name = [0; MAX_NAME];
         row.name[..row.len].copy_from_slice(&entry.name.as_bytes()[..row.len]);
         row.size = entry.size;
         row.is_dir = entry.is_dir();
@@ -324,7 +266,7 @@ fn scan(path: &Path, rows: &mut [Row; MAX_ROWS], count: &mut usize) -> usize {
 
 fn draw(
     win: &mut Window,
-    path: &Path,
+    path: &str,
     rows: &[Row],
     selected: usize,
     total: usize,
@@ -334,7 +276,8 @@ fn draw(
     win.clear(BG);
 
     win.fill(0, 0, w, 22, PANEL);
-    win.text(6, 3, path.as_str(), ACCENT);
+    win.text(6, 3, "getcwd:", DIM);
+    win.text(62, 3, path, ACCENT);
 
     if rows.is_empty() {
         win.text(6, 40, "(bos dizin)", DIM);
@@ -365,6 +308,6 @@ fn draw(
         win.number(160, h - 32, rows.len(), FG);
         win.text(190, h - 32, ")", DIM);
     }
-    win.text(6, h - 15, status.0, status.1);
-    win.text(215, h - 15, "n yeni  m ad  d sil  q cik", DIM);
+    win.text(215, h - 32, status.0, status.1);
+    win.text(6, h - 15, "j/k  Enter gir  u ust  n yeni  m ad  d sil  q cik", DIM);
 }

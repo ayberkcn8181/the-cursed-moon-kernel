@@ -7,7 +7,7 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::level0a::core::{fd, pipe, scheduler, tcmkfs, vfs};
+use crate::level0a::core::{cwd, fd, pipe, scheduler, tcmkfs, vfs};
 
 /// Standart POSIX tanimlayicilari.
 pub const FD_STDIN: u32 = 0;
@@ -155,6 +155,51 @@ pub unsafe fn write(fd_num: u32, buf: *const u8, len: usize) -> Result<usize, Ke
     }
 }
 
+// --- Yol cozumu -------------------------------------------------------
+//
+// Yol alan **butun** cagrilar once buradan gecer. Iki isi birden yapar:
+// goreli yolu surecin calisma dizinine gore mutlaklastirir, ve `.`/`..`
+// bilesenlerini sadelestirir.
+//
+// Once yalnizca kabuk yapiyordu; Ring 3 uygulamalari mutlak yol vermek
+// zorundaydi. `chdir` geldikten sonra cozumun cekirdekte olmasi sart --
+// yoksa "hangi dizindeyim" sorusunun cevabi cagriya gore degisirdi.
+
+/// Cozulen yolun tutuldugu tampon boyu.
+const PATH_MAX: usize = cwd::PATH_MAX;
+
+/// `path`i surecin calisma dizinine gore mutlaklastirir.
+///
+/// Mutlak yollarda da cagrilir: sadelestirme orada da gerekli, cunku
+/// RAMFS duz bir isim tablosudur ve `/./bin/x` ile `/bin/x`i ayni
+/// saymaz.
+fn resolve<'a>(path: &str, buf: &'a mut [u8; PATH_MAX]) -> Option<&'a str> {
+    cwd::resolve(path, buf)
+}
+
+/// POSIX `chdir`: surecin calisma dizinini degistirir.
+///
+/// Hedefin gercekten bir dizin oldugu **burada** sinanir; `cwd::set`
+/// yalnizca depolamadir. Var olmayan bir dizine gecmek POSIX'te de
+/// hatadir (`ENOENT`).
+pub fn chdir(path: &str) -> Result<(), KernelError> {
+    let mut buf = [0u8; PATH_MAX];
+    let target = resolve(path, &mut buf).ok_or(KernelError::NotFound)?;
+    if !is_dir_path(target) {
+        return Err(KernelError::NotFound);
+    }
+    if cwd::set(scheduler::current_id(), target) {
+        Ok(())
+    } else {
+        Err(KernelError::NotSupported)
+    }
+}
+
+/// POSIX `getcwd`: surecin calisma dizini.
+pub fn getcwd() -> &'static str {
+    cwd::current()
+}
+
 /// Yola gore dosya acar ve yeni bir tanimlayici dondurur.
 ///
 /// `create` verilirse (POSIX `O_CREAT`) dosya yoksa kalici dosya
@@ -165,6 +210,9 @@ pub unsafe fn write(fd_num: u32, buf: *const u8, len: usize) -> Result<usize, Ke
 /// POSIX'te de boyledir: `open` dizinlerde calisir, ayrim `read` ile
 /// `getdents` arasindadir.
 pub fn open(path: &str, create: bool) -> Result<usize, KernelError> {
+    let mut buf = [0u8; PATH_MAX];
+    let path = resolve(path, &mut buf).ok_or(KernelError::NotFound)?;
+
     // Once dizin sinanir: dosya aramasi bir dizin yolunda zaten
     // basarisiz olur ve `create` verilmisse ayni adda bir **dosya**
     // olusturmaya kalkardi.
@@ -623,6 +671,8 @@ fn fs_error(err: tcmkfs::FsError) -> KernelError {
 /// kendiliginden olusturmaz. POSIX `mkdir(2)` de boyledir; `-p`
 /// kabugun isidir, cekirdegin degil.
 pub fn mkdir(path: &str) -> Result<(), KernelError> {
+    let mut buf = [0u8; PATH_MAX];
+    let path = resolve(path, &mut buf).ok_or(KernelError::NotFound)?;
     // RAMFS'te olusturma yoktur (icerigi cekirdek imajinin icinde), ve
     // ayni adda ima edilen bir dizin varsa cakisma bildirmek gerekir --
     // yoksa cagri "basarili" der ama ortada yeni bir sey olmaz.
@@ -634,6 +684,8 @@ pub fn mkdir(path: &str) -> Result<(), KernelError> {
 
 /// Bos bir dizini siler (POSIX `rmdir`, Win32 `RemoveDirectoryA`).
 pub fn rmdir(path: &str) -> Result<(), KernelError> {
+    let mut buf = [0u8; PATH_MAX];
+    let path = resolve(path, &mut buf).ok_or(KernelError::NotFound)?;
     vfs::rmdir(path).map_err(fs_error)
 }
 
@@ -643,6 +695,8 @@ pub fn rmdir(path: &str) -> Result<(), KernelError> {
 /// imajinin parcasidir, `/bin/paint`i silmek imajin kendisini
 /// degistirmek anlamina gelirdi.
 pub fn unlink(path: &str) -> Result<(), KernelError> {
+    let mut buf = [0u8; PATH_MAX];
+    let path = resolve(path, &mut buf).ok_or(KernelError::NotFound)?;
     if let Some(node) = vfs::lookup(path) {
         if vfs::source(node) == Some(vfs::Source::Ram) {
             return Err(KernelError::ReadOnly);
@@ -666,6 +720,12 @@ pub fn unlink(path: &str) -> Result<(), KernelError> {
 /// demesi, iki uygulamanin ayni dizinde calistigi bu sistemde
 /// gorulmesi zor bir kayip olurdu. Ustune yazmak isteyen once siler.
 pub fn rename(old: &str, new: &str) -> Result<(), KernelError> {
+    // Iki yol da ayri tamponlara cozulur; ikisi de goreli olabilir.
+    let mut old_buf = [0u8; PATH_MAX];
+    let mut new_buf = [0u8; PATH_MAX];
+    let old = resolve(old, &mut old_buf).ok_or(KernelError::NotFound)?;
+    let new = resolve(new, &mut new_buf).ok_or(KernelError::NotFound)?;
+
     // RAMFS tasinamaz: dosyalar cekirdek imajinin icindedir.
     if let Some(node) = vfs::lookup(old) {
         if vfs::source(node) == Some(vfs::Source::Ram) {
@@ -684,6 +744,8 @@ pub fn rename(old: &str, new: &str) -> Result<(), KernelError> {
 /// arasindadir. TCMK de ayni yolu izler: `open` yol bir dizinse dizin
 /// tanimlayicisi verir, `read` onda hata doner, `getdents` okur.
 pub fn open_dir(path: &str) -> Result<usize, KernelError> {
+    let mut buf = [0u8; PATH_MAX];
+    let path = resolve(path, &mut buf).ok_or(KernelError::NotFound)?;
     if !is_dir_path(path) {
         return Err(KernelError::NotFound);
     }

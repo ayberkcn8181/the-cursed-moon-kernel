@@ -71,6 +71,8 @@ mod i386_numbers {
     pub const SYS_RMDIR: u32 = 40;
     pub const SYS_UNLINK: u32 = 10;
     pub const SYS_RENAME: u32 = 38;
+    pub const SYS_CHDIR: u32 = 12;
+    pub const SYS_GETCWD: u32 = 183;
     pub const SYS_BRK: u32 = 45;
     pub const SYS_GETPID: u32 = 20;
     pub const SYS_KILL: u32 = 37;
@@ -109,6 +111,8 @@ mod x86_64_numbers {
     pub const SYS_RMDIR: u32 = 84;
     pub const SYS_UNLINK: u32 = 87;
     pub const SYS_RENAME: u32 = 82;
+    pub const SYS_CHDIR: u32 = 80;
+    pub const SYS_GETCWD: u32 = 79;
     pub const SYS_BRK: u32 = 12;
     pub const SYS_PIPE: u32 = 22;
     pub const SYS_FORK: u32 = 57;
@@ -158,6 +162,8 @@ const EROFS: i32 = 30;
 /// Cagri bir sinyal tarafindan kesildi. `pause`/`sigsuspend` **yalnizca**
 /// bunu dondurur: basarili bir donusleri yoktur.
 const EINTR: i32 = 4;
+/// Sonuc verilen tampona sigmiyor (`getcwd`).
+const ERANGE: i32 = 34;
 
 /// `setpriority`/`getpriority` icin desteklenen tek `which` degeri.
 const PRIO_PROCESS: usize = 0;
@@ -773,6 +779,45 @@ pub fn dispatch(frame: &mut SyscallFrame) {
         SYS_SIGSUSPEND => {
             signal::sigsuspend(scheduler::current_id(), arg1 as u32);
             -EINTR
+        }
+
+        // `chdir(yol)` -- surecin calisma dizinini degistirir.
+        //
+        // Bu cagriya kadar calisma dizini yalnizca **kabuga** aitti:
+        // kabuk yolu cagirmadan once mutlaklastiriyor, uygulama her
+        // zaman mutlak yol goruyordu. Artik her surecin kendi dizini
+        // var; `fork` ile devrediliyor, `execve` ile korunuyor.
+        SYS_CHDIR => match with_user_path(arg1, kernel_api::chdir) {
+            Ok(()) => 0,
+            Err(e) => e,
+        },
+
+        // `getcwd(buf, size)` -- calisma dizinini kullaniciya yazar.
+        //
+        // Linux **uzunlugu** (sondaki NUL dahil) doner; tampon kucukse
+        // `-ERANGE`. TCMK ayni sozlesmeyi kullaniyor.
+        SYS_GETCWD => {
+            let path = kernel_api::getcwd();
+            // NUL icin bir bayt daha gerekiyor.
+            let needed = path.len() + 1;
+            if arg2 < needed {
+                -ERANGE
+            } else if !mmu::is_user_accessible(arg1)
+                || !mmu::is_user_accessible(arg1 + needed - 1)
+            {
+                -EFAULT
+            } else {
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        path.as_ptr(),
+                        arg1 as *mut u8,
+                        path.len(),
+                    );
+                    (arg1 as *mut u8).add(path.len()).write(0);
+                }
+                frame.set_return(needed);
+                return;
+            }
         }
 
         SYS_SLEEP => {

@@ -98,6 +98,8 @@ pub unsafe fn fork(frame: &SyscallFrame) -> Result<usize, ForkError> {
     // Sinyal isleyicileri kopyalanir (POSIX), bekleyen sinyaller
     // kopyalanmaz -- cocuk temiz baslar.
     crate::level0b1::signal::clone_into(child);
+    // POSIX: cocuk ebeveynin calisma dizininde dogar.
+    crate::level0a::core::cwd::clone_into(child);
 
     scheduler::set_address_space(child, child_space);
 
