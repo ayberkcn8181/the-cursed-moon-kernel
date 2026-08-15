@@ -138,6 +138,26 @@ pub fn current_mask() -> u32 {
     sigprocmask(SIG_BLOCK, 0)
 }
 
+/// POSIX `pause`: teslim edilebilir bir sinyal gelene kadar **uyur**.
+///
+/// Bu cagriya kadar sinyal beklemenin tek yolu, `yield_now` ile donen
+/// bir yoklama donguysu -- yani sinyal gelene kadar CPU yakmak. `pause`
+/// sirasinda gorev hic zamanlanmaz; kabugun `ps` tablosunda `sinyal`
+/// durumunda gorunur ve `cpu` sayaci artmaz.
+pub fn pause() -> isize {
+    crate::sys::pause()
+}
+
+/// POSIX `sigsuspend`: maskeyi **gecici** degistirip sinyal bekler.
+///
+/// `sigprocmask` + `pause` ikilisinden farki bolunmez olmasi: ayri
+/// cagrilarda sinyal tam aradaki pencerede gelirse `pause` onu kacirir
+/// ve surec sonsuza kadar uyar. Maske, isleyici dondukten sonra eski
+/// haline doner.
+pub fn sigsuspend(mask: u32) -> isize {
+    crate::sys::sigsuspend(mask)
+}
+
 /// POSIX `alarm`: `seconds` sonra kendine `SIGALRM` gonderir.
 ///
 /// Onceki alarmdan kalan saniyeyi doner; `0` alarmi iptal eder.

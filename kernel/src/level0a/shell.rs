@@ -507,6 +507,7 @@ fn state_name(state: scheduler::TaskState) -> &'static str {
         scheduler::TaskState::Blocked => "uyuyor",
         scheduler::TaskState::Waiting => "bekliyor",
         scheduler::TaskState::IoWait => "disk",
+        scheduler::TaskState::SigWait => "sinyal",
         scheduler::TaskState::Terminated => "bitti",
     }
 }
@@ -886,6 +887,14 @@ fn execute(line: &str) {
             write_num(signal::delivered_count() as usize);
             write_str("   maskede bekleyen: ");
             write_num(signal::blocked_hits() as usize);
+            newline();
+            // `pause`/`sigsuspend` ile kac kez uyunuldu. Sifirdan buyuk
+            // olmasi, sinyal beklemesinin CPU yakmadiginin kanitidir --
+            // yoklama dongusu bu sayaci hic artirmaz.
+            write_str("sinyal uykusu: ");
+            write_num(signal::suspend_count() as usize);
+            write_str("   uyutulan gorev: ");
+            write_num(scheduler::sig_waits());
             newline();
             write_line("  id  gorev        isleyicili       bekleyen        engelli");
             for i in 0..scheduler::MAX_TASKS {

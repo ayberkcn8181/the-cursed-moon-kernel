@@ -157,6 +157,7 @@ fn default_terminates(_signo: u32) -> bool {
 ///
 /// `SIGKILL` beklemeye alinmaz: hedef **hemen** sonlandirilir. Digerleri
 /// bekleyenler maskesine yazilir ve hedef Ring 3'e donerken teslim edilir.
+/// Sinyali kuyruga koyar; bekleyen bir `pause`/`sigsuspend` varsa uyandirir.
 pub fn raise(target: usize, signo: u32) -> Result<(), SignalError> {
     if !valid(signo) {
         return Err(SignalError::InvalidSignal);
@@ -185,6 +186,12 @@ pub fn raise(target: usize, signo: u32) -> Result<(), SignalError> {
     }
 
     PENDING[target].fetch_or(1 << signo, Ordering::SeqCst);
+
+    // `pause`/`sigsuspend` ile uyuyan bir gorev varsa kaldirilir. Tek
+    // hedeflidir: yalnizca sinyalin gittigi gorev uyanir. Bloke bir
+    // sinyalse `deliverable` yine `false` doner ve gorev geri uyur --
+    // sahte uyanma dongude ele aliniyor.
+    scheduler::wake_signal_waiter(target);
     Ok(())
 }
 
@@ -250,6 +257,84 @@ pub fn sigprocmask(task: usize, how: usize, set: u32) -> Option<u32> {
     // oldurulemez yapabilirdi.
     BLOCKED[task].store(next & !UNBLOCKABLE, Ordering::SeqCst);
     Some(old)
+}
+
+/// `sigsuspend` sirasinda saklanan **eski** maske.
+static SUSPEND_SAVE: [core::sync::atomic::AtomicU32; scheduler::MAX_TASKS] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; scheduler::MAX_TASKS];
+/// `SUSPEND_SAVE` gecerli mi -- yani geri yuklenmeyi bekleyen bir maske
+/// var mi? Ayri bir bayrak sart: sifir da gecerli bir maskedir ("hicbir
+/// sey bloke degil"), yani sentinel deger kullanilamaz.
+static RESTORE_PENDING: [core::sync::atomic::AtomicBool; scheduler::MAX_TASKS] =
+    [const { core::sync::atomic::AtomicBool::new(false) }; scheduler::MAX_TASKS];
+
+/// Kac kez sinyal beklendi (kabuk `sigs` raporu icin).
+static SUSPENDS: AtomicU32 = AtomicU32::new(0);
+
+/// Teslim edilebilir bir sinyal bekliyor mu?
+///
+/// "Bekleyen" yetmez, **bloke olmayan** bekleyen gerekir: maskelenmis bir
+/// sinyal `pause`i uyandirmaz, cunku teslim de edilmez.
+pub fn deliverable(task: usize) -> bool {
+    if task >= scheduler::MAX_TASKS {
+        return false;
+    }
+    PENDING[task].load(Ordering::SeqCst) & !BLOCKED[task].load(Ordering::SeqCst) != 0
+}
+
+/// POSIX `pause`: teslim edilebilir bir sinyal gelene kadar uyur.
+///
+/// Bu cagriya kadar bir surec sinyali **bekleyemiyordu**: tek yol,
+/// bayragi yoklayan bir dongu kurmakti -- yani sinyal gelene kadar CPU
+/// yakmak. Olcu de bu: `pause` sirasinda gorevin `cpu` sayaci artmamali.
+pub fn pause(task: usize) {
+    SUSPENDS.fetch_add(1, Ordering::Relaxed);
+    scheduler::wait_for_signal(|| deliverable(task));
+}
+
+/// POSIX `sigsuspend`: maskeyi **gecici** olarak degistirip bekler.
+///
+/// ## Neden `sigprocmask` + `pause` yetmez
+///
+/// Klasik kalip sudur: sinyali bloke et, bayragi kontrol et, sinyal
+/// gelmemisse bekle. Ikisini ayri cagirmak arada bir **pencere** birakir
+/// -- sinyal tam o aralikta gelirse `pause` onu kacirir ve surec sonsuza
+/// kadar uyur. `sigsuspend` maskeyi degistirmeyi ve beklemeyi tek,
+/// bolunmez bir adimda yapar; varlik sebebi tam olarak budur.
+///
+/// ## Maske ne zaman geri yuklenir
+///
+/// POSIX: isleyici `sigsuspend` maskesiyle kosar, **isleyici dondukten
+/// sonra** eski maske geri gelir. TCMK'de teslim noktasi sistem cagrisi
+/// donusudur, o yuzden geri yukleme `sigreturn`da yapilir. Isleyici
+/// yoksa (varsayilan davranis / yok sayma) `deliver_pending` sonunda
+/// yapilir -- iki yol da ayni `restore_mask`i cagirir.
+pub fn sigsuspend(task: usize, mask: u32) {
+    if task >= scheduler::MAX_TASKS {
+        return;
+    }
+    let saved = BLOCKED[task].load(Ordering::SeqCst);
+    SUSPEND_SAVE[task].store(saved, Ordering::SeqCst);
+    RESTORE_PENDING[task].store(true, Ordering::SeqCst);
+    // SIGKILL asla bloke edilemez; `sigprocmask` ile ayni kural.
+    BLOCKED[task].store(mask & !UNBLOCKABLE, Ordering::SeqCst);
+
+    SUSPENDS.fetch_add(1, Ordering::Relaxed);
+    scheduler::wait_for_signal(|| deliverable(task));
+}
+
+/// `sigsuspend`in sakladigi maskeyi geri yukler (varsa).
+fn restore_mask(task: usize) {
+    if task < scheduler::MAX_TASKS
+        && RESTORE_PENDING[task].swap(false, Ordering::SeqCst)
+    {
+        BLOCKED[task].store(SUSPEND_SAVE[task].load(Ordering::SeqCst), Ordering::SeqCst);
+    }
+}
+
+/// Kac kez `pause`/`sigsuspend` ile sinyal beklendi.
+pub fn suspend_count() -> u32 {
+    SUSPENDS.load(Ordering::Relaxed)
 }
 
 pub fn blocked_mask(task: usize) -> u32 {
@@ -356,6 +441,9 @@ pub fn reset(task: usize) {
     if task >= scheduler::MAX_TASKS {
         return;
     }
+    // Askida kalan bir `sigsuspend` geri yuklemesi yeni imaja tasinmaz:
+    // maske o programin degil, oncekinin karariydi.
+    RESTORE_PENDING[task].store(false, Ordering::SeqCst);
     crate::arch::cpu::without_interrupts(|| unsafe {
         let base = core::ptr::addr_of_mut!(DISPOSITIONS) as *mut Disposition;
         let width = MAX_SIGNAL as usize + 1;
@@ -456,6 +544,10 @@ pub unsafe fn deliver_pending(frame: &mut SyscallFrame) {
             if PENDING[task].load(Ordering::SeqCst) != 0 {
                 BLOCKED_HITS.fetch_add(1, Ordering::Relaxed);
             }
+            // Isleyici calismadan buraya gelindiyse (varsayilan davranis
+            // ya da yok sayma) `sigreturn` hic olmayacak; `sigsuspend`in
+            // maskesi burada geri yuklenir.
+            restore_mask(task);
             return;
         }
         let signo = mask.trailing_zeros();
@@ -534,5 +626,7 @@ pub unsafe fn sigreturn(frame: &mut SyscallFrame) -> bool {
     (core::ptr::addr_of_mut!(IN_HANDLER) as *mut bool)
         .add(task)
         .write(false);
+    // POSIX: `sigsuspend`in maskesi isleyici **dondukten sonra** kalkar.
+    restore_mask(task);
     true
 }

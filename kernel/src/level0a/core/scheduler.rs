@@ -41,6 +41,13 @@ pub enum TaskState {
     /// **baska bir gorevin durumuyla** uyanir.
     ///
     Waiting,
+    /// Bir **sinyal** bekliyor (`pause` / `sigsuspend`).
+    ///
+    /// `IoWait`ten ayri tutulmasi sart: `wake_io_waiters` butun aygit
+    /// bekleyenlerini birden uyandirir, yani bir disk kesmesi sinyal
+    /// bekleyen sureci de yanlislikla kaldirirdi. Sinyal beklemesi tek
+    /// hedeflidir -- yalnizca sinyalin gonderildigi gorev uyanir.
+    SigWait,
     /// Bir aygit kesmesi bekliyor (`TaskState::IoWait`).
     ///
     /// `Blocked`'tan farki uyanma kaynagidir: zaman degil, **donanim**.
@@ -802,6 +809,76 @@ pub fn wait_for_io(ready: impl Fn() -> bool, timeout_ticks: u32) -> bool {
 }
 
 /// Kac kez bir gorev aygit kesmesi bekleyerek uyudu.
+/// Kac kez sinyal beklemeye girildi (olcum icin).
+static SIG_WAITS: AtomicUsize = AtomicUsize::new(0);
+
+/// Gorevi, teslim edilebilir bir sinyal gelene kadar uyutur.
+///
+/// `deliverable` cagrisi **kesmeler kapaliyken** sinanir: sinyal, gorev
+/// `SigWait`e gecmeden hemen once gelmis olabilir ve o zaman uyandiracak
+/// kimse kalmazdi. `wait_for_io`daki ayni yaris, ayni cozum.
+///
+/// Zaman asimi **yok**: POSIX `pause` gercekten de sonsuza kadar bekler.
+/// Sikisan bir surec `kill` ile kaldirilabilir -- sinyal gonderimi zaten
+/// uyandirma yolunun kendisidir.
+pub fn wait_for_signal(deliverable: impl Fn() -> bool) -> bool {
+    let current = CURRENT.load(Ordering::Relaxed);
+    if !can_block(current) {
+        // Uyutulamayan baglam (masaustu/kabuk gorevi): yoklamaya dusulur.
+        return deliverable();
+    }
+
+    loop {
+        let armed = crate::arch::cpu::without_interrupts(|| unsafe {
+            if deliverable() {
+                return false;
+            }
+            let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+            (*tasks.add(current)).state = TaskState::SigWait;
+            SIG_WAITS.fetch_add(1, Ordering::Relaxed);
+            true
+        });
+        if !armed {
+            return true;
+        }
+
+        yield_now();
+
+        // Uyandirildik: sinyal geldiyse cikilir, gelmediyse (sahte
+        // uyanma) yeniden uyunur.
+        if deliverable() {
+            break;
+        }
+    }
+
+    crate::arch::cpu::without_interrupts(|| unsafe {
+        let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+        (*tasks.add(current)).state = TaskState::Running;
+    });
+    true
+}
+
+/// Sinyal bekleyen **tek** bir gorevi uyandirir.
+///
+/// Kesme baglamindan da cagrilabilir (`alarm` PIT tikinden gelir), bu
+/// yuzden kilit almaz ve gorev degistirmez.
+pub fn wake_signal_waiter(task: usize) {
+    if task >= TASK_COUNT.load(Ordering::Relaxed) {
+        return;
+    }
+    unsafe {
+        let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+        if (*tasks.add(task)).state == TaskState::SigWait {
+            (*tasks.add(task)).state = TaskState::Ready;
+        }
+    }
+}
+
+/// Kac kez sinyal beklemeye girildi.
+pub fn sig_waits() -> usize {
+    SIG_WAITS.load(Ordering::Relaxed)
+}
+
 pub fn io_waits() -> usize {
     IO_WAITS.load(Ordering::Relaxed)
 }

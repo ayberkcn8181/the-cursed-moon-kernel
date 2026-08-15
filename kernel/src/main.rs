@@ -111,6 +111,9 @@ static SEEKER_ELF: &[u8] = include_bytes!("../../userland/seeker.elf");
 /// getdents gosterimi (POSIX dizin gezgini).
 #[cfg(target_arch = "x86")]
 static BROWSE_ELF: &[u8] = include_bytes!("../../userland/browse.elf");
+/// pause/sigsuspend gosterimi.
+#[cfg(target_arch = "x86")]
+static WAITER_ELF: &[u8] = include_bytes!("../../userland/waiter.elf");
 /// FindFirstFileA gosterimi -- ayni dizinler, Win32 yuzu.
 #[cfg(target_arch = "x86")]
 static WINFILES_EXE: &[u8] = include_bytes!("../../userland/winfiles.exe");
@@ -159,6 +162,8 @@ static ARENA64: &[u8] = include_bytes!("../../userland/arena.elf64");
 static SEEKER64: &[u8] = include_bytes!("../../userland/seeker.elf64");
 #[cfg(target_arch = "x86_64")]
 static BROWSE64: &[u8] = include_bytes!("../../userland/browse.elf64");
+#[cfg(target_arch = "x86_64")]
+static WAITER64: &[u8] = include_bytes!("../../userland/waiter.elf64");
 
 /// **Windows (PE32+) uygulamalari** -- i386'dakilerle ayni kaynak, ayni
 /// ithal kutuphaneleri; degisen yalnizca hedef. Taban 0x140000000
@@ -198,6 +203,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/arena", ARENA_ELF),
     ("/bin/seeker", SEEKER_ELF),
     ("/bin/browse", BROWSE_ELF),
+    ("/bin/waiter", WAITER_ELF),
     ("/bin/winclock.exe", WINCLOCK_EXE),
     ("/bin/winpad.exe", WINPAD_EXE),
     ("/bin/winfiles.exe", WINFILES_EXE),
@@ -225,6 +231,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/arena", ARENA64),
     ("/bin/seeker", SEEKER64),
     ("/bin/browse", BROWSE64),
+    ("/bin/waiter", WAITER64),
     ("/bin/winclock.exe", WINCLOCK_EXE64),
     ("/bin/winpad.exe", WINPAD_EXE64),
     ("/bin/winfiles.exe", WINFILES_EXE64),

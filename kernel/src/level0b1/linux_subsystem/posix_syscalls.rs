@@ -19,7 +19,7 @@
 //!   42 = sys_pipe    (argumansiz; (okuma << 16) | yazma doner)
 
 use crate::arch::cpu::regs::SyscallFrame;
-use crate::level0a::core::{fd, mmu};
+use crate::level0a::core::{fd, mmu, scheduler};
 use crate::level0a::gui_api;
 use crate::level0a::kernel_api::{self, KernelError};
 use crate::level0b1::signal;
@@ -81,6 +81,10 @@ mod i386_numbers {
     pub const SYS_SIGRETURN: u32 = 119;
     pub const SYS_SIGPROCMASK: u32 = 126;
     pub const SYS_ALARM: u32 = 27;
+    pub const SYS_PAUSE: u32 = 29;
+    /// i386'da `sigsuspend`(72) eski `sigset_t`u alir; `rt_sigsuspend`
+    /// 179'dur ve TCMK'nin 32-bit maskesine dogrudan oturur.
+    pub const SYS_SIGSUSPEND: u32 = 179;
     /// i386'da `mmap2` -- eski `mmap`(90) argumanlari bir yapida alirdi.
     pub const SYS_MMAP: u32 = 192;
     pub const SYS_MUNMAP: u32 = 91;
@@ -121,6 +125,9 @@ mod x86_64_numbers {
     /// x86_64'te klasik `sigprocmask` yoktur; `rt_sigprocmask` gecer.
     pub const SYS_SIGPROCMASK: u32 = 14;
     pub const SYS_ALARM: u32 = 37;
+    pub const SYS_PAUSE: u32 = 34;
+    /// x86_64'te `rt_sigsuspend`.
+    pub const SYS_SIGSUSPEND: u32 = 130;
     pub const SYS_MMAP: u32 = 9;
     pub const SYS_MUNMAP: u32 = 11;
     pub const SYS_GETPRIORITY: u32 = 140;
@@ -148,6 +155,9 @@ const ENOTEMPTY: i32 = 39;
 const ENOSPC: i32 = 28;
 /// Salt okunur dosya sistemi -- RAMFS cekirdek imajinin parcasidir.
 const EROFS: i32 = 30;
+/// Cagri bir sinyal tarafindan kesildi. `pause`/`sigsuspend` **yalnizca**
+/// bunu dondurur: basarili bir donusleri yoktur.
+const EINTR: i32 = 4;
 
 /// `setpriority`/`getpriority` icin desteklenen tek `which` degeri.
 const PRIO_PROCESS: usize = 0;
@@ -739,6 +749,30 @@ pub fn dispatch(frame: &mut SyscallFrame) {
                 },
                 _ => -EFAULT,
             }
+        }
+
+        // `pause()` -- teslim edilebilir bir sinyal gelene kadar uyur.
+        //
+        // Bu cagriya kadar bir surec sinyali bekleyemiyordu: tek yol
+        // bayragi yoklayan bir donguydu, yani sinyal gelene kadar CPU
+        // yakmak. POSIX geregi **her zaman** -EINTR doner; basarili bir
+        // donusu yoktur, cunku donmesinin tek sebebi kesilmesidir.
+        SYS_PAUSE => {
+            signal::pause(scheduler::current_id());
+            -EINTR
+        }
+
+        // `sigsuspend(mask)` -- maskeyi gecici degistirip bekler.
+        //
+        // `sigprocmask` + `pause` ikilisinden farki bolunmez olmasi:
+        // ayri cagrilarda sinyal tam aradaki pencerede gelirse `pause`
+        // onu kacirir ve surec sonsuza kadar uyur.
+        //
+        // Gercek Linux maskeyi **isaretciyle** alir; TCMK 32 bitlik
+        // maskeyi dogrudan registerda tasiyor (bkz. `sigprocmask`).
+        SYS_SIGSUSPEND => {
+            signal::sigsuspend(scheduler::current_id(), arg1 as u32);
+            -EINTR
         }
 
         SYS_SLEEP => {

@@ -52,6 +52,9 @@ mod i386_numbers {
     pub const SYS_SIGRETURN: usize = 119;
     pub const SYS_SIGPROCMASK: usize = 126;
     pub const SYS_ALARM: usize = 27;
+    pub const SYS_PAUSE: usize = 29;
+    /// `rt_sigsuspend` -- 32 bitlik maskeye dogrudan oturur.
+    pub const SYS_SIGSUSPEND: usize = 179;
     pub const SYS_MMAP: usize = 192;
     pub const SYS_MUNMAP: usize = 91;
     pub const SYS_GETPRIORITY: usize = 96;
@@ -87,6 +90,8 @@ mod x86_64_numbers {
     pub const SYS_SIGRETURN: usize = 15;
     pub const SYS_SIGPROCMASK: usize = 14;
     pub const SYS_ALARM: usize = 37;
+    pub const SYS_PAUSE: usize = 34;
+    pub const SYS_SIGSUSPEND: usize = 130;
     pub const SYS_MMAP: usize = 9;
     pub const SYS_MUNMAP: usize = 11;
     pub const SYS_GETPRIORITY: usize = 140;
@@ -432,6 +437,29 @@ impl Drop for ReadDir<'_> {
     fn drop(&mut self) {
         close(self.fd);
     }
+}
+
+/// POSIX `pause`: teslim edilebilir bir sinyal gelene kadar **uyur**.
+///
+/// Bu cagriya kadar sinyal beklemenin tek yolu bayragi yoklayan bir
+/// donguydu -- yani sinyal gelene kadar CPU yakmak. `pause` sirasinda
+/// gorev zamanlanmaz, `ps` tablosunda `sinyal` durumunda gorunur.
+///
+/// Her zaman `-EINTR` doner: basarili bir donusu yoktur, cunku
+/// donmesinin tek sebebi kesilmesidir.
+pub fn pause() -> isize {
+    unsafe { syscall0(SYS_PAUSE) as isize }
+}
+
+/// POSIX `sigsuspend`: maskeyi **gecici** degistirip sinyal bekler.
+///
+/// `sigprocmask` + `pause` ikilisinden farki bolunmez olmasi. Ayri
+/// cagrilarda sinyal tam aradaki pencerede gelirse `pause` onu kacirir
+/// ve surec sonsuza kadar uyur; `sigsuspend`in varlik sebebi budur.
+///
+/// Maske isleyici dondukten sonra eski haline doner.
+pub fn sigsuspend(mask: u32) -> isize {
+    unsafe { syscall1(SYS_SIGSUSPEND, mask as usize) as isize }
 }
 
 /// Yeni bir dizin olusturur. `path` NUL ile sonlanmalidir.

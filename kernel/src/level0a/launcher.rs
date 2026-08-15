@@ -95,6 +95,7 @@ static KNOWN_APPS: &[(&str, &str, &str)] = &[
     ("arena", "/bin/arena", "arena"),
     ("seeker", "/bin/seeker", "seeker"),
     ("browse", "/bin/browse", "browse"),
+    ("waiter", "/bin/waiter", "waiter"),
     // Windows ikilisi: yol .exe ile biter, cekirdek bicimi magic'ten
     // anlar (bkz. vfs::format) ve PE yukleyicisine yonlendirir. Yol iki
     // mimaride de aynidir; VFS'te duran ikilinin PE32 mi PE32+ mi oldugu

@@ -61,6 +61,7 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 8 | **Surec basina program break** (`brk`) + **`read(0)` = klavye** | ✅ |
 | 8 | **POSIX sinyalleri** (`kill`/`signal`/`sigreturn`, isleyici cagrisi) | ✅ (i386 + x86_64) |
 | 8 | **Sinyal maskesi + `alarm`** (`sigprocmask`, PIT'ten `SIGALRM`) | ✅ (i386 + x86_64) |
+| 8 | **`pause`/`sigsuspend`** (sinyali **uyuyarak** beklemek) | ✅ (i386 + x86_64) |
 | 8+ | musl/busybox | ⏳ yapilmadi |
 
 ## Grafiksel Alfa
@@ -87,7 +88,7 @@ Ekranda gorunenler:
   | bellek/disk | `mem` `disk` `df` `format onayla` `sync` `install onayla` |
   | dosya | `ls [dizin]` `mkdir <yol>` `rmdir <yol>` `cat <yol>` `save <yol> <metin>` `cp <kaynak> <hedef>` `mv <kaynak> <hedef>` `rm <yol>` |
   | uygulama/pencere | `apps` `run <ad>` `win` `focus <id>` `mouse` |
-  | uygulamalar (ELF) | `paint` `plasma` `notes` `menu` `twins` `relay` `echo2` `sigdemo` `race` `reaper` `redirect` `mux` `masked` `arena` `seeker` `browse` `crash` `hog` `spin` |
+  | uygulamalar (ELF) | `paint` `plasma` `notes` `menu` `twins` `relay` `echo2` `sigdemo` `race` `reaper` `redirect` `mux` `masked` `arena` `seeker` `browse` `waiter` `crash` `hog` `spin` |
   | uygulamalar (PE) | `winclock` (ham `int 0x2E`) `winpad` `winfiles` (IAT) -- i386'da PE32, x86_64'te PE32+ |
   | diger | `echo <metin>` `pipes` `clear` `help` |
 - **Sistem Gunlugu** -- cekirdek kaydinin canli goruntusu (konsol halka
@@ -1683,6 +1684,76 @@ de dogru sebebi soyluyor:
 Ayni cumle, iki ayri yoldan. `FindNextFileA` de dizin bitiminde
 `ERROR_NO_MORE_FILES` birakiyor: Windows'ta dongunun **normal**
 sonlanma sebebi budur, gercek bir hata degil.
+
+## `pause` / `sigsuspend`: sinyali **uyuyarak** beklemek
+
+Sinyal gonderilebiliyor, maskelenebiliyor, `alarm` ile zamanlanabiliyordu
+-- ama **beklenemiyordu**. Tek yol yoklamaydi:
+
+```text
+  while !bayrak { yield_now(); }     // sinyal gelene kadar CPU yakar
+```
+
+Dongu her turda cekirdege girip cikiyor, yani gorev surekli zamanlaniyor.
+`pause` gorevi **uyutuyor**: sinyal gelene kadar hic zamanlanmiyor.
+
+### Olcu: ayni bekleyis, iki bicim
+
+`waiter` ayni isi iki kipte yapiyor ve kip degistirme **sinyalle**
+surulUyor (`signal <id> 10`), yani olcum sirasinda odak hic degismiyor
+-- sayaclar yalnizca bekleyis bicimini olcuyor.
+
+![pause](docs/screenshot-pause.png)
+
+On saniyelik ayni bekleyis, i386:
+
+| kip | durum | cpu tik | sistem cagrisi |
+|---|---|---|---|
+| **uyku** (`alarm`+`pause`) | `sinyal` | **0 → 0** | 45 → 97 |
+| **yoklama** (`yield_now`) | `hazir` | 0 → **944** | 97 → **51023** |
+
+x86_64'te ayni tablo: uykuda cpu **0**, yoklamada **939**; cagri sayisi
+97'ye karsi **70683**. Uyku kipinde cpu sayaci **hic** artmiyor --
+gorev gercekten zamanlanmiyor, yalnizca saniyede bir alarmla uyanip
+ekrani ciziyor.
+
+### Neden ayri bir bekleme durumu
+
+`TaskState::SigWait`, `IoWait`ten **ayri** olmak zorunda:
+`wake_io_waiters` butun aygit bekleyenlerini birden kaldirir, yani bir
+disk kesmesi sinyal bekleyen sureci de yanlislikla uyandirirdi. Sinyal
+beklemesi tek hedeflidir -- yalnizca sinyalin gonderildigi gorev uyanir
+(`wake_signal_waiter`).
+
+Yaris da ayni kaliple kapatiliyor: "teslim edilebilir sinyal var mi"
+sinamasi **kesmeler kapaliyken** yapilir, cunku sinyal gorev `SigWait`e
+gecmeden hemen once gelmis olabilir ve o zaman uyandiracak kimse
+kalmazdi.
+
+### `sigsuspend` neden ayri bir cagri
+
+Klasik kalip: sinyali engelle, bayragi kontrol et, gelmemisse bekle.
+`sigprocmask` + `pause` olarak yazilirsa arada bir **pencere** kalir --
+sinyal tam o araliktaysa `pause` onu kacirir ve surec sonsuza kadar
+uyur. `sigsuspend` maskeyi degistirmeyi ve beklemeyi tek, bolunmez
+adimda yapar.
+
+Maskenin **geri gelmesi** de sozlesmenin parcasi. POSIX: isleyici
+`sigsuspend` maskesiyle kosar, isleyici **dondukten sonra** eski maske
+doner. TCMK'de teslim noktasi sistem cagrisi donusu oldugu icin geri
+yukleme `sigreturn`da yapiliyor; isleyici yoksa (varsayilan davranis ya
+da yok sayma) `deliver_pending` sonunda.
+
+`waiter` bunu acilista kendiliginden sinar: SIGALRM engelliyken
+`alarm(1)` + `sigsuspend(0)`. Alarm her zaman geldigi icin sinav
+belirlenimli. Seri gunlukte, iki mimaride de:
+
+```text
+[waiter] sigsuspend sinavi: maske 16384 -> 16384 (gecti)
+```
+
+16384 = `1 << SIGALRM`: maske gecici bosaldi, sinyal teslim edildi, ve
+eski maske geri geldi.
 
 ## Kabuk komutlari artik ekrani dondurmuyor
 
