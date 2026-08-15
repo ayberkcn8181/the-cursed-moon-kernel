@@ -239,6 +239,11 @@ unsafe fn enter_ring3(prepared: Prepared, space: Option<usize>) -> Result<(), Sp
     // kodunun ortasina dallanir. `execve` yolunda bu sart.
     crate::level0b1::signal::reset(scheduler::current_id());
 
+    // Win32'nin `GetLastError` degeri de surece aittir. Gorev yuvalari
+    // geri kazanildigi icin temizlenmesi sart: yeni bir surec, ayni
+    // yuvada calismis oncekinin hatasini gormemeli.
+    crate::level0b1::nt_subsystem::nt_syscalls::clear_last_error(scheduler::current_id());
+
     // Ring 3 -> Ring 0 gecisleri icin ayri bir cekirdek yigini.
     let kstack = kmalloc::kmalloc_aligned(KERNEL_STACK_SIZE, 16).ok_or(SpawnError::OutOfMemory)?;
     let kstack_top = kstack.add(KERNEL_STACK_SIZE) as usize;

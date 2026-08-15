@@ -121,7 +121,34 @@ extern "system" {
     /// oyledir. (POSIX `rename` hedefin uzerine sessizce yazar; TCMK
     /// burada Win32'nin davranisini secti, bkz. README.)
     pub fn MoveFileA(existing_name: *const u8, new_name: *const u8) -> Bool;
+
+    /// Son basarisiz cagrinin sebebi.
+    ///
+    /// Win32'nin hata bildirimi POSIX'inkinden yapisal olarak farkli:
+    /// cagrilar `BOOL` doner (basari/hata), **sebep** ayri bir surec
+    /// basina degiskende durur. POSIX ayni bilgiyi negatif errno olarak
+    /// dogrudan donus degerinde tasir.
+    ///
+    /// Windows'ta oldugu gibi yalnizca **basarisiz** cagrilar bu degeri
+    /// yazar; basarili bir cagri onceki degeri silmez.
+    pub fn GetLastError() -> Dword;
+    /// Uygulamanin kendi hatasini bildirmesi icin.
+    pub fn SetLastError(error_code: Dword);
 }
+
+// --- `GetLastError` kodlari (Windows ile ayni sayilar) ----------------
+pub const ERROR_SUCCESS: Dword = 0;
+pub const ERROR_FILE_NOT_FOUND: Dword = 2;
+pub const ERROR_TOO_MANY_OPEN_FILES: Dword = 4;
+pub const ERROR_ACCESS_DENIED: Dword = 5;
+pub const ERROR_INVALID_HANDLE: Dword = 6;
+/// `FindNextFileA` dizin bittiginde bunu birakir -- dongunun **normal**
+/// sonlanma sebebi budur, gercek bir hata degildir.
+pub const ERROR_NO_MORE_FILES: Dword = 18;
+pub const ERROR_NOT_SUPPORTED: Dword = 50;
+pub const ERROR_DISK_FULL: Dword = 112;
+pub const ERROR_DIR_NOT_EMPTY: Dword = 145;
+pub const ERROR_ALREADY_EXISTS: Dword = 183;
 
 /// `FILETIME` -- 1601-01-01'den beri gecen 100 nanosaniyelik araliklar.
 ///

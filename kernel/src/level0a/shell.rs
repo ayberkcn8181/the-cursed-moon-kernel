@@ -1348,7 +1348,7 @@ fn execute(line: &str) {
                     Err(kernel_api::KernelError::AlreadyExists) => {
                         write_line("hedef zaten var")
                     }
-                    Err(kernel_api::KernelError::NotSupported) => {
+                    Err(kernel_api::KernelError::ReadOnly) => {
                         write_line("RAMFS dosyalari tasinamaz (cekirdek imajinda)")
                     }
                     Err(_) => write_line("tasinamadi"),

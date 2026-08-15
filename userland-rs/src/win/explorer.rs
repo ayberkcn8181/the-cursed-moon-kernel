@@ -12,6 +12,12 @@
 //! ayrisabilmesi icin cekirdekte ikinci bir gezinme kodu olmasi gerekirdi
 //! -- yok; Level-0b1'in varlik sebebi de zaten bu.
 //!
+//! Hata bildirimi de Win32'nin kendi bicimi: cagrilar `BOOL` doner,
+//! **sebep** `GetLastError`da durur. POSIX ayni bilgiyi negatif errno
+//! olarak dogrudan donus degerinde tasir; iki ABI'nin yapisal farki bu
+//! ekranda dogrudan gorunuyor -- alt satirdaki mesajlar tahmin degil,
+//! gercek `ERROR_*` kodlarindan geliyor.
+//!
 //! Windows'a ozgu ne var:
 //!
 //!   * `WIN32_FIND_DATAA` **birebir** Windows yerlesiminde (320 bayt,
@@ -178,7 +184,14 @@ fn make_dir(path: &Path) -> (&'static str, u32) {
             return ("CreateDirectoryA: olusturuldu", OK);
         }
     }
-    ("CreateDirectoryA: basarisiz", WARN)
+    (
+        match unsafe { winapi::GetLastError() } {
+            winapi::ERROR_ALREADY_EXISTS => "mkdir: hepsi dolu (EEXIST)",
+            winapi::ERROR_DISK_FULL => "mkdir: disk yok/dolu",
+            _ => "CreateDirectoryA: basarisiz",
+        },
+        WARN,
+    )
 }
 
 /// Secili girdiyi `MoveFileA` ile `tasindiN` adina tasir.
@@ -200,7 +213,14 @@ fn rename_entry(path: &Path, row: &Row) -> (&'static str, u32) {
             return ("MoveFileA: tasindi", OK);
         }
     }
-    ("MoveFileA: basarisiz", WARN)
+    (
+        match unsafe { winapi::GetLastError() } {
+            winapi::ERROR_ALREADY_EXISTS => "mv: hedef zaten var",
+            winapi::ERROR_ACCESS_DENIED => "mv: salt okunur (RAMFS)",
+            _ => "MoveFileA: basarisiz",
+        },
+        WARN,
+    )
 }
 
 /// Secili girdiyi siler: dizinse `RemoveDirectoryA`, dosyaysa `DeleteFileA`.
@@ -213,14 +233,20 @@ fn remove(path: &Path, row: &Row) -> (&'static str, u32) {
         unsafe { winapi::DeleteFileA(target) }
     };
     if ok != 0 {
-        ("silindi", OK)
-    } else if row.is_dir {
-        // Win32'de ayrinti GetLastError'dadir; TCMK'de o kavram yok, o
-        // yuzden en olasi sebep yaziliyor.
-        ("silinemedi (bos mu?)", WARN)
-    } else {
-        ("silinemedi", WARN)
+        return ("silindi", OK);
     }
+    // Sebep artik tahmin degil: `GetLastError` gercek kodu veriyor.
+    (
+        match unsafe { winapi::GetLastError() } {
+            winapi::ERROR_DIR_NOT_EMPTY => "silinemedi: dizin bos degil",
+            winapi::ERROR_FILE_NOT_FOUND => "silinemedi: bulunamadi",
+            // RAMFS: dosya duruyor ama cekirdek imajinin parcasi.
+            winapi::ERROR_ACCESS_DENIED => "silinemedi: salt okunur (RAMFS)",
+            winapi::ERROR_NOT_SUPPORTED => "silinemedi: desteklenmiyor",
+            _ => "silinemedi",
+        },
+        WARN,
+    )
 }
 
 fn main() {

@@ -27,6 +27,13 @@ pub enum KernelError {
     NotEmpty,
     /// Kalici depolama yok ya da dolu (POSIX `ENOSPC`).
     NoSpace,
+    /// Hedef salt okunur bir arka ucta (RAMFS) -- POSIX `EROFS`.
+    ///
+    /// "Yok" ile ayni sey **degil**: dosya duruyor, yalnizca cekirdek
+    /// imajinin parcasi oldugu icin degistirilemiyor. Ilk olcumde bu
+    /// durum `NotFound` olarak bildiriliyordu ve gezgin "bulunamadi"
+    /// diyordu -- ekranda duran bir dosya icin yaniltici bir cevap.
+    ReadOnly,
 }
 
 /// Program break (heap siniri) -- **surec basina**.
@@ -636,6 +643,11 @@ pub fn rmdir(path: &str) -> Result<(), KernelError> {
 /// imajinin parcasidir, `/bin/paint`i silmek imajin kendisini
 /// degistirmek anlamina gelirdi.
 pub fn unlink(path: &str) -> Result<(), KernelError> {
+    if let Some(node) = vfs::lookup(path) {
+        if vfs::source(node) == Some(vfs::Source::Ram) {
+            return Err(KernelError::ReadOnly);
+        }
+    }
     vfs::remove_file(path).map_err(fs_error)
 }
 
@@ -657,7 +669,7 @@ pub fn rename(old: &str, new: &str) -> Result<(), KernelError> {
     // RAMFS tasinamaz: dosyalar cekirdek imajinin icindedir.
     if let Some(node) = vfs::lookup(old) {
         if vfs::source(node) == Some(vfs::Source::Ram) {
-            return Err(KernelError::NotSupported);
+            return Err(KernelError::ReadOnly);
         }
     }
     if is_dir_path(new) || vfs::lookup(new).is_some() {

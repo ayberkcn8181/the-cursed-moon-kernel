@@ -75,6 +75,8 @@ pub const NT_CREATE_DIRECTORY_A: u32 = 0x300D;
 pub const NT_REMOVE_DIRECTORY_A: u32 = 0x300E;
 pub const NT_DELETE_FILE_A: u32 = 0x300F;
 pub const NT_MOVE_FILE_A: u32 = 0x3017;
+pub const NT_GET_LAST_ERROR: u32 = 0x3018;
+pub const NT_SET_LAST_ERROR: u32 = 0x3019;
 
 pub const NT_USER_CREATE_WINDOW_W32: u32 = 0x3010;
 pub const NT_GDI_GET_BITS_W32: u32 = 0x3011;
@@ -114,8 +116,75 @@ const STATUS_NOT_IMPLEMENTED: u32 = 0xC000_0002;
 const STATUS_OBJECT_NAME_COLLISION: u32 = 0xC000_0035;
 const STATUS_DIRECTORY_NOT_EMPTY: u32 = 0xC000_0101;
 const STATUS_DISK_FULL: u32 = 0xC000_007F;
+const STATUS_MEDIA_WRITE_PROTECTED: u32 = 0xC000_00A2;
 
 const PATH_MAX: usize = 128;
+
+// --- Win32 hata kodlari (`GetLastError`) ------------------------------
+//
+// Windows'takiyle **ayni sayilar**: bir PE bunlari `winerror.h`den
+// derlenmis sabitlerle karsilastirir, yani TCMK'ye ozgu numaralandirma
+// ikili uyumu bozardi.
+pub const ERROR_SUCCESS: u32 = 0;
+const ERROR_FILE_NOT_FOUND: u32 = 2;
+const ERROR_TOO_MANY_OPEN_FILES: u32 = 4;
+const ERROR_ACCESS_DENIED: u32 = 5;
+const ERROR_INVALID_HANDLE: u32 = 6;
+/// `FindNextFileA` dizin bittiginde bunu birakir -- Windows'ta dongunun
+/// **normal** sonlanma sebebi budur, gercek bir hata degildir.
+const ERROR_NO_MORE_FILES: u32 = 18;
+const ERROR_NOT_SUPPORTED: u32 = 50;
+const ERROR_DISK_FULL: u32 = 112;
+const ERROR_DIR_NOT_EMPTY: u32 = 145;
+const ERROR_ALREADY_EXISTS: u32 = 183;
+
+/// Surec basina son hata kodu.
+///
+/// **Level-0b1'e aittir, Level-0a'ya degil**: `GetLastError` bir Win32
+/// sozlesmesidir, cekirdek API'sinin kavrami degil. POSIX tarafi ayni
+/// bilgiyi negatif errno olarak dogrudan donus degerinde tasir, yani
+/// boyle bir yan kanala ihtiyaci yok. Ayrimi burada tutmak, iki ABI'nin
+/// birbirinin bicimini odunc almamasini sagliyor.
+static LAST_ERROR: [core::sync::atomic::AtomicU32; crate::level0a::core::scheduler::MAX_TASKS] =
+    [const { core::sync::atomic::AtomicU32::new(0) };
+        crate::level0a::core::scheduler::MAX_TASKS];
+
+fn error_slot() -> &'static core::sync::atomic::AtomicU32 {
+    let id = crate::level0a::core::scheduler::current_id();
+    &LAST_ERROR[id % crate::level0a::core::scheduler::MAX_TASKS]
+}
+
+/// Son hatayi yazar. Windows'ta **yalnizca basarisiz** cagrilar yazar;
+/// basarili bir cagri onceki degeri silmez, o yuzden burada da oyle.
+fn set_last_error(code: u32) {
+    error_slot().store(code, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Yeni bir imaj yuklenirken son hatayi sifirlar.
+///
+/// Gorev yuvalari geri kazanildigi icin sart: temizlenmeseydi yeni bir
+/// surec, ayni yuvada calismis onceki surecin hatasini gorurdu.
+pub fn clear_last_error(task: usize) {
+    if task < crate::level0a::core::scheduler::MAX_TASKS {
+        LAST_ERROR[task].store(ERROR_SUCCESS, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Cekirdek hatasini Win32 kodunun karsiligina cevirir.
+fn win32_error_of(err: KernelError) -> u32 {
+    match err {
+        KernelError::NotFound => ERROR_FILE_NOT_FOUND,
+        KernelError::BadFileDescriptor => ERROR_INVALID_HANDLE,
+        KernelError::Fault => ERROR_ACCESS_DENIED,
+        KernelError::TooManyOpenFiles => ERROR_TOO_MANY_OPEN_FILES,
+        KernelError::NotSupported => ERROR_NOT_SUPPORTED,
+        KernelError::AlreadyExists => ERROR_ALREADY_EXISTS,
+        KernelError::NotEmpty => ERROR_DIR_NOT_EMPTY,
+        KernelError::NoSpace => ERROR_DISK_FULL,
+        // Windows salt okunur bir hedefte de bunu dondurur.
+        KernelError::ReadOnly => ERROR_ACCESS_DENIED,
+    }
+}
 
 /// `NtCreateFile`'in tanidigi CreateDisposition degerleri (Windows ile
 /// ayni sayisal karsiliklar).
@@ -131,6 +200,7 @@ fn ntstatus_of(err: KernelError) -> u32 {
         KernelError::AlreadyExists => STATUS_OBJECT_NAME_COLLISION,
         KernelError::NotEmpty => STATUS_DIRECTORY_NOT_EMPTY,
         KernelError::NoSpace => STATUS_DISK_FULL,
+        KernelError::ReadOnly => STATUS_MEDIA_WRITE_PROTECTED,
     }
 }
 
@@ -407,11 +477,20 @@ fn dispatch_win32_api(frame: &mut SyscallFrame) {
                 Some(name) => match unsafe { copy_user_cstr(name, &mut storage) } {
                     Some(path) => match kernel_api::open(path, create) {
                         Ok(handle) => handle,
-                        Err(_) => INVALID_HANDLE_VALUE,
+                        Err(e) => {
+                            set_last_error(win32_error_of(e));
+                            INVALID_HANDLE_VALUE
+                        }
                     },
-                    None => INVALID_HANDLE_VALUE,
+                    None => {
+                        set_last_error(ERROR_ACCESS_DENIED);
+                        INVALID_HANDLE_VALUE
+                    }
                 },
-                None => INVALID_HANDLE_VALUE,
+                None => {
+                    set_last_error(ERROR_ACCESS_DENIED);
+                    INVALID_HANDLE_VALUE
+                }
             }
         }
 
@@ -513,10 +592,14 @@ fn dispatch_win32_api(frame: &mut SyscallFrame) {
                     // burada kapatilir.
                     _ => {
                         let _ = kernel_api::close(handle as u32);
+                        set_last_error(ERROR_NO_MORE_FILES);
                         INVALID_HANDLE_VALUE
                     }
                 },
-                None => INVALID_HANDLE_VALUE,
+                None => {
+                    set_last_error(ERROR_FILE_NOT_FOUND);
+                    INVALID_HANDLE_VALUE
+                }
             }
         }
 
@@ -525,7 +608,17 @@ fn dispatch_win32_api(frame: &mut SyscallFrame) {
             match arg(args, 0) {
                 Some(handle) => match kernel_api::next_dir_entry(handle) {
                     Ok(entry) if store_find_data(args, 1, &entry) => WIN32_TRUE,
-                    _ => WIN32_FALSE,
+                    // Dizinin bitmesi Windows'ta hata degil, dongunun
+                    // normal sonu: `ERROR_NO_MORE_FILES` tam olarak bunu
+                    // ayirt etmek icin var.
+                    Ok(_) => {
+                        set_last_error(ERROR_ACCESS_DENIED);
+                        WIN32_FALSE
+                    }
+                    Err(_) => {
+                        set_last_error(ERROR_NO_MORE_FILES);
+                        WIN32_FALSE
+                    }
                 },
                 None => WIN32_FALSE,
             }
@@ -572,11 +665,26 @@ fn dispatch_win32_api(frame: &mut SyscallFrame) {
                     let new = normalize_win_path(&mut new_storage, n);
                     match kernel_api::rename(old, new) {
                         Ok(()) => WIN32_TRUE,
-                        Err(_) => WIN32_FALSE,
+                        Err(e) => {
+                            set_last_error(win32_error_of(e));
+                            WIN32_FALSE
+                        }
                     }
                 }
                 _ => WIN32_FALSE,
             }
+        }
+
+        // GetLastError() -> DWORD. Argumansiz.
+        NT_GET_LAST_ERROR => {
+            error_slot().load(core::sync::atomic::Ordering::Relaxed) as usize
+        }
+
+        // SetLastError(dwErrCode). Windows'ta uygulamalarin kendi
+        // hatalarini bildirmesi icindir; donus degeri yoktur.
+        NT_SET_LAST_ERROR => {
+            set_last_error(arg(args, 0).unwrap_or(0));
+            0
         }
 
         // --- TCMKGUI.dll: pencere cagrilari ---
@@ -744,7 +852,10 @@ fn win32_path_action(args: usize, action: fn(&str) -> Result<(), KernelError>) -
     };
     match action(path) {
         Ok(()) => WIN32_TRUE,
-        Err(_) => WIN32_FALSE,
+        Err(e) => {
+            set_last_error(win32_error_of(e));
+            WIN32_FALSE
+        }
     }
 }
 

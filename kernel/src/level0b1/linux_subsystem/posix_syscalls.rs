@@ -146,6 +146,8 @@ const ENOMEM: i32 = 12;
 const EEXIST: i32 = 17;
 const ENOTEMPTY: i32 = 39;
 const ENOSPC: i32 = 28;
+/// Salt okunur dosya sistemi -- RAMFS cekirdek imajinin parcasidir.
+const EROFS: i32 = 30;
 
 /// `setpriority`/`getpriority` icin desteklenen tek `which` degeri.
 const PRIO_PROCESS: usize = 0;
@@ -235,6 +237,7 @@ fn errno_of(err: KernelError) -> i32 {
         KernelError::AlreadyExists => -EEXIST,
         KernelError::NotEmpty => -ENOTEMPTY,
         KernelError::NoSpace => -ENOSPC,
+        KernelError::ReadOnly => -EROFS,
     }
 }
 

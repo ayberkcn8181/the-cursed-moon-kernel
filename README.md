@@ -46,6 +46,7 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 5c | **Dizin gezinmesi**: `getdents` + `FindFirstFileA`/`FindNextFileA` | ✅ (i386 + x86_64, ELF + PE) |
 | 5d | **Dosya sistemi yazma**: `mkdir`/`rmdir`/`unlink` + Win32 ikizleri | ✅ (i386 + x86_64, ELF + PE) |
 | 5e | **`rename`/`MoveFileA`** (tasima = tek inode alani; veri kopyalanmaz) | ✅ (i386 + x86_64, ELF + PE) |
+| 7f | **`GetLastError`/`SetLastError`** (surec basina Win32 hata kodu) | ✅ (PE32 + PE32+) |
 | — | **Kendi onyukleyicisi** + diske kurulum (`install`) | ✅ (i386) |
 | 8 | **`execve`** (surec kendi yerine program yukler) | ✅ (i386 + x86_64) |
 | 8 | **`fork`** (adres uzayi kopyasi + iki kez donen cagri) | ✅ (i386 + x86_64) |
@@ -1562,8 +1563,6 @@ donuyor, cekirdek cokmuyor.
 
 * **`mkdir -p` yok.** Ust dizin onceden var olmali; POSIX `mkdir(2)` ve
   Win32 `CreateDirectoryA` da boyledir (`-p` kabugun isidir).
-* **`GetLastError` yok.** Win32 cagrilari basari/hata (`BOOL`) doner;
-  ayrinti tasiyan bir surec-basina hata degiskeni TCMK'de yok.
 * **RAMFS silinemez.** `unlink`/`DeleteFileA` yalnizca diskteki
   dosyalarda calisir.
 
@@ -1628,6 +1627,62 @@ Yan etkisi olculebilir: `browse` ve `winfiles` `m` tusuyla secili
 girdiyi `tasindiN` adina tasiyor ve bos numara ariyor. `winfiles`
 (PE32) `tasindi1`i aldiktan sonra `browse` (ELF) ayni adi deneyip
 **hata aliyor** ve `tasindi2`ye geciyor -- iki ABI ayni kurala tabi.
+
+## `GetLastError`: iki ABI, iki farkli hata bicimi
+
+POSIX ile Win32'nin hata bildirimi **yapisal olarak** farklidir, ve bu
+fark Level-0b1'in nicin var oldugunun en yalin ornegi:
+
+| | POSIX | Win32 |
+|---|---|---|
+| donus | negatif errno (`-39`) | `BOOL` (`0`) |
+| sebep | donus degerinin kendisi | ayri bir surec-basina degiskende |
+
+Onceden Win32 tarafi yalnizca `FALSE` donuyordu, yani gezgin sebebi
+**tahmin ediyordu** -- kodda "silinemedi (bos mu?)" yaziyordu. Artik
+`GetLastError` gercek kodu veriyor:
+
+![GetLastError](docs/screenshot-lasterror.png)
+
+`LAST_ERROR` tablosu bilerek **Level-0b1'de** durur, `kernel_api`de
+degil: `GetLastError` bir Win32 sozlesmesidir, cekirdek API'sinin
+kavrami degil. POSIX ayni bilgiyi zaten donus degerinde tasidigi icin
+boyle bir yan kanala ihtiyaci yok. Ayrimi burada tutmak iki ABI'nin
+birbirinin bicimini odunc almamasini sagliyor.
+
+Kodlar Windows'takiyle **ayni sayilar** (`winerror.h`): bir PE bunlari
+derlenmis sabitlerle karsilastirir, TCMK'ye ozgu numaralandirma ikili
+uyumu bozardi.
+
+| cekirdek hatasi | POSIX | Win32 |
+|---|---|---|
+| `AlreadyExists` | `EEXIST` (17) | `ERROR_ALREADY_EXISTS` (183) |
+| `NotEmpty` | `ENOTEMPTY` (39) | `ERROR_DIR_NOT_EMPTY` (145) |
+| `NoSpace` | `ENOSPC` (28) | `ERROR_DISK_FULL` (112) |
+| `ReadOnly` | `EROFS` (30) | `ERROR_ACCESS_DENIED` (5) |
+| `NotFound` | `ENOENT` (2) | `ERROR_FILE_NOT_FOUND` (2) |
+
+Windows'ta oldugu gibi yalnizca **basarisiz** cagrilar bu degeri yazar;
+basarili bir cagri onceki degeri silmez. Gorev yuvalari geri
+kazanildigi icin yeni bir imaj yuklenirken sifirlaniyor -- yoksa bir
+surec, ayni yuvada calismis oncekinin hatasini gorurdu.
+
+### Olcum bir yanlisi ortaya cikardi
+
+Ilk kosuda RAMFS dosyasi silmeye calismak **"bulunamadi"**
+(`ERROR_FILE_NOT_FOUND`) donuyordu -- oysa dosya ekranda duruyordu.
+Sebep, `vfs::remove_file`in "diskte degil" ile "yok"u ayni hataya
+kapatmasiydi. Ayri bir `KernelError::ReadOnly` eklendi; artik iki ABI
+de dogru sebebi soyluyor:
+
+| | mesaj |
+|---|---|
+| `browse` (ELF) | `silinemedi: salt okunur (RAMFS)` -- `-EROFS`'tan |
+| `winfiles` (PE) | `silinemedi: salt okunur (RAMFS)` -- `GetLastError`'dan |
+
+Ayni cumle, iki ayri yoldan. `FindNextFileA` de dizin bitiminde
+`ERROR_NO_MORE_FILES` birakiyor: Windows'ta dongunun **normal**
+sonlanma sebebi budur, gercek bir hata degil.
 
 ## Kabuk komutlari artik ekrani dondurmuyor
 

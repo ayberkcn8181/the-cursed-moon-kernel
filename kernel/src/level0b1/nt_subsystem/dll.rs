@@ -185,6 +185,19 @@ static KERNEL32: &[Export] = &[
         // lpExistingFileName, lpNewFileName
         stack_bytes: 8,
     },
+    Export {
+        name: "GetLastError",
+        ordinal: 18,
+        service: nt::NT_GET_LAST_ERROR,
+        stack_bytes: 0,
+    },
+    Export {
+        name: "SetLastError",
+        ordinal: 19,
+        service: nt::NT_SET_LAST_ERROR,
+        // dwErrCode
+        stack_bytes: 4,
+    },
 ];
 
 /// `TCMKGUI.dll` -- win32k cagrilarinin kullanici modundaki yuzu.

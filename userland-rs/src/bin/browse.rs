@@ -55,6 +55,8 @@ const WARN: u32 = 0x00FF_8060;
 
 /// POSIX `ENOTEMPTY` -- iki mimaride de 39.
 const ENOTEMPTY: isize = 39;
+/// POSIX `EROFS`: salt okunur dosya sistemi (RAMFS).
+const EROFS: isize = 30;
 
 /// Ekranda tutulan en fazla girdi. Daha fazlasi varsa listelenmeyenlerin
 /// sayisi alt satirda gosterilir -- sessizce kirpmak yaniltici olurdu.
@@ -214,8 +216,9 @@ fn remove(path: &Path, row: &Row) -> (&'static str, u32) {
     match result {
         0 => ("silindi", OK),
         // Bos olmayan bir dizin silinmez -- POSIX de ENOTEMPTY doner.
-        r if r == -ENOTEMPTY => ("dizin bos degil", WARN),
-        // RAMFS dosyalari cekirdek imajinin parcasi; silinemezler.
+        r if r == -ENOTEMPTY => ("silinemedi: dizin bos degil", WARN),
+        // RAMFS dosyasi: duruyor ama cekirdek imajinin parcasi.
+        r if r == -EROFS => ("silinemedi: salt okunur (RAMFS)", WARN),
         _ => ("silinemedi", WARN),
     }
 }
