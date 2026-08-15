@@ -31,7 +31,8 @@
 //! baktiginin dogrudan kanitidir.
 //!
 //! Tuslar: `j`/`k` -> sec, Enter -> dizine gir, `u` -> ust dizin,
-//! `n` -> yeni dizin, `d` -> sil, `r` -> yenile, ESC -> cik
+//! `n` -> yeni dizin, `m` -> yeniden adlandir (`MoveFileA`), `d` -> sil,
+//! `r` -> yenile, ESC -> cik
 
 #![no_std]
 #![no_main]
@@ -180,6 +181,28 @@ fn make_dir(path: &Path) -> (&'static str, u32) {
     ("CreateDirectoryA: basarisiz", WARN)
 }
 
+/// Secili girdiyi `MoveFileA` ile `tasindiN` adina tasir.
+///
+/// Win32'de "yeniden adlandir" ve "tasi" ayni cagridir; TCMK'de de oyle,
+/// cunku ikisi de tek bir inode alani degisikligi.
+fn rename_entry(path: &Path, row: &Row) -> (&'static str, u32) {
+    let mut from = [0u8; MAX_PATH + 4];
+    let mut to = [0u8; MAX_PATH + 4];
+    let source = path.child(row.name(), &mut from);
+    let mut name = *b"tasindi0";
+    for digit in b'1'..=b'9' {
+        name[7] = digit;
+        let text = match core::str::from_utf8(&name) {
+            Ok(t) => t,
+            Err(_) => break,
+        };
+        if unsafe { winapi::MoveFileA(source, path.child(text, &mut to)) } != 0 {
+            return ("MoveFileA: tasindi", OK);
+        }
+    }
+    ("MoveFileA: basarisiz", WARN)
+}
+
 /// Secili girdiyi siler: dizinse `RemoveDirectoryA`, dosyaysa `DeleteFileA`.
 fn remove(path: &Path, row: &Row) -> (&'static str, u32) {
     let mut buf = [0u8; MAX_PATH + 4];
@@ -248,6 +271,12 @@ fn main() {
             b'n' => {
                 status = make_dir(&path);
                 count = scan(&path, &mut rows);
+            }
+            b'm' => {
+                if selected < count {
+                    status = rename_entry(&path, &rows[selected]);
+                    count = scan(&path, &mut rows);
+                }
             }
             b'd' => {
                 if selected < count {
@@ -335,5 +364,5 @@ fn draw(win: &mut Window, path: &Path, rows: &[Row], selected: usize, status: (&
     win.number(56, h - 32, rows.len(), FG);
     win.text(96, h - 32, "sutunlar: bayt / FILETIME->epoch", DIM);
     win.text(6, h - 15, status.0, status.1);
-    win.text(250, h - 15, "n yeni  d sil  ESC cik", DIM);
+    win.text(230, h - 15, "n yeni  m ad  d sil  ESC cik", DIM);
 }

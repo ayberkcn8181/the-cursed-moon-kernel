@@ -42,6 +42,7 @@ mod i386_numbers {
     pub const SYS_MKDIR: usize = 39;
     pub const SYS_RMDIR: usize = 40;
     pub const SYS_UNLINK: usize = 10;
+    pub const SYS_RENAME: usize = 38;
     pub const SYS_WAITPID: usize = 7;
     pub const SYS_PIPE: usize = 42;
     pub const SYS_BRK: usize = 45;
@@ -72,6 +73,7 @@ mod x86_64_numbers {
     pub const SYS_MKDIR: usize = 83;
     pub const SYS_RMDIR: usize = 84;
     pub const SYS_UNLINK: usize = 87;
+    pub const SYS_RENAME: usize = 82;
     pub const SYS_BRK: usize = 12;
     pub const SYS_PIPE: usize = 22;
     pub const SYS_FORK: usize = 57;
@@ -459,6 +461,18 @@ pub unsafe fn rmdir(path: *const u8) -> isize {
 /// `path` NUL sonlandirmali gecerli bir dizi olmalidir.
 pub unsafe fn unlink(path: *const u8) -> isize {
     syscall1(SYS_UNLINK, path as usize) as isize
+}
+
+/// Yeniden adlandirir ya da tasir; veri bloklari kopyalanmaz.
+///
+/// Hedef zaten varsa **basarisiz olur**. Gercek POSIX `rename` hedefin
+/// uzerine sessizce yazar; TCMK Win32'nin `MoveFileA` davranisini secti
+/// (sessiz veri kaybini bir ABI ayrintisina birakmamak icin).
+///
+/// # Safety
+/// Iki yol da NUL sonlandirmali gecerli diziler olmalidir.
+pub unsafe fn rename(old: *const u8, new: *const u8) -> isize {
+    syscall2(SYS_RENAME, old as usize, new as usize) as isize
 }
 
 /// Anonim bellek ayirir (`mmap(NULL, len, ...)`); adresi doner.

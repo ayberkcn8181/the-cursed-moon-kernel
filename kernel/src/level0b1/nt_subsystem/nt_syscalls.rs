@@ -74,6 +74,7 @@ pub const NT_FIND_CLOSE: u32 = 0x300C;
 pub const NT_CREATE_DIRECTORY_A: u32 = 0x300D;
 pub const NT_REMOVE_DIRECTORY_A: u32 = 0x300E;
 pub const NT_DELETE_FILE_A: u32 = 0x300F;
+pub const NT_MOVE_FILE_A: u32 = 0x3017;
 
 pub const NT_USER_CREATE_WINDOW_W32: u32 = 0x3010;
 pub const NT_GDI_GET_BITS_W32: u32 = 0x3011;
@@ -548,6 +549,35 @@ fn dispatch_win32_api(frame: &mut SyscallFrame) {
         NT_CREATE_DIRECTORY_A => win32_path_action(args, kernel_api::mkdir),
         NT_REMOVE_DIRECTORY_A => win32_path_action(args, kernel_api::rmdir),
         NT_DELETE_FILE_A => win32_path_action(args, kernel_api::unlink),
+
+        NT_MOVE_FILE_A => {
+            // MoveFileA(lpExistingFileName, lpNewFileName) -> BOOL
+            //
+            // Tek yol argumanli kardeslerinden ayri duruyor cunku **iki**
+            // yol tasiyor; ikisi de ayri tamponlara kopyalanir.
+            let mut old_storage = [0u8; PATH_MAX];
+            let mut new_storage = [0u8; PATH_MAX];
+            let old_len = arg_ptr(args, 0)
+                .and_then(|p| unsafe { copy_user_cstr(p, &mut old_storage) })
+                .map(|p| p.len());
+            let new_len = arg_ptr(args, 1)
+                .and_then(|p| unsafe { copy_user_cstr(p, &mut new_storage) })
+                .map(|p| p.len());
+            match (old_len, new_len) {
+                // Ayirici cevrimi iki yolda da gerekli. Iki tampon ayri
+                // degiskenler oldugu icin oduncleri de ayri: ikisi ayni
+                // anda tutulabiliyor.
+                (Some(o), Some(n)) => {
+                    let old = normalize_win_path(&mut old_storage, o);
+                    let new = normalize_win_path(&mut new_storage, n);
+                    match kernel_api::rename(old, new) {
+                        Ok(()) => WIN32_TRUE,
+                        Err(_) => WIN32_FALSE,
+                    }
+                }
+                _ => WIN32_FALSE,
+            }
+        }
 
         // --- TCMKGUI.dll: pencere cagrilari ---
         NT_USER_CREATE_WINDOW_W32 => {

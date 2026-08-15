@@ -70,6 +70,7 @@ mod i386_numbers {
     pub const SYS_MKDIR: u32 = 39;
     pub const SYS_RMDIR: u32 = 40;
     pub const SYS_UNLINK: u32 = 10;
+    pub const SYS_RENAME: u32 = 38;
     pub const SYS_BRK: u32 = 45;
     pub const SYS_GETPID: u32 = 20;
     pub const SYS_KILL: u32 = 37;
@@ -103,6 +104,7 @@ mod x86_64_numbers {
     pub const SYS_MKDIR: u32 = 83;
     pub const SYS_RMDIR: u32 = 84;
     pub const SYS_UNLINK: u32 = 87;
+    pub const SYS_RENAME: u32 = 82;
     pub const SYS_BRK: u32 = 12;
     pub const SYS_PIPE: u32 = 22;
     pub const SYS_FORK: u32 = 57;
@@ -706,6 +708,35 @@ pub fn dispatch(frame: &mut SyscallFrame) {
             Ok(()) => 0,
             Err(e) => e,
         },
+
+        // `rename(eski, yeni)` -- iki yol argumani, tek islem.
+        //
+        // Veri bloklari tasinmaz: TCMKFS'te ad ve ebeveyn ayni inode
+        // alaninda oldugu icin "yeniden adlandir" ile "tasi" ayni sey.
+        // Win32 karsiligi `MoveFileA`.
+        SYS_RENAME => {
+            let mut old_storage = [0u8; PATH_MAX];
+            let mut new_storage = [0u8; PATH_MAX];
+            // Iki yol da **once** kopyalanir: islem basladiktan sonra
+            // kullanici bellegine bir daha donulmez. Uzunluklari almak
+            // ayni zamanda oduncu bitirir, yani iki tampon asagida
+            // birlikte kullanilabilir.
+            let old_len = unsafe { copy_user_cstr(arg1, &mut old_storage) }.map(|p| p.len());
+            let new_len = unsafe { copy_user_cstr(arg2, &mut new_storage) }.map(|p| p.len());
+            match (old_len, new_len) {
+                (Some(o), Some(n)) => match (
+                    core::str::from_utf8(&old_storage[..o]),
+                    core::str::from_utf8(&new_storage[..n]),
+                ) {
+                    (Ok(old), Ok(new)) => match kernel_api::rename(old, new) {
+                        Ok(()) => 0,
+                        Err(e) => errno_of(e),
+                    },
+                    _ => -EFAULT,
+                },
+                _ => -EFAULT,
+            }
+        }
 
         SYS_SLEEP => {
             // arg1 = milisaniye. PIT 100 Hz oldugu icin cozunurluk 10 ms;

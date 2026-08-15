@@ -114,6 +114,13 @@ extern "system" {
     /// Bir dosyayi siler. POSIX'teki `unlink` ile ayni cekirdek cagrisina
     /// iner; yalnizca diskteki dosyalar silinebilir.
     pub fn DeleteFileA(file_name: *const u8) -> Bool;
+    /// Yeniden adlandirir ya da tasir. POSIX `rename` ile ayni cekirdek
+    /// cagrisina iner.
+    ///
+    /// Hedef **zaten varsa basarisiz olur** -- Win32 `MoveFileA` da
+    /// oyledir. (POSIX `rename` hedefin uzerine sessizce yazar; TCMK
+    /// burada Win32'nin davranisini secti, bkz. README.)
+    pub fn MoveFileA(existing_name: *const u8, new_name: *const u8) -> Bool;
 }
 
 /// `FILETIME` -- 1601-01-01'den beri gecen 100 nanosaniyelik araliklar.

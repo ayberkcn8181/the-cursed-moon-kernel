@@ -639,6 +639,33 @@ pub fn unlink(path: &str) -> Result<(), KernelError> {
     vfs::remove_file(path).map_err(fs_error)
 }
 
+/// Bir dosyayi/dizini yeniden adlandirir ya da tasir.
+///
+/// POSIX `rename`, Win32 `MoveFileA`. Veri bloklari tasinmaz: TCMKFS'te
+/// ad ve ebeveyn ayni inode alaninda oldugu icin islem tek bir alan
+/// degisikligidir.
+///
+/// ## Ayrisan yan: hedef zaten varsa
+///
+/// POSIX `rename` hedefin **uzerine sessizce yazar** (ayni turdeyse).
+/// TCMK Win32'nin `MoveFileA` davranisini secti: hedef varsa cagri
+/// basarisiz olur. Sebep, sessiz veri kaybini bir ABI ayrintisina
+/// birakmamak -- "tasidim" diyen bir cagrinin ayni anda "sildim"
+/// demesi, iki uygulamanin ayni dizinde calistigi bu sistemde
+/// gorulmesi zor bir kayip olurdu. Ustune yazmak isteyen once siler.
+pub fn rename(old: &str, new: &str) -> Result<(), KernelError> {
+    // RAMFS tasinamaz: dosyalar cekirdek imajinin icindedir.
+    if let Some(node) = vfs::lookup(old) {
+        if vfs::source(node) == Some(vfs::Source::Ram) {
+            return Err(KernelError::NotSupported);
+        }
+    }
+    if is_dir_path(new) || vfs::lookup(new).is_some() {
+        return Err(KernelError::AlreadyExists);
+    }
+    vfs::rename(old, new).map_err(fs_error)
+}
+
 /// Bir dizini acar ve gezinme tanimlayicisi dondurur.
 ///
 /// POSIX'te `open` dizinlerde de calisir; ayrim `read` ile `getdents`

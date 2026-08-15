@@ -305,6 +305,56 @@ pub fn rmdir(path: &str) -> Result<(), tcmkfs::FsError> {
     tcmkfs::rmdir(path)
 }
 
+/// Bir dosyayi/dizini yeniden adlandirir ya da tasir.
+///
+/// Diskteki islem tek bir inode alani degisikligidir (bkz.
+/// `tcmkfs::rename`), ama VFS'te **ikinci bir is** daha var: isim uzayi
+/// burada duzdur, yani tasinan bir dizinin altindaki her dosyanin
+/// kayitli yolu da degismek zorundadir. Yapilmasaydi `/eski/x.txt`
+/// yolu tabloda kalir, `/yeni/x.txt` ise hic bulunamazdi.
+pub fn rename(old: &str, new: &str) -> Result<(), tcmkfs::FsError> {
+    tcmkfs::rename(old, new)?;
+    rehome(old, new);
+    Ok(())
+}
+
+/// Duz isim tablosundaki yollari eski onekten yeniye tasir.
+fn rehome(old: &str, new: &str) {
+    crate::arch::cpu::without_interrupts(|| {
+        for i in 0..node_count() {
+            let node = match node_at(i) {
+                Some(n) => n,
+                None => continue,
+            };
+            let path = match core::str::from_utf8(&node.path[..node.path_len]) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+
+            // Ya dugumun kendisi tasindi, ya da tasinan dizinin icinde.
+            let suffix = if path == old {
+                ""
+            } else {
+                match path.strip_prefix(old) {
+                    // Ayirici sart: `/not` oneki `/notlar/x`i yutmasin.
+                    Some(rest) if rest.starts_with('/') => rest,
+                    _ => continue,
+                }
+            };
+
+            if new.len() + suffix.len() >= MAX_PATH {
+                continue;
+            }
+            let mut buf = [0u8; MAX_PATH];
+            buf[..new.len()].copy_from_slice(new.as_bytes());
+            buf[new.len()..new.len() + suffix.len()].copy_from_slice(suffix.as_bytes());
+            if let Ok(text) = core::str::from_utf8(&buf[..new.len() + suffix.len()]) {
+                unsafe { set_path(&mut *nodes_mut().add(i), text) };
+            }
+        }
+    });
+}
+
 /// Diskteki bir dosyayi siler.
 pub fn remove_file(path: &str) -> Result<(), tcmkfs::FsError> {
     let index = lookup(path).ok_or(tcmkfs::FsError::NotFound)?;

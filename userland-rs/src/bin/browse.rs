@@ -31,7 +31,8 @@
 //! hata doner, program bir sonraki numaraya gecer.
 //!
 //! Tuslar: `j`/`k` -> asagi/yukari, Enter -> dizine gir, `u` -> ust dizin,
-//! `n` -> yeni dizin, `d` -> sil, `r` -> yeniden oku, `q` -> cik
+//! `n` -> yeni dizin, `m` -> yeniden adlandir, `d` -> sil,
+//! `r` -> yeniden oku, `q` -> cik
 
 #![no_std]
 #![no_main]
@@ -177,6 +178,30 @@ fn make_dir(path: &Path) -> (&'static str, u32) {
     ("mkdir: basarisiz", WARN)
 }
 
+/// Secili girdiyi `tasindiN` adiyla yeniden adlandirir.
+///
+/// `rename` veriyi **kopyalamaz**: TCMKFS'te ad ve ebeveyn ayni inode
+/// alaninda oldugu icin islem tek bir alan degisikligidir. Bir dizini
+/// yeniden adlandirmak da bu yuzden bedavadir -- icindeki dosyalara hic
+/// dokunulmaz.
+fn rename_entry(path: &Path, row: &Row) -> (&'static str, u32) {
+    let mut from = [0u8; MAX_PATH];
+    let mut to = [0u8; MAX_PATH];
+    let source = path.child(row.name(), &mut from);
+    let mut name = *b"tasindi0";
+    for digit in b'1'..=b'9' {
+        name[7] = digit;
+        let text = match core::str::from_utf8(&name) {
+            Ok(t) => t,
+            Err(_) => break,
+        };
+        if unsafe { sys::rename(source, path.child(text, &mut to)) } == 0 {
+            return ("rename: tasindi", OK);
+        }
+    }
+    ("rename: basarisiz", WARN)
+}
+
 /// Secili girdiyi siler: dizinse `rmdir`, dosyaysa `unlink`.
 fn remove(path: &Path, row: &Row) -> (&'static str, u32) {
     let mut buf = [0u8; MAX_PATH];
@@ -242,6 +267,12 @@ fn main() {
             b'n' => {
                 status = make_dir(&path);
                 total = scan(&path, &mut rows, &mut count);
+            }
+            b'm' => {
+                if selected < count {
+                    status = rename_entry(&path, &rows[selected]);
+                    total = scan(&path, &mut rows, &mut count);
+                }
             }
             b'd' => {
                 if selected < count {
@@ -332,5 +363,5 @@ fn draw(
         win.text(190, h - 32, ")", DIM);
     }
     win.text(6, h - 15, status.0, status.1);
-    win.text(230, h - 15, "n yeni  d sil  q cik", DIM);
+    win.text(215, h - 15, "n yeni  m ad  d sil  q cik", DIM);
 }

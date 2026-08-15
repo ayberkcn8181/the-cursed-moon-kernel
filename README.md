@@ -45,6 +45,7 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 5b | **`lseek`/`fstat`** + Win32 ikizleri (`SetFilePointer`/`GetFileSize`) | ✅ (i386 + x86_64) |
 | 5c | **Dizin gezinmesi**: `getdents` + `FindFirstFileA`/`FindNextFileA` | ✅ (i386 + x86_64, ELF + PE) |
 | 5d | **Dosya sistemi yazma**: `mkdir`/`rmdir`/`unlink` + Win32 ikizleri | ✅ (i386 + x86_64, ELF + PE) |
+| 5e | **`rename`/`MoveFileA`** (tasima = tek inode alani; veri kopyalanmaz) | ✅ (i386 + x86_64, ELF + PE) |
 | — | **Kendi onyukleyicisi** + diske kurulum (`install`) | ✅ (i386) |
 | 8 | **`execve`** (surec kendi yerine program yukler) | ✅ (i386 + x86_64) |
 | 8 | **`fork`** (adres uzayi kopyasi + iki kez donen cagri) | ✅ (i386 + x86_64) |
@@ -83,7 +84,7 @@ Ekranda gorunenler:
   | sistem | `ps` `top` `kill <id>` `signal <id> <sinyal>` `sigs` `svc` `health` `uptime` `date` `ver` |
   | Level-0b2 | `load` `ipc` `faults` `stall <sn>` |
   | bellek/disk | `mem` `disk` `df` `format onayla` `sync` `install onayla` |
-  | dosya | `ls [dizin]` `mkdir <yol>` `rmdir <yol>` `cat <yol>` `save <yol> <metin>` `cp <kaynak> <hedef>` `rm <yol>` |
+  | dosya | `ls [dizin]` `mkdir <yol>` `rmdir <yol>` `cat <yol>` `save <yol> <metin>` `cp <kaynak> <hedef>` `mv <kaynak> <hedef>` `rm <yol>` |
   | uygulama/pencere | `apps` `run <ad>` `win` `focus <id>` `mouse` |
   | uygulamalar (ELF) | `paint` `plasma` `notes` `menu` `twins` `relay` `echo2` `sigdemo` `race` `reaper` `redirect` `mux` `masked` `arena` `seeker` `browse` `crash` `hog` `spin` |
   | uygulamalar (PE) | `winclock` (ham `int 0x2E`) `winpad` `winfiles` (IAT) -- i386'da PE32, x86_64'te PE32+ |
@@ -1561,13 +1562,72 @@ donuyor, cekirdek cokmuyor.
 
 * **`mkdir -p` yok.** Ust dizin onceden var olmali; POSIX `mkdir(2)` ve
   Win32 `CreateDirectoryA` da boyledir (`-p` kabugun isidir).
-* **`rename`/`MoveFileA` yok.** TCMKFS'te inode adi yerinde
-  degistirilebilir ama dizinler arasi tasima ebeveyn alanini da
-  guncellemek demek; ayri bir is.
 * **`GetLastError` yok.** Win32 cagrilari basari/hata (`BOOL`) doner;
   ayrinti tasiyan bir surec-basina hata degiskeni TCMK'de yok.
 * **RAMFS silinemez.** `unlink`/`DeleteFileA` yalnizca diskteki
   dosyalarda calisir.
+
+## `rename` / `MoveFileA`: tasima veri kopyalamaz
+
+TCMKFS'te bir inode'un **adi ve ebeveyni ayni alanda** yasar. Bu, tek
+basina kucuk bir ayrinti gibi duruyor ama sonucu buyuk: "yeniden
+adlandir" ile "baska dizine tasi" ayni islem oluyor, ve ikisi de veri
+bloklarina hic dokunmuyor.
+
+```text
+  /kaynak/veri.txt   ->  mv /kaynak /hedef  ->  /hedef/veri.txt
+       ^                                            ^
+       ayni bloklar, ayni inode -- degisen yalnizca ad ve ebeveyn
+```
+
+`cp` ile farki tam olarak bu: `cp` dosyayi okuyup yeniden yaziyor,
+`mv` iki alani degistirip inode tablosunu diske akitiyor.
+
+| POSIX (ELF) | Win32 (PE) | Level-0a |
+|---|---|---|
+| `rename(eski, yeni)` | `MoveFileA(eski, yeni)` | `kernel_api::rename` |
+
+### VFS'in ikinci isi
+
+Diskteki islem tek bir alan degisikligi, ama VFS'te bir is daha var:
+isim uzayi orada **duzdur**, yani her dosyanin tam yolu ayri bir
+kayitta durur. Bir dizin tasindiginda altindaki her kaydin yolu da
+degismek zorunda -- yapilmasaydi `/kaynak/veri.txt` tabloda kalir,
+`/hedef/veri.txt` ise hic bulunamazdi.
+
+Olcu bu yuzden "dizin tasindiktan sonra icerigi hala okunabiliyor mu":
+
+![rename](docs/screenshot-rename.png)
+
+`mv /kaynak /hedef` sonrasi `ls /hedef` hem alt dizini hem dosyayi
+gosteriyor, ve `cat /hedef/veri.txt` icerigi basiyor.
+
+### Ucu de reddediliyor
+
+| deneme | sonuc |
+|---|---|
+| `mv /hedef /dolu2` (hedef var) | `hedef zaten var` |
+| `mv /bin/hello ...` (RAMFS) | `RAMFS dosyalari tasinamaz` |
+| `mv /hedef /hedef/icine` | `tasinamadi` |
+
+Ucuncusu en onemlisi: bir dizini **kendi altina** tasimak agaci
+koparirdi -- dugum kokten erisilemez hale gelir ama var olmaya devam
+eder, ve `path_of` ebeveyn zincirini yururken sonsuz donguye girerdi.
+Hedefin kaynagin soyundan gelmedigi bu yuzden acikca denetleniyor.
+
+### Ayrisan yan: hedef zaten varsa
+
+POSIX `rename` hedefin **uzerine sessizce yazar** (ayni turdeyse).
+TCMK Win32'nin `MoveFileA` davranisini secti: hedef varsa cagri
+basarisiz olur. Sebep, sessiz veri kaybini bir ABI ayrintisina
+birakmamak -- iki uygulamanin ayni dizinde calistigi bu sistemde
+"tasidim" diyen bir cagrinin ayni anda "sildim" demesi, fark edilmesi
+zor bir kayip olurdu. Ustune yazmak isteyen once siler.
+
+Yan etkisi olculebilir: `browse` ve `winfiles` `m` tusuyla secili
+girdiyi `tasindiN` adina tasiyor ve bos numara ariyor. `winfiles`
+(PE32) `tasindi1`i aldiktan sonra `browse` (ELF) ayni adi deneyip
+**hata aliyor** ve `tasindi2`ye geciyor -- iki ABI ayni kurala tabi.
 
 ## Kabuk komutlari artik ekrani dondurmuyor
 

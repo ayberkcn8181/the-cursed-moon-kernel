@@ -700,6 +700,60 @@ pub fn rmdir(path: &str) -> Result<(), FsError> {
     Ok(())
 }
 
+/// Bir inode'u yeniden adlandirir ve/veya baska bir dizine tasir.
+///
+/// ## Neden tek islem
+///
+/// Ad ve ebeveyn ayni inode alaninda yasar, yani "yeniden adlandirma"
+/// ile "tasima" TCMKFS'te **ayni islemdir**: `/a/x` -> `/b/y` demek
+/// `name = y, parent = b` demek. Veri bloklari hic dokunulmaz -- bu,
+/// dosyayi kopyalayip silmekten hem cok daha hizli hem de yarida
+/// kesilmeye karsi daha dayanikli.
+///
+/// ## Dizin tasimanin siniri
+///
+/// Bir dizini **kendi altina** tasimak agaci koparir: dugum kokten
+/// erisilemez hale gelir ama var olmaya devam eder (`path_of` de
+/// sonsuz donguye girerdi). Bu yuzden hedefin, kaynagin soyundan
+/// gelmedigi acikca denetlenir.
+pub fn rename(old: &str, new: &str) -> Result<(), FsError> {
+    if !mounted() {
+        return Err(FsError::NotMounted);
+    }
+    let index = resolve(old).ok_or(FsError::NotFound)?;
+    if index == ROOT_INODE {
+        return Err(FsError::BadPath);
+    }
+    if resolve(new).is_some() {
+        // Var olanin uzerine yazmak POSIX'te sessizce yapilir; TCMK
+        // Win32'nin `MoveFileA` davranisini secti (bkz. kernel_api).
+        return Err(FsError::Exists);
+    }
+
+    let (parent, leaf) = split_parent(new)?;
+
+    // Hedef dizin, tasinan dizinin soyundan mi? Kokten yukari yuruyerek
+    // bakilir; `MAX_DEPTH` zaten ust sinir oldugu icin dongu sonludur.
+    let mut walk = parent;
+    for _ in 0..MAX_DEPTH + 1 {
+        if walk == index {
+            return Err(FsError::BadPath);
+        }
+        if walk == ROOT_INODE {
+            break;
+        }
+        walk = inode_ref(walk).ok_or(FsError::BadPath)?.parent as usize;
+    }
+
+    let inode = inode_ref(index).ok_or(FsError::NotFound)?;
+    inode.name = [0; MAX_NAME];
+    for (i, b) in leaf.bytes().enumerate() {
+        inode.name[i] = b;
+    }
+    inode.parent = parent as u32;
+    flush_inodes()
+}
+
 /// Bir inode'un iceren dizini.
 pub fn parent_of(index: usize) -> Option<usize> {
     let inode = inode_ref(index)?;

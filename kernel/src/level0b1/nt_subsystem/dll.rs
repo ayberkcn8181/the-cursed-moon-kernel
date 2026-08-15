@@ -178,6 +178,13 @@ static KERNEL32: &[Export] = &[
         // lpFileName
         stack_bytes: 4,
     },
+    Export {
+        name: "MoveFileA",
+        ordinal: 17,
+        service: nt::NT_MOVE_FILE_A,
+        // lpExistingFileName, lpNewFileName
+        stack_bytes: 8,
+    },
 ];
 
 /// `TCMKGUI.dll` -- win32k cagrilarinin kullanici modundaki yuzu.

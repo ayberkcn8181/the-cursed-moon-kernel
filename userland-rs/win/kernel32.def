@@ -26,3 +26,4 @@ FindClose@4 @13
 CreateDirectoryA@8 @14
 RemoveDirectoryA@4 @15
 DeleteFileA@4 @16
+MoveFileA@8 @17

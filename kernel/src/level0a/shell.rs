@@ -538,7 +538,8 @@ fn execute(line: &str) {
             write_line("bellek / disk:");
             write_line("  mem  disk  df  format onayla  sync  install");
             write_line("dosya:");
-            write_line("  ls [-a] [dizin]  cat <yol>  save <yol> <metin>  cp <kaynak> <hedef>  rm <yol>");
+            write_line("  ls [-a] [dizin]  cat <yol>  save <yol> <metin>  cp <kaynak> <hedef>");
+            write_line("  mv <kaynak> <hedef>  rm <yol>  mkdir <yol>  rmdir <yol>");
             write_line("  mkdir <yol>  rmdir <yol>  cd [dizin]  pwd");
             write_line("uygulama / pencere:");
             write_line("  apps  run <ad>  win  focus <id>  mouse");
@@ -1314,6 +1315,43 @@ fn execute(line: &str) {
                         write_line(arg);
                     }
                     Err(e) => write_line(tcmkfs::error_name(e)),
+                }
+            }
+        }
+        "mv" => {
+            // Yeniden adlandirma ve tasima ayni komut: TCMKFS'te ad ve
+            // ebeveyn ayni inode alaninda oldugu icin ayni islem.
+            // `cp`'den farki, verinin hic kopyalanmamasi.
+            let (src, dst) = match arg.find(' ') {
+                Some(i) => (&arg[..i], arg[i + 1..].trim()),
+                None => (arg, ""),
+            };
+            if src.is_empty() || dst.is_empty() {
+                write_line("kullanim: mv <kaynak> <hedef>   (hedef var olmamali)");
+            } else {
+                let mut sbuf = [0u8; tcmkfs::PATH_MAX];
+                let mut dbuf = [0u8; tcmkfs::PATH_MAX];
+                let (src, dst) = match (absolute(src, &mut sbuf), absolute(dst, &mut dbuf)) {
+                    (Some(a), Some(b)) => (a, b),
+                    _ => {
+                        write_line("yol cok uzun");
+                        return;
+                    }
+                };
+                match kernel_api::rename(src, dst) {
+                    Ok(()) => {
+                        write_str("tasindi: ");
+                        write_str(src);
+                        write_str(" -> ");
+                        write_line(dst);
+                    }
+                    Err(kernel_api::KernelError::AlreadyExists) => {
+                        write_line("hedef zaten var")
+                    }
+                    Err(kernel_api::KernelError::NotSupported) => {
+                        write_line("RAMFS dosyalari tasinamaz (cekirdek imajinda)")
+                    }
+                    Err(_) => write_line("tasinamadi"),
                 }
             }
         }
