@@ -23,8 +23,15 @@
 //!   * Butun cagrilar ithal tablosu (IAT) uzerinden gider -- bu ikili tek
 //!     bir elle yazilmis sistem cagrisi icermez.
 //!
+//! Gezinmenin yaninda **yazma** da var: `n` `CreateDirectoryA` ile yeni
+//! bir dizin acar, `d` secili girdiyi `RemoveDirectoryA`/`DeleteFileA`
+//! ile siler. Olusturulan dizinlerin adi `win32N`'dir; POSIX tarafindaki
+//! `browse` de `posixN` yaratir. Iki uygulamayi yan yana calistirip
+//! birinin yarattigini otekinde gormek, iki ABI'nin ayni dosya sistemine
+//! baktiginin dogrudan kanitidir.
+//!
 //! Tuslar: `j`/`k` -> sec, Enter -> dizine gir, `u` -> ust dizin,
-//! `r` -> yenile, ESC -> cik
+//! `n` -> yeni dizin, `d` -> sil, `r` -> yenile, ESC -> cik
 
 #![no_std]
 #![no_main]
@@ -40,6 +47,8 @@ const DIM: u32 = 0x0072_8A9E;
 const ACCENT: u32 = 0x0046_C8FF;
 const DIRC: u32 = 0x00FF_C24A;
 const SELECT: u32 = 0x0022_4468;
+const OK: u32 = 0x0072_E08A;
+const WARN: u32 = 0x00FF_C24A;
 
 const MAX_ROWS: usize = 12;
 const MAX_NAME: usize = 24;
@@ -133,6 +142,62 @@ impl Path {
             self.len -= 1;
         }
     }
+
+    /// `dizin\ad` + NUL uretir. Ayirici Windows tarzinda kalir; cevrimi
+    /// cekirdek yapar (`normalize_win_path`).
+    fn child(&self, name: &str, buf: &mut [u8; MAX_PATH + 4]) -> *const u8 {
+        buf[..self.len].copy_from_slice(&self.bytes[..self.len]);
+        let mut len = self.len;
+        if self.bytes[self.len - 1] != b'\\' {
+            buf[len] = b'\\';
+            len += 1;
+        }
+        let taken = name.len().min(MAX_PATH + 3 - len);
+        buf[len..len + taken].copy_from_slice(&name.as_bytes()[..taken]);
+        buf[len + taken] = 0;
+        buf.as_ptr()
+    }
+}
+
+/// Bos bir numara bulup `win32N` dizinini acar.
+fn make_dir(path: &Path) -> (&'static str, u32) {
+    let mut buf = [0u8; MAX_PATH + 4];
+    let mut name = *b"win320";
+    for digit in b'1'..=b'9' {
+        name[5] = digit;
+        let text = match core::str::from_utf8(&name) {
+            Ok(t) => t,
+            Err(_) => break,
+        };
+        // Win32 sozlesmesi: basari TRUE, hata FALSE. Zaten varsa FALSE
+        // doner ve dongu bir sonraki numaraya gecer.
+        if unsafe { winapi::CreateDirectoryA(path.child(text, &mut buf), core::ptr::null_mut()) }
+            != 0
+        {
+            return ("CreateDirectoryA: olusturuldu", OK);
+        }
+    }
+    ("CreateDirectoryA: basarisiz", WARN)
+}
+
+/// Secili girdiyi siler: dizinse `RemoveDirectoryA`, dosyaysa `DeleteFileA`.
+fn remove(path: &Path, row: &Row) -> (&'static str, u32) {
+    let mut buf = [0u8; MAX_PATH + 4];
+    let target = path.child(row.name(), &mut buf);
+    let ok = if row.is_dir {
+        unsafe { winapi::RemoveDirectoryA(target) }
+    } else {
+        unsafe { winapi::DeleteFileA(target) }
+    };
+    if ok != 0 {
+        ("silindi", OK)
+    } else if row.is_dir {
+        // Win32'de ayrinti GetLastError'dadir; TCMK'de o kavram yok, o
+        // yuzden en olasi sebep yaziliyor.
+        ("silinemedi (bos mu?)", WARN)
+    } else {
+        ("silinemedi", WARN)
+    }
 }
 
 fn main() {
@@ -142,6 +207,7 @@ fn main() {
     let mut rows = [Row::empty(); MAX_ROWS];
     let mut count = scan(&path, &mut rows);
     let mut selected = 0usize;
+    let mut status = ("j/k sec  Enter gir  u ust", DIM);
 
     let _ = core::fmt::Write::write_str(
         &mut console,
@@ -179,10 +245,21 @@ fn main() {
                 count = scan(&path, &mut rows);
                 selected = selected.min(count.saturating_sub(1));
             }
+            b'n' => {
+                status = make_dir(&path);
+                count = scan(&path, &mut rows);
+            }
+            b'd' => {
+                if selected < count {
+                    status = remove(&path, &rows[selected]);
+                    count = scan(&path, &mut rows);
+                    selected = selected.min(count.saturating_sub(1));
+                }
+            }
             _ => {}
         }
 
-        draw(&mut win, &path, &rows[..count], selected);
+        draw(&mut win, &path, &rows[..count], selected, status);
         win.frame(40);
     }
 
@@ -221,7 +298,7 @@ fn scan(path: &Path, rows: &mut [Row; MAX_ROWS]) -> usize {
     count
 }
 
-fn draw(win: &mut Window, path: &Path, rows: &[Row], selected: usize) {
+fn draw(win: &mut Window, path: &Path, rows: &[Row], selected: usize, status: (&str, u32)) {
     let (w, h) = (win.width(), win.height());
     win.clear(BG);
 
@@ -257,5 +334,6 @@ fn draw(win: &mut Window, path: &Path, rows: &[Row], selected: usize) {
     win.text(6, h - 32, "girdi:", DIM);
     win.number(56, h - 32, rows.len(), FG);
     win.text(96, h - 32, "sutunlar: bayt / FILETIME->epoch", DIM);
-    win.text(6, h - 15, "j/k sec  Enter gir  u ust  r yenile  ESC cik", DIM);
+    win.text(6, h - 15, status.0, status.1);
+    win.text(250, h - 15, "n yeni  d sil  ESC cik", DIM);
 }

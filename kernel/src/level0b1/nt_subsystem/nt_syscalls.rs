@@ -71,6 +71,9 @@ pub const NT_GET_FILE_SIZE: u32 = 0x3009;
 pub const NT_FIND_FIRST_FILE: u32 = 0x300A;
 pub const NT_FIND_NEXT_FILE: u32 = 0x300B;
 pub const NT_FIND_CLOSE: u32 = 0x300C;
+pub const NT_CREATE_DIRECTORY_A: u32 = 0x300D;
+pub const NT_REMOVE_DIRECTORY_A: u32 = 0x300E;
+pub const NT_DELETE_FILE_A: u32 = 0x300F;
 
 pub const NT_USER_CREATE_WINDOW_W32: u32 = 0x3010;
 pub const NT_GDI_GET_BITS_W32: u32 = 0x3011;
@@ -107,6 +110,9 @@ const STATUS_ACCESS_VIOLATION: u32 = 0xC000_0005;
 const STATUS_OBJECT_NAME_NOT_FOUND: u32 = 0xC000_0034;
 const STATUS_TOO_MANY_OPENED_FILES: u32 = 0xC000_011F;
 const STATUS_NOT_IMPLEMENTED: u32 = 0xC000_0002;
+const STATUS_OBJECT_NAME_COLLISION: u32 = 0xC000_0035;
+const STATUS_DIRECTORY_NOT_EMPTY: u32 = 0xC000_0101;
+const STATUS_DISK_FULL: u32 = 0xC000_007F;
 
 const PATH_MAX: usize = 128;
 
@@ -121,6 +127,9 @@ fn ntstatus_of(err: KernelError) -> u32 {
         KernelError::NotFound => STATUS_OBJECT_NAME_NOT_FOUND,
         KernelError::TooManyOpenFiles => STATUS_TOO_MANY_OPENED_FILES,
         KernelError::NotSupported => STATUS_NOT_IMPLEMENTED,
+        KernelError::AlreadyExists => STATUS_OBJECT_NAME_COLLISION,
+        KernelError::NotEmpty => STATUS_DIRECTORY_NOT_EMPTY,
+        KernelError::NoSpace => STATUS_DISK_FULL,
     }
 }
 
@@ -490,21 +499,10 @@ fn dispatch_win32_api(frame: &mut SyscallFrame) {
             // Bir ELF ile bir PE ayni dizini listeleyip farkli sonuc
             // alamaz; Level-0b1'in varlik sebebi de tam olarak bu.
             let mut storage = [0u8; PATH_MAX];
-            let length = arg_ptr(args, 0)
+            let opened = arg_ptr(args, 0)
                 .and_then(|p| unsafe { copy_user_cstr(p, &mut storage) })
-                .map(|pattern| pattern.len());
-            // Windows uygulamalari yollari `\` ile yazar, TCMK'nin isim
-            // uzayi `/` kullanir. Cevrim yerinde yapilir: yeni bir tampon
-            // ayirmadan tek gecis.
-            if let Some(length) = length {
-                for byte in &mut storage[..length] {
-                    if *byte == b'\\' {
-                        *byte = b'/';
-                    }
-                }
-            }
-            let opened = length
-                .and_then(|length| core::str::from_utf8(&storage[..length]).ok())
+                .map(|pattern| pattern.len())
+                .map(|length| normalize_win_path(&mut storage, length))
                 .and_then(|pattern| kernel_api::open_dir(strip_wildcard(pattern)).ok());
             match opened {
                 Some(handle) => match kernel_api::next_dir_entry(handle as u32) {
@@ -541,6 +539,15 @@ fn dispatch_win32_api(frame: &mut SyscallFrame) {
             },
             None => WIN32_FALSE,
         },
+
+        // Dosya sistemi yazma islemleri -- POSIX'teki
+        // `mkdir`/`rmdir`/`unlink` ile ayni `kernel_api` girislerine
+        // iner. Ucu de Win32 sozlesmesi geregi BOOL doner (basari 1,
+        // hata 0); gercek Windows'ta ayrinti `GetLastError` ile
+        // alinir, TCMK'de o kavram yok.
+        NT_CREATE_DIRECTORY_A => win32_path_action(args, kernel_api::mkdir),
+        NT_REMOVE_DIRECTORY_A => win32_path_action(args, kernel_api::rmdir),
+        NT_DELETE_FILE_A => win32_path_action(args, kernel_api::unlink),
 
         // --- TCMKGUI.dll: pencere cagrilari ---
         NT_USER_CREATE_WINDOW_W32 => {
@@ -687,6 +694,46 @@ fn strip_wildcard(pattern: &str) -> &str {
         "/"
     } else {
         trimmed
+    }
+}
+
+/// Tek yol argumanli Win32 cagrilarinin ortak govdesi.
+///
+/// `CreateDirectoryA`/`RemoveDirectoryA`/`DeleteFileA` ayni sekli
+/// paylasir: bir yol, bir `BOOL`. Yol Windows tarzinda gelir, yani
+/// ayirici cevrimi ve surucu harfi temizligi burada da gerekir --
+/// `FindFirstFileA` ile ayni islem (bkz. `normalize_win_path`).
+fn win32_path_action(args: usize, action: fn(&str) -> Result<(), KernelError>) -> usize {
+    let mut storage = [0u8; PATH_MAX];
+    let path = match arg_ptr(args, 0)
+        .and_then(|p| unsafe { copy_user_cstr(p, &mut storage) })
+        .map(|p| p.len())
+    {
+        Some(length) => normalize_win_path(&mut storage, length),
+        None => return WIN32_FALSE,
+    };
+    match action(path) {
+        Ok(()) => WIN32_TRUE,
+        Err(_) => WIN32_FALSE,
+    }
+}
+
+/// Windows tarzi yolu TCMK isim uzayina cevirir -- **yerinde**.
+///
+/// Windows uygulamalari yollari `\` ile yazar ve basa surucu harfi
+/// koyar; TCMK'nin tek bir isim uzayi var ve `/` kullaniyor. Cevrim
+/// yeni bir tampon ayirmadan, tek gecisde yapilir.
+fn normalize_win_path(storage: &mut [u8; PATH_MAX], length: usize) -> &str {
+    for byte in &mut storage[..length] {
+        if *byte == b'\\' {
+            *byte = b'/';
+        }
+    }
+    let text = core::str::from_utf8(&storage[..length]).unwrap_or("");
+    // "C:/dizin" -> "/dizin"
+    match text.as_bytes() {
+        [drive, b':', ..] if drive.is_ascii_alphabetic() => &text[2..],
+        _ => text,
     }
 }
 

@@ -102,6 +102,18 @@ extern "system" {
     /// Sonraki girdi; dizin bittiginde 0 (FALSE).
     pub fn FindNextFileA(find: Handle, find_data: *mut Win32FindData) -> Bool;
     pub fn FindClose(find: Handle) -> Bool;
+
+    /// Yeni bir dizin olusturur. Ust dizin **onceden var olmali** --
+    /// Win32'de de oyledir (`SHCreateDirectoryEx` ara dizinleri kurar,
+    /// `CreateDirectoryA` kurmaz).
+    ///
+    /// `lpSecurityAttributes` yok sayilir: TCMKFS'te izin/sahiplik yok.
+    pub fn CreateDirectoryA(path_name: *const u8, security_attributes: *mut c_void) -> Bool;
+    /// Bos bir dizini siler.
+    pub fn RemoveDirectoryA(path_name: *const u8) -> Bool;
+    /// Bir dosyayi siler. POSIX'teki `unlink` ile ayni cekirdek cagrisina
+    /// iner; yalnizca diskteki dosyalar silinebilir.
+    pub fn DeleteFileA(file_name: *const u8) -> Bool;
 }
 
 /// `FILETIME` -- 1601-01-01'den beri gecen 100 nanosaniyelik araliklar.

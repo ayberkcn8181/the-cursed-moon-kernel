@@ -39,6 +39,9 @@ mod i386_numbers {
     pub const SYS_LSEEK: usize = 19;
     pub const SYS_FSTAT: usize = 197;
     pub const SYS_GETDENTS: usize = 220;
+    pub const SYS_MKDIR: usize = 39;
+    pub const SYS_RMDIR: usize = 40;
+    pub const SYS_UNLINK: usize = 10;
     pub const SYS_WAITPID: usize = 7;
     pub const SYS_PIPE: usize = 42;
     pub const SYS_BRK: usize = 45;
@@ -66,6 +69,9 @@ mod x86_64_numbers {
     pub const SYS_LSEEK: usize = 8;
     pub const SYS_FSTAT: usize = 5;
     pub const SYS_GETDENTS: usize = 217;
+    pub const SYS_MKDIR: usize = 83;
+    pub const SYS_RMDIR: usize = 84;
+    pub const SYS_UNLINK: usize = 87;
     pub const SYS_BRK: usize = 12;
     pub const SYS_PIPE: usize = 22;
     pub const SYS_FORK: usize = 57;
@@ -424,6 +430,35 @@ impl Drop for ReadDir<'_> {
     fn drop(&mut self) {
         close(self.fd);
     }
+}
+
+/// Yeni bir dizin olusturur. `path` NUL ile sonlanmalidir.
+///
+/// Ust dizin onceden var olmali: `mkdir -p` gibi ara dizinleri
+/// kendiliginden olusturmaz -- POSIX `mkdir(2)` de boyledir.
+///
+/// # Safety
+/// `path` NUL sonlandirmali gecerli bir dizi olmalidir.
+pub unsafe fn mkdir(path: *const u8) -> isize {
+    // Kip (mode) yok sayilir: TCMKFS'te izin biti yok.
+    syscall2(SYS_MKDIR, path as usize, 0o755) as isize
+}
+
+/// Bos bir dizini siler.
+///
+/// # Safety
+/// `path` NUL sonlandirmali gecerli bir dizi olmalidir.
+pub unsafe fn rmdir(path: *const u8) -> isize {
+    syscall1(SYS_RMDIR, path as usize) as isize
+}
+
+/// Bir dosyayi siler. Yalnizca diskteki dosyalar silinebilir; RAMFS
+/// dosyalari cekirdek imajinin parcasidir.
+///
+/// # Safety
+/// `path` NUL sonlandirmali gecerli bir dizi olmalidir.
+pub unsafe fn unlink(path: *const u8) -> isize {
+    syscall1(SYS_UNLINK, path as usize) as isize
 }
 
 /// Anonim bellek ayirir (`mmap(NULL, len, ...)`); adresi doner.

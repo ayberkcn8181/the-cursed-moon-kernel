@@ -44,6 +44,7 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 7e | **`WriteFile`**: PE ikilisi diske yazar (`CreateFileA`+`WriteFile`) | ✅ (PE32 + PE32+) |
 | 5b | **`lseek`/`fstat`** + Win32 ikizleri (`SetFilePointer`/`GetFileSize`) | ✅ (i386 + x86_64) |
 | 5c | **Dizin gezinmesi**: `getdents` + `FindFirstFileA`/`FindNextFileA` | ✅ (i386 + x86_64, ELF + PE) |
+| 5d | **Dosya sistemi yazma**: `mkdir`/`rmdir`/`unlink` + Win32 ikizleri | ✅ (i386 + x86_64, ELF + PE) |
 | — | **Kendi onyukleyicisi** + diske kurulum (`install`) | ✅ (i386) |
 | 8 | **`execve`** (surec kendi yerine program yukler) | ✅ (i386 + x86_64) |
 | 8 | **`fork`** (adres uzayi kopyasi + iki kez donen cagri) | ✅ (i386 + x86_64) |
@@ -1511,6 +1512,62 @@ ikili uyumu bozardi.
   POSIX'te de `rewinddir` ayri bir cagridir.
 * **Ayni anda 8 acik dizin** (`core::dir` havuzu). Dizin gezmek kisa
   omurlu bir istir; sayi `df` ciktisinda gorunur.
+
+## Yaratma ve silme: iki ABI, tek dosya sistemi
+
+Gezinme geldikten sonra eksiklik gorunur oldu: bir uygulama artik
+dizinleri dolasabiliyordu ama **hicbir sey yaratamiyordu**. Uc cagri o
+bosluktur, ve ikisi de ayni `kernel_api` girisine iner:
+
+| POSIX (ELF) | Win32 (PE) | Level-0a |
+|---|---|---|
+| `mkdir(yol, kip)` | `CreateDirectoryA(yol, NULL)` | `kernel_api::mkdir` |
+| `rmdir(yol)` | `RemoveDirectoryA(yol)` | `kernel_api::rmdir` |
+| `unlink(yol)` | `DeleteFileA(yol)` | `kernel_api::unlink` |
+
+`kip` ve `lpSecurityAttributes` yok sayilir: TCMKFS'te izin ve sahiplik
+kavrami yok, yani ikisi de tasiyacak bilgi bulamaz.
+
+### Olcu: PE yaratir, ELF gorur
+
+Iki gezgin yan yana calisiyor. `winfiles` (PE32) `n` tusuyla iki dizin
+yaratti (`win321`, `win322`); `browse` (ELF) acildiginda ikisini de
+goruyor ve uzerine kendi `posix1`/`posix2` dizinlerini ekliyor:
+
+![iki ABI](docs/screenshot-crossabi.png)
+
+Ad uretimi ayrica `EEXIST`i sinar: her iki program da `1`'den baslayip
+bos numara arar, yani `posix1` varken cagri **hata donmek zorunda** --
+donmeseydi ikinci dizin hic olusmaz, program ayni ada iki kez basardi
+sanirdi.
+
+### Hata kodlari gercek
+
+Uc yeni `KernelError` degeri iki ABI'ye de ayri ayri cevriliyor:
+
+| durum | POSIX | NT |
+|---|---|---|
+| ayni ad zaten var | `EEXIST` | `STATUS_OBJECT_NAME_COLLISION` |
+| dizin bos degil | `ENOTEMPTY` | `STATUS_DIRECTORY_NOT_EMPTY` |
+| disk yok/dolu | `ENOSPC` | `STATUS_DISK_FULL` |
+
+Olcum: dolu bir dizini silmeye calisinca `browse` **"dizin bos degil"**
+diyor ve girdi sayisi degismiyor; `/bin/hello`yu silmeye calisinca
+**"silinemedi"** diyor -- RAMFS dosyalari cekirdek imajinin parcasidir,
+Ring 3'ten silinemezler. x86_64'te (disk yok) `mkdir` **"basarisiz"**
+donuyor, cekirdek cokmuyor.
+
+### Bilerek yapilmayanlar
+
+* **`mkdir -p` yok.** Ust dizin onceden var olmali; POSIX `mkdir(2)` ve
+  Win32 `CreateDirectoryA` da boyledir (`-p` kabugun isidir).
+* **`rename`/`MoveFileA` yok.** TCMKFS'te inode adi yerinde
+  degistirilebilir ama dizinler arasi tasima ebeveyn alanini da
+  guncellemek demek; ayri bir is.
+* **`GetLastError` yok.** Win32 cagrilari basari/hata (`BOOL`) doner;
+  ayrinti tasiyan bir surec-basina hata degiskeni TCMK'de yok.
+* **RAMFS silinemez.** `unlink`/`DeleteFileA` yalnizca diskteki
+  dosyalarda calisir.
 
 ## Kabuk komutlari artik ekrani dondurmuyor
 

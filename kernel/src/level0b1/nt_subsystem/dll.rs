@@ -157,6 +157,27 @@ static KERNEL32: &[Export] = &[
         // hFindFile
         stack_bytes: 4,
     },
+    Export {
+        name: "CreateDirectoryA",
+        ordinal: 14,
+        service: nt::NT_CREATE_DIRECTORY_A,
+        // lpPathName, lpSecurityAttributes
+        stack_bytes: 8,
+    },
+    Export {
+        name: "RemoveDirectoryA",
+        ordinal: 15,
+        service: nt::NT_REMOVE_DIRECTORY_A,
+        // lpPathName
+        stack_bytes: 4,
+    },
+    Export {
+        name: "DeleteFileA",
+        ordinal: 16,
+        service: nt::NT_DELETE_FILE_A,
+        // lpFileName
+        stack_bytes: 4,
+    },
 ];
 
 /// `TCMKGUI.dll` -- win32k cagrilarinin kullanici modundaki yuzu.

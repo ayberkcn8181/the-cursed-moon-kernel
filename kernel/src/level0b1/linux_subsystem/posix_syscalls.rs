@@ -67,6 +67,9 @@ mod i386_numbers {
     pub const SYS_FSTAT: u32 = 197;
     /// Linux'ta `getdents64`. Kayit bicimi TCMK'ye ozgu (bkz. cagri).
     pub const SYS_GETDENTS: u32 = 220;
+    pub const SYS_MKDIR: u32 = 39;
+    pub const SYS_RMDIR: u32 = 40;
+    pub const SYS_UNLINK: u32 = 10;
     pub const SYS_BRK: u32 = 45;
     pub const SYS_GETPID: u32 = 20;
     pub const SYS_KILL: u32 = 37;
@@ -97,6 +100,9 @@ mod x86_64_numbers {
     pub const SYS_FSTAT: u32 = 5;
     /// `getdents64`.
     pub const SYS_GETDENTS: u32 = 217;
+    pub const SYS_MKDIR: u32 = 83;
+    pub const SYS_RMDIR: u32 = 84;
+    pub const SYS_UNLINK: u32 = 87;
     pub const SYS_BRK: u32 = 12;
     pub const SYS_PIPE: u32 = 22;
     pub const SYS_FORK: u32 = 57;
@@ -135,6 +141,9 @@ const ECHILD: i32 = 10;
 const ESRCH: i32 = 3;
 /// Bellek yetmedi (`mmap`).
 const ENOMEM: i32 = 12;
+const EEXIST: i32 = 17;
+const ENOTEMPTY: i32 = 39;
+const ENOSPC: i32 = 28;
 
 /// `setpriority`/`getpriority` icin desteklenen tek `which` degeri.
 const PRIO_PROCESS: usize = 0;
@@ -170,6 +179,25 @@ fn store_status(ptr: usize, code: u32) -> bool {
 /// Kullanici alanindan gelen yol adinin en fazla uzunlugu.
 const PATH_MAX: usize = 128;
 
+/// Kullanici isaretcisinden yol adini alip bir `kernel_api` cagrisina verir.
+///
+/// `mkdir`/`rmdir`/`unlink` uculu ayni sekli paylasiyor: tek bir yol
+/// argumani, donusu olmayan bir sonuc. Kaliba isim vermek uc kez
+/// tekrarlanan tampon + kopyalama + hata cevirisini tek yerde topluyor.
+///
+/// Hata durumunda **negatif errno** doner, yani cagiran dogrudan
+/// dondurebilir.
+fn with_user_path(
+    ptr: usize,
+    action: fn(&str) -> Result<(), KernelError>,
+) -> Result<(), i32> {
+    let mut storage = [0u8; PATH_MAX];
+    match unsafe { copy_user_cstr(ptr, &mut storage) } {
+        Some(path) => action(path).map_err(errno_of),
+        None => Err(-EFAULT),
+    }
+}
+
 /// Tek bir `poll` cagrisinda izlenebilecek tanimlayici sayisi. Bir
 /// surecin tablosu zaten bu kadar (`fd::MAX_FDS`).
 const MAX_POLL_FDS: usize = fd::MAX_FDS;
@@ -202,6 +230,9 @@ fn errno_of(err: KernelError) -> i32 {
         KernelError::NotFound => -ENOENT,
         KernelError::TooManyOpenFiles => -EMFILE,
         KernelError::NotSupported => -EINVAL,
+        KernelError::AlreadyExists => -EEXIST,
+        KernelError::NotEmpty => -ENOTEMPTY,
+        KernelError::NoSpace => -ENOSPC,
     }
 }
 
@@ -652,6 +683,28 @@ pub fn dispatch(frame: &mut SyscallFrame) {
                 return;
             }
             Err(e) => errno_of(e),
+        },
+
+        // Dosya sistemi **yazma** islemleri. Gezinme geldikten sonra
+        // eksikligi gorunur oldu: bir uygulama artik dizinleri
+        // dolasabiliyordu ama hicbir sey yaratamiyordu. Ucu de ayni
+        // `kernel_api` girisine iner; Win32 tarafinda karsiliklari
+        // `CreateDirectoryA`/`RemoveDirectoryA`/`DeleteFileA`.
+        //
+        // `mode` (arg2) yok sayilir: TCMKFS'te izin biti yok.
+        SYS_MKDIR => match with_user_path(arg1, kernel_api::mkdir) {
+            Ok(()) => 0,
+            Err(e) => e,
+        },
+
+        SYS_RMDIR => match with_user_path(arg1, kernel_api::rmdir) {
+            Ok(()) => 0,
+            Err(e) => e,
+        },
+
+        SYS_UNLINK => match with_user_path(arg1, kernel_api::unlink) {
+            Ok(()) => 0,
+            Err(e) => e,
         },
 
         SYS_SLEEP => {

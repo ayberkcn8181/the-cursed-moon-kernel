@@ -20,15 +20,25 @@
 //! cikmak imleci sifirlar -- yani `open` yeniden cagrilir; POSIX'te de
 //! bir dizin tanimlayicisi geriye sarilmaz (`rewinddir` ayri bir cagridir).
 //!
+//! Gezinmenin yaninda **yazma** da var: `n` yeni bir dizin acar
+//! (`mkdir`), `d` secili girdiyi siler (`rmdir` / `unlink`). Olusturulan
+//! dizinlerin adi `posixN`'dir; Win32 tarafindaki `winfiles` de `win32N`
+//! yaratir. Iki uygulamayi yan yana calistirip birinin yarattigini
+//! otekinde gormek, iki ABI'nin ayni dosya sistemine baktiginin
+//! dogrudan kanitidir.
+//!
+//! Ad uretimi ayrica `EEXIST`i sinar: `posix1` varken tekrar denemek
+//! hata doner, program bir sonraki numaraya gecer.
+//!
 //! Tuslar: `j`/`k` -> asagi/yukari, Enter -> dizine gir, `u` -> ust dizin,
-//! `r` -> yeniden oku, `q` -> cik
+//! `n` -> yeni dizin, `d` -> sil, `r` -> yeniden oku, `q` -> cik
 
 #![no_std]
 #![no_main]
 
 use tcmk::gui::Window;
 use tcmk::io::Stdout;
-use tcmk::sys::ReadDir;
+use tcmk::sys::{self, ReadDir};
 
 tcmk::entry!(main);
 
@@ -39,6 +49,11 @@ const DIM: u32 = 0x0078_8498;
 const ACCENT: u32 = 0x0068_D0FF;
 const DIRC: u32 = 0x00FF_C86A;
 const SELECT: u32 = 0x0028_4460;
+const OK: u32 = 0x0070_E090;
+const WARN: u32 = 0x00FF_8060;
+
+/// POSIX `ENOTEMPTY` -- iki mimaride de 39.
+const ENOTEMPTY: isize = 39;
 
 /// Ekranda tutulan en fazla girdi. Daha fazlasi varsa listelenmeyenlerin
 /// sayisi alt satirda gosterilir -- sessizce kirpmak yaniltici olurdu.
@@ -122,6 +137,62 @@ impl Path {
         }
         self.bytes[self.len] = 0;
     }
+
+    /// `dizin/ad` + NUL uretir; cekirdek cagrilari icin isaretci doner.
+    ///
+    /// Girdi kayitlari yalnizca **ad** tasir (POSIX `dirent`i de oyle),
+    /// ama `mkdir`/`unlink` tam yol ister.
+    fn child(&self, name: &str, buf: &mut [u8; MAX_PATH]) -> *const u8 {
+        buf[..self.len].copy_from_slice(&self.bytes[..self.len]);
+        let mut len = self.len;
+        if self.bytes[self.len - 1] != b'/' {
+            buf[len] = b'/';
+            len += 1;
+        }
+        // Sondaki NUL icin bir bayt ayrilir.
+        let taken = name.len().min(MAX_PATH - len - 1);
+        buf[len..len + taken].copy_from_slice(&name.as_bytes()[..taken]);
+        buf[len + taken] = 0;
+        buf.as_ptr()
+    }
+}
+
+/// Bos bir numara bulup `posixN` dizinini acar.
+///
+/// Numara arama `EEXIST`in gercekten dondugunu de sinar: `posix1` varken
+/// cagri hata verir ve dongu bir sonrakine gecer.
+fn make_dir(path: &Path) -> (&'static str, u32) {
+    let mut buf = [0u8; MAX_PATH];
+    let mut name = *b"posix0";
+    for digit in b'1'..=b'9' {
+        name[5] = digit;
+        let text = match core::str::from_utf8(&name) {
+            Ok(t) => t,
+            Err(_) => break,
+        };
+        if unsafe { sys::mkdir(path.child(text, &mut buf)) } == 0 {
+            return ("mkdir: olusturuldu", OK);
+        }
+    }
+    ("mkdir: basarisiz", WARN)
+}
+
+/// Secili girdiyi siler: dizinse `rmdir`, dosyaysa `unlink`.
+fn remove(path: &Path, row: &Row) -> (&'static str, u32) {
+    let mut buf = [0u8; MAX_PATH];
+    let target = path.child(row.name(), &mut buf);
+    let result = if row.is_dir {
+        unsafe { sys::rmdir(target) }
+    } else {
+        unsafe { sys::unlink(target) }
+    };
+    match result {
+        0 => ("silindi", OK),
+        // Bos olmayan bir dizin silinmez -- POSIX de ENOTEMPTY doner.
+        r if r == -ENOTEMPTY => ("dizin bos degil", WARN),
+        // RAMFS dosyalari cekirdek imajinin parcasi; silinemezler.
+        _ => ("silinemedi", WARN),
+    }
 }
 
 fn main() {
@@ -134,6 +205,7 @@ fn main() {
     let mut selected = 0usize;
 
     let mut total = scan(&path, &mut rows, &mut count);
+    let mut status = ("j/k sec  Enter gir  u ust", DIM);
     let _ = writeln!(out, "[browse] / icinde {} girdi.", total);
 
     let mut win = match Window::open("browse -- getdents", 250, 120, 420, 300) {
@@ -167,10 +239,21 @@ fn main() {
                 total = scan(&path, &mut rows, &mut count);
                 selected = selected.min(count.saturating_sub(1));
             }
+            b'n' => {
+                status = make_dir(&path);
+                total = scan(&path, &mut rows, &mut count);
+            }
+            b'd' => {
+                if selected < count {
+                    status = remove(&path, &rows[selected]);
+                    total = scan(&path, &mut rows, &mut count);
+                    selected = selected.min(count.saturating_sub(1));
+                }
+            }
             _ => {}
         }
 
-        draw(&mut win, &path, &rows[..count], selected, total);
+        draw(&mut win, &path, &rows[..count], selected, total, status);
         win.frame(60);
     }
 }
@@ -205,7 +288,14 @@ fn scan(path: &Path, rows: &mut [Row; MAX_ROWS], count: &mut usize) -> usize {
     total
 }
 
-fn draw(win: &mut Window, path: &Path, rows: &[Row], selected: usize, total: usize) {
+fn draw(
+    win: &mut Window,
+    path: &Path,
+    rows: &[Row],
+    selected: usize,
+    total: usize,
+    status: (&str, u32),
+) {
     let (w, h) = (win.width(), win.height());
     win.clear(BG);
 
@@ -241,5 +331,6 @@ fn draw(win: &mut Window, path: &Path, rows: &[Row], selected: usize, total: usi
         win.number(160, h - 32, rows.len(), FG);
         win.text(190, h - 32, ")", DIM);
     }
-    win.text(6, h - 15, "j/k sec  Enter gir  u ust  r yenile  q cik", DIM);
+    win.text(6, h - 15, status.0, status.1);
+    win.text(230, h - 15, "n yeni  d sil  q cik", DIM);
 }

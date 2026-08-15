@@ -23,3 +23,6 @@ GetFileSize@8 @10
 FindFirstFileA@8 @11
 FindNextFileA@8 @12
 FindClose@4 @13
+CreateDirectoryA@8 @14
+RemoveDirectoryA@4 @15
+DeleteFileA@4 @16

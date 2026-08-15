@@ -21,6 +21,12 @@ pub enum KernelError {
     NotFound,
     TooManyOpenFiles,
     NotSupported,
+    /// Ayni adda bir sey zaten var (POSIX `EEXIST`).
+    AlreadyExists,
+    /// Silinmek istenen dizin bos degil (POSIX `ENOTEMPTY`).
+    NotEmpty,
+    /// Kalici depolama yok ya da dolu (POSIX `ENOSPC`).
+    NoSpace,
 }
 
 /// Program break (heap siniri) -- **surec basina**.
@@ -579,6 +585,58 @@ pub fn next_entry(dir: &str, cursor: usize) -> Option<(DirEntry, usize)> {
     }
 
     None
+}
+
+/// TCMKFS hatalarini notr cekirdek hatalarina cevirir.
+///
+/// Cevrim burada, **tek yerde** yapilir: iki alt sistem de kendi errno /
+/// NTSTATUS esleme tablosunu bu turden turetir. Dosya sistemine ozgu
+/// hata adlarinin ABI katmanlarina sizmasi, Level-0a ile Level-0b1
+/// arasindaki siniri delerdi.
+fn fs_error(err: tcmkfs::FsError) -> KernelError {
+    match err {
+        tcmkfs::FsError::Exists => KernelError::AlreadyExists,
+        tcmkfs::FsError::NotEmpty => KernelError::NotEmpty,
+        tcmkfs::FsError::NotFound | tcmkfs::FsError::BadPath => KernelError::NotFound,
+        tcmkfs::FsError::Full | tcmkfs::FsError::TooManyFiles | tcmkfs::FsError::FileTooLarge => {
+            KernelError::NoSpace
+        }
+        // Disk yoksa ya da bagli degilse yazma islemi hic mumkun degil.
+        tcmkfs::FsError::NoDevice
+        | tcmkfs::FsError::NoPartition
+        | tcmkfs::FsError::NotFormatted
+        | tcmkfs::FsError::NotMounted => KernelError::NoSpace,
+        _ => KernelError::NotSupported,
+    }
+}
+
+/// Yeni bir dizin olusturur (POSIX `mkdir`, Win32 `CreateDirectoryA`).
+///
+/// Ust dizin **onceden var olmali**: `mkdir -p` gibi ara dizinleri
+/// kendiliginden olusturmaz. POSIX `mkdir(2)` de boyledir; `-p`
+/// kabugun isidir, cekirdegin degil.
+pub fn mkdir(path: &str) -> Result<(), KernelError> {
+    // RAMFS'te olusturma yoktur (icerigi cekirdek imajinin icinde), ve
+    // ayni adda ima edilen bir dizin varsa cakisma bildirmek gerekir --
+    // yoksa cagri "basarili" der ama ortada yeni bir sey olmaz.
+    if is_dir_path(path) || vfs::lookup(path).is_some() {
+        return Err(KernelError::AlreadyExists);
+    }
+    vfs::mkdir(path).map_err(fs_error)
+}
+
+/// Bos bir dizini siler (POSIX `rmdir`, Win32 `RemoveDirectoryA`).
+pub fn rmdir(path: &str) -> Result<(), KernelError> {
+    vfs::rmdir(path).map_err(fs_error)
+}
+
+/// Bir dosyayi siler (POSIX `unlink`, Win32 `DeleteFileA`).
+///
+/// Yalnizca diskteki dosyalar silinebilir: RAMFS dosyalari cekirdek
+/// imajinin parcasidir, `/bin/paint`i silmek imajin kendisini
+/// degistirmek anlamina gelirdi.
+pub fn unlink(path: &str) -> Result<(), KernelError> {
+    vfs::remove_file(path).map_err(fs_error)
 }
 
 /// Bir dizini acar ve gezinme tanimlayicisi dondurur.
