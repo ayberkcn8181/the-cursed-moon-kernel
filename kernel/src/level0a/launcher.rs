@@ -19,6 +19,15 @@ const MAX_PENDING: usize = 8;
 const MAX_PATH: usize = 64;
 static mut PENDING: [[u8; MAX_PATH]; MAX_PENDING] = [[0; MAX_PATH]; MAX_PENDING];
 static mut PENDING_LEN: [usize; MAX_PENDING] = [0; MAX_PENDING];
+
+/// Yolla birlikte tasinan **arguman dizesi**.
+///
+/// Yolun yaninda ayri bir dizi: yol her zaman tek bir simge, argumanlar
+/// ise bosluklu bir metin. Ikisini tek tamponda birlestirmek, yolun
+/// icinde bosluk olabilecegi gunu bastan bozardi.
+const MAX_ARGS: usize = 96;
+static mut PENDING_ARGS: [[u8; MAX_ARGS]; MAX_PENDING] = [[0; MAX_ARGS]; MAX_PENDING];
+static mut PENDING_ARGS_LEN: [usize; MAX_PENDING] = [0; MAX_PENDING];
 static PENDING_HEAD: AtomicUsize = AtomicUsize::new(0);
 static PENDING_TAIL: AtomicUsize = AtomicUsize::new(0);
 
@@ -32,24 +41,34 @@ static PENDING_TAIL: AtomicUsize = AtomicUsize::new(0);
 static mut EXEC_PATH: [[u8; MAX_PATH]; scheduler::MAX_TASKS] =
     [[0; MAX_PATH]; scheduler::MAX_TASKS];
 static mut EXEC_LEN: [usize; scheduler::MAX_TASKS] = [0; scheduler::MAX_TASKS];
+static mut EXEC_ARGS: [[u8; MAX_ARGS]; scheduler::MAX_TASKS] =
+    [[0; MAX_ARGS]; scheduler::MAX_TASKS];
+static mut EXEC_ARGS_LEN: [usize; scheduler::MAX_TASKS] = [0; scheduler::MAX_TASKS];
 
 /// Gorev icin `execve` istegi kaydeder.
-pub fn request_exec(task: usize, path: &str) -> bool {
+pub fn request_exec(task: usize, path: &str, args: &str) -> bool {
     if task >= scheduler::MAX_TASKS || path.is_empty() || path.len() >= MAX_PATH {
         return false;
     }
+    let args = if args.len() >= MAX_ARGS { "" } else { args };
     crate::arch::cpu::without_interrupts(|| unsafe {
         let slot = (core::ptr::addr_of_mut!(EXEC_PATH) as *mut u8).add(task * MAX_PATH);
         core::ptr::copy_nonoverlapping(path.as_ptr(), slot, path.len());
         (core::ptr::addr_of_mut!(EXEC_LEN) as *mut usize)
             .add(task)
             .write(path.len());
+
+        let arg_slot = (core::ptr::addr_of_mut!(EXEC_ARGS) as *mut u8).add(task * MAX_ARGS);
+        core::ptr::copy_nonoverlapping(args.as_ptr(), arg_slot, args.len());
+        (core::ptr::addr_of_mut!(EXEC_ARGS_LEN) as *mut usize)
+            .add(task)
+            .write(args.len());
     });
     true
 }
 
 /// Bekleyen `execve` istegini alir ve yuvayi bosaltir.
-fn take_exec(task: usize) -> Option<&'static str> {
+fn take_exec(task: usize) -> Option<(&'static str, &'static str)> {
     if task >= scheduler::MAX_TASKS {
         return None;
     }
@@ -61,7 +80,15 @@ fn take_exec(task: usize) -> Option<&'static str> {
         }
         len_slot.write(0);
         let slot = (core::ptr::addr_of!(EXEC_PATH) as *const u8).add(task * MAX_PATH);
-        core::str::from_utf8(core::slice::from_raw_parts(slot, len)).ok()
+        let path = core::str::from_utf8(core::slice::from_raw_parts(slot, len)).ok()?;
+
+        let args_len = (core::ptr::addr_of!(EXEC_ARGS_LEN) as *const usize)
+            .add(task)
+            .read();
+        let args_slot = (core::ptr::addr_of!(EXEC_ARGS) as *const u8).add(task * MAX_ARGS);
+        let args = core::str::from_utf8(core::slice::from_raw_parts(args_slot, args_len))
+            .unwrap_or("");
+        Some((path, args))
     })
 }
 
@@ -127,11 +154,14 @@ pub fn available() -> &'static [(&'static str, &'static str, &'static str)] {
 }
 
 /// Bir uygulamayi yeni bir gorevde Ring 3'te baslatir.
-pub fn spawn_user_app(path: &str) -> Result<(), &'static str> {
+pub fn spawn_user_app(path: &str, args: &str) -> Result<(), &'static str> {
     let (resolved, task_name) =
         resolve(path).ok_or("bilinmeyen uygulama ('apps'/'ls' ile listeleyin)")?;
     if resolved.len() >= MAX_PATH {
         return Err("yol cok uzun");
+    }
+    if args.len() >= MAX_ARGS {
+        return Err("arguman cok uzun");
     }
 
     crate::arch::cpu::without_interrupts(|| unsafe {
@@ -145,6 +175,13 @@ pub fn spawn_user_app(path: &str) -> Result<(), &'static str> {
         (core::ptr::addr_of_mut!(PENDING_LEN) as *mut usize)
             .add(head)
             .write(resolved.len());
+
+        let arg_slot = (core::ptr::addr_of_mut!(PENDING_ARGS) as *mut u8).add(head * MAX_ARGS);
+        core::ptr::copy_nonoverlapping(args.as_ptr(), arg_slot, args.len());
+        (core::ptr::addr_of_mut!(PENDING_ARGS_LEN) as *mut usize)
+            .add(head)
+            .write(args.len());
+
         PENDING_HEAD.store(next, Ordering::Relaxed);
         Ok(())
     })?;
@@ -156,7 +193,7 @@ pub fn spawn_user_app(path: &str) -> Result<(), &'static str> {
 
 /// Kuyruktaki yolu alir. Donen dilim static tabloyu gosterir; gorev onu
 /// hemen kullanir, bu yuzden slotun ileride tekrar yazilmasi sorun degil.
-fn take_pending() -> Option<&'static str> {
+fn take_pending() -> Option<(&'static str, &'static str)> {
     crate::arch::cpu::without_interrupts(|| unsafe {
         let tail = PENDING_TAIL.load(Ordering::Relaxed);
         if tail == PENDING_HEAD.load(Ordering::Relaxed) {
@@ -166,8 +203,15 @@ fn take_pending() -> Option<&'static str> {
         let len = (core::ptr::addr_of!(PENDING_LEN) as *const usize)
             .add(tail)
             .read();
+        let args_slot = (core::ptr::addr_of!(PENDING_ARGS) as *const u8).add(tail * MAX_ARGS);
+        let args_len = (core::ptr::addr_of!(PENDING_ARGS_LEN) as *const usize)
+            .add(tail)
+            .read();
         PENDING_TAIL.store((tail + 1) % MAX_PENDING, Ordering::Relaxed);
-        core::str::from_utf8(core::slice::from_raw_parts(slot, len)).ok()
+        let path = core::str::from_utf8(core::slice::from_raw_parts(slot, len)).ok()?;
+        let args = core::str::from_utf8(core::slice::from_raw_parts(args_slot, args_len))
+            .unwrap_or("");
+        Some((path, args))
     })
 }
 
@@ -180,16 +224,20 @@ extern "C" fn app_task() -> ! {
 
     // Dongu `execve` icin: surec yerine baska bir program isterse ayni
     // gorevde, yeni bir adres uzayiyla devam edilir.
-    while let Some(path) = next {
-        crate::println!("[launcher] '{}' Ring 3'te baslatiliyor.", path);
-        let result = unsafe { crate::level0b1::process::run_from_vfs_dynamic(path) };
+    while let Some((path, args)) = next {
+        if args.is_empty() {
+            crate::println!("[launcher] '{}' Ring 3'te baslatiliyor.", path);
+        } else {
+            crate::println!("[launcher] '{}' baslatiliyor (arguman: {}).", path, args);
+        }
+        let result = unsafe { crate::level0b1::process::run_from_vfs_dynamic(path, args) };
         match result {
             Ok(()) => crate::println!("[launcher] '{}' sonlandi.", path),
             Err(e) => crate::println!("[launcher] '{}' basarisiz: {:?}", path, e),
         }
 
         next = take_exec(scheduler::current_id());
-        if let Some(p) = next {
+        if let Some((p, _)) = next {
             // Yeni imaj eskinin penceresini devralmaz.
             crate::level0a::wm::close_owned_by(scheduler::current_id());
             crate::println!("[launcher] execve -> '{}'", p);

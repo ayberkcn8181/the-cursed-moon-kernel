@@ -66,24 +66,24 @@ struct Prepared {
 ///
 /// # Safety
 /// `run_image` ile ayni onkosullar.
-pub unsafe fn run_from_vfs_dynamic(path: &str) -> Result<(), SpawnError> {
+pub unsafe fn run_from_vfs_dynamic(path: &str, args: &str) -> Result<(), SpawnError> {
     let node = vfs::lookup(path).ok_or(SpawnError::NotFound)?;
     let image = vfs::load(node).ok_or(SpawnError::NotFound)?;
-    run_image(path, image)
+    run_image(path, image, args)
 }
 
 pub unsafe fn run_from_vfs(path: &'static str) -> Result<(), SpawnError> {
     let node = vfs::lookup(path).ok_or(SpawnError::NotFound)?;
     let image = vfs::load(node).ok_or(SpawnError::NotFound)?;
     crate::println!("[LEVEL-0b1] VFS'ten yukleniyor: {}", path);
-    run_image(path, image)
+    run_image(path, image, "")
 }
 
 /// Bir ikiliyi formatini tespit ederek Ring 3'te calistirir.
 ///
 /// # Safety
 /// Sayfalama acik ve TSS kurulmus olmalidir.
-pub unsafe fn run_image(name: &str, image: &[u8]) -> Result<(), SpawnError> {
+pub unsafe fn run_image(name: &str, image: &[u8], args: &str) -> Result<(), SpawnError> {
     crate::println!(
         "[LEVEL-0b1] Binary Loader: '{}' ({} bayt) yukleniyor.",
         name,
@@ -119,7 +119,7 @@ pub unsafe fn run_image(name: &str, image: &[u8]) -> Result<(), SpawnError> {
         }
     }
 
-    let result = detect_and_load(image).and_then(|prepared| enter_ring3(prepared, space));
+    let result = detect_and_load(image).and_then(|prepared| enter_ring3(prepared, space, name, args));
 
     // Surec bitti (ya da yuklenemedi): cerceveleri havuza geri ver.
     release_space(space);
@@ -212,9 +212,147 @@ unsafe fn detect_and_load(image: &[u8]) -> Result<Prepared, SpawnError> {
     })
 }
 
+/// En fazla arguman sayisi (`argv[0]` dahil).
+const MAX_ARGV: usize = 8;
+
+/// Win32 surecinin komut satirinin adresi -- **surec basina**.
+///
+/// `GetCommandLineA` bunu doner. POSIX tarafinda karsiligi yok: orada
+/// argumanlar yiginda, `argc`/`argv` olarak durur.
+static COMMAND_LINE: [core::sync::atomic::AtomicUsize; scheduler::MAX_TASKS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; scheduler::MAX_TASKS];
+
+/// Calisan surecin komut satiri (Win32 `GetCommandLineA` icin).
+pub fn command_line_ptr() -> usize {
+    COMMAND_LINE[scheduler::current_id() % scheduler::MAX_TASKS]
+        .load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Baslangic yigininin argumanlarini yerlestirir; yeni ESP/RSP doner.
+///
+/// ## Iki ABI, iki bicim
+///
+/// Bu, POSIX ile Win32'nin **en gorunur** ayrildigi yerlerden biri ve
+/// ikisi de burada oldugu gibi korunuyor:
+///
+/// ```text
+///   POSIX (ELF)   yiginda:  [argc][argv0][argv1]..[NULL][envp NULL]
+///                 -- bir DIZI; her arguman ayri, NUL ile biter
+///
+///   Win32 (PE)    tek bir dize: "browse /notlar"
+///                 -- GetCommandLineA onu doner, bolmek CRT'nin isi
+/// ```
+///
+/// Cekirdek argumanlari **bir kez** aliyor; farkli olan yalnizca
+/// sunum. Ayni sozlesmeyi tek bicime indirmek, iki taraftan birinin
+/// beklentisini bozardi -- Windows programi `argv` aramaz, Linux
+/// programi tek dize beklemez.
+unsafe fn build_start_stack(
+    format: BinaryFormat,
+    stack_top: usize,
+    program: &str,
+    args: &str,
+) -> usize {
+    let task = scheduler::current_id();
+    COMMAND_LINE[task % scheduler::MAX_TASKS].store(0, core::sync::atomic::Ordering::Relaxed);
+
+    match format {
+        #[cfg(target_arch = "x86")]
+        BinaryFormat::Pe32 => build_win32_command_line(task, stack_top, program, args),
+        #[cfg(target_arch = "x86_64")]
+        BinaryFormat::Pe32Plus => build_win32_command_line(task, stack_top, program, args),
+        _ => build_posix_stack(stack_top, program, args),
+    }
+}
+
+/// Win32: tek bir dize, yiginin tepesine yazilir.
+unsafe fn build_win32_command_line(
+    task: usize,
+    stack_top: usize,
+    program: &str,
+    args: &str,
+) -> usize {
+    // "program args" + NUL
+    let total = program.len() + if args.is_empty() { 0 } else { args.len() + 1 } + 1;
+    let start = (stack_top - total) & !3;
+    let mut at = start;
+    for byte in program.bytes() {
+        (at as *mut u8).write(byte);
+        at += 1;
+    }
+    if !args.is_empty() {
+        (at as *mut u8).write(b' ');
+        at += 1;
+        for byte in args.bytes() {
+            (at as *mut u8).write(byte);
+            at += 1;
+        }
+    }
+    (at as *mut u8).write(0);
+
+    COMMAND_LINE[task % scheduler::MAX_TASKS].store(start, core::sync::atomic::Ordering::Relaxed);
+    // ESP hizalanmis olarak dizenin altinda baslar.
+    (start - 16) & !15
+}
+
+/// POSIX: `argc`/`argv` dizisi, SysV baslangic yigini duzeninde.
+unsafe fn build_posix_stack(stack_top: usize, program: &str, args: &str) -> usize {
+    let word = core::mem::size_of::<usize>();
+
+    // Once dizeler yiginin tepesine kopyalanir; isaretcileri saklanir.
+    // `argv[0]` gelenege gore programin kendi adidir.
+    let mut pointers = [0usize; MAX_ARGV];
+    let mut count = 0usize;
+    let mut sp = stack_top;
+
+    let place = |text: &str, sp: &mut usize| -> usize {
+        *sp -= text.len() + 1;
+        let at = *sp;
+        for (i, byte) in text.bytes().enumerate() {
+            ((at + i) as *mut u8).write(byte);
+        }
+        ((at + text.len()) as *mut u8).write(0);
+        at
+    };
+
+    pointers[0] = place(program, &mut sp);
+    count += 1;
+    for token in args.split_whitespace() {
+        if count >= MAX_ARGV {
+            break;
+        }
+        pointers[count] = place(token, &mut sp);
+        count += 1;
+    }
+
+    // Isaretci dizisi kelime hizali olmali.
+    sp &= !(word - 1);
+
+    // [argc][argv0..argvN][NULL][envp NULL] -- ortam degiskeni yok, ama
+    // sonlandirici yine de konur: `envp`yi okuyan bir program bos bir
+    // dizi gormeli, cop degil.
+    let words = 1 + count + 1 + 1;
+    sp -= words * word;
+    // x86_64 SysV: giriste yigin 16'ya hizali olmali.
+    sp &= !15;
+
+    (sp as *mut usize).write(count);
+    for (i, pointer) in pointers[..count].iter().enumerate() {
+        ((sp + (1 + i) * word) as *mut usize).write(*pointer);
+    }
+    ((sp + (1 + count) * word) as *mut usize).write(0);
+    ((sp + (2 + count) * word) as *mut usize).write(0);
+    sp
+}
+
 /// Formattan bagimsiz ortak bolum: yigin yerlesimi, sayfa izinleri,
 /// TSS ve Ring 3 gecisi.
-unsafe fn enter_ring3(prepared: Prepared, space: Option<usize>) -> Result<(), SpawnError> {
+unsafe fn enter_ring3(
+    prepared: Prepared,
+    space: Option<usize>,
+    program: &str,
+    args: &str,
+) -> Result<(), SpawnError> {
     // Kullanici yigini: imajin bittigi yerden sonra, sayfa hizali.
     let stack_bottom = (prepared.end + 0xFFF) & !0xFFF;
     let stack_top = stack_bottom + USER_STACK_SIZE;
@@ -261,8 +399,10 @@ unsafe fn enter_ring3(prepared: Prepared, space: Option<usize>) -> Result<(), Sp
     );
     crate::println!("[LEVEL-0b1] Ring 3'e geciliyor (iret)...");
 
-    // ESP en ustte degil, 16 bayt asagida baslatilir (hizalama payi).
-    usermode::run_user_program(prepared.entry, stack_top - 16);
+    // Argumanlar yiginin **tepesine** yerlestirilir; ESP onlarin altinda
+    // baslar. Iki ABI'nin bicimi burada ayrisir (bkz. `build_start_stack`).
+    let sp = build_start_stack(prepared.format, stack_top, program, args);
+    usermode::run_user_program(prepared.entry, sp);
 
     crate::println!("[LEVEL-0b1] Ring 3 programi sonlandi, Ring 0'a donuldu.");
     Ok(())

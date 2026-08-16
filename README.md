@@ -48,6 +48,7 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 5e | **`rename`/`MoveFileA`** (tasima = tek inode alani; veri kopyalanmaz) | ✅ (i386 + x86_64, ELF + PE) |
 | 7f | **`GetLastError`/`SetLastError`** (surec basina Win32 hata kodu) | ✅ (PE32 + PE32+) |
 | 9e | **`chdir`/`getcwd`** + Win32 ikizleri (surec basina calisma dizini) | ✅ (i386 + x86_64, ELF + PE) |
+| 3b | **Program argumanlari**: SysV `argc`/`argv` + `GetCommandLineA` | ✅ (i386 + x86_64, ELF + PE) |
 | — | **Kendi onyukleyicisi** + diske kurulum (`install`) | ✅ (i386) |
 | 8 | **`execve`** (surec kendi yerine program yukler) | ✅ (i386 + x86_64) |
 | 8 | **`fork`** (adres uzayi kopyasi + iki kez donen cagri) | ✅ (i386 + x86_64) |
@@ -89,7 +90,7 @@ Ekranda gorunenler:
   | Level-0b2 | `load` `ipc` `faults` `stall <sn>` |
   | bellek/disk | `mem` `disk` `df` `format onayla` `sync` `install onayla` |
   | dosya | `ls [dizin]` `mkdir <yol>` `rmdir <yol>` `cat <yol>` `save <yol> <metin>` `cp <kaynak> <hedef>` `mv <kaynak> <hedef>` `rm <yol>` |
-  | uygulama/pencere | `apps` `run <ad>` `win` `focus <id>` `mouse` |
+  | uygulama/pencere | `apps` `run <ad> [argumanlar]` `win` `focus <id>` `mouse` |
   | uygulamalar (ELF) | `paint` `plasma` `notes` `menu` `twins` `relay` `echo2` `sigdemo` `race` `reaper` `redirect` `mux` `masked` `arena` `seeker` `browse` `waiter` `heir` `nested` `crash` `hog` `spin` |
   | uygulamalar (PE) | `winclock` (ham `int 0x2E`) `winpad` `winfiles` (IAT) -- i386'da PE32, x86_64'te PE32+ |
   | diger | `echo <metin>` `pipes` `clear` `help` |
@@ -1931,6 +1932,66 @@ degistikten sonra ayni sekilde calisiyor (regresyon kosusu).
   baslatilmaz.
 * **Dort katman siniri.** Gercek programlarda ikiden derin ic ice
   sinyal patolojiktir; sinira dayanildiginda teslim ertelenir.
+
+## Program argumanlari: aynı yetenek, iki ayri sozlesme
+
+Uygulamalar bugune kadar **hicbir arguman almiyordu**. `run browse`
+diyebiliyordunuz ama "hangi dizin" diyemiyordunuz; her uygulama ne
+yapacagini kendi icinde sabitlemek zorundaydi.
+
+Bu, iki ABI'nin **en gorunur** ayrildigi yerlerden biri -- ve ikisi de
+oldugu gibi korundu:
+
+```text
+  POSIX (ELF)   yiginda:  [argc][argv0][argv1]..[NULL][envp NULL]
+                bir DIZI -- her arguman ayri, NUL ile biter
+
+  Win32 (PE)    GetCommandLineA() -> "browse /notlar"
+                tek bir DIZE -- bolmek cagirana kalir
+```
+
+Gercek Windows'ta o bolme isini CRT yapar (`CommandLineToArgvW`).
+Cekirdek argumanlari **bir kez** aliyor; ayrilan yalnizca sunum
+(`process::build_start_stack`). Ayni sozlesmeyi tek bicime indirmek iki
+taraftan birinin beklentisini bozardi: bir Windows programi `argv`
+aramaz, bir Linux programi tek dize beklemez.
+
+### Giris noktasi da ayrisiyor
+
+POSIX tarafinda `argc`/`argv` yiginda oldugu icin giris anindaki yigin
+isaretcisi gerekli -- ama Rust'in `extern "C" fn` prologu onu bozar.
+`_start` bu yuzden kucuk bir asm sarmalayici: yigin isaretcisini ilk
+arguman olarak Rust'a geciriyor (i386'da yigindan, x86_64'te RDI ile).
+PE hedefinde boyle bir sey yok; orada `_start` sade kaliyor ve
+argumanlar cagriyla okunuyor.
+
+Uygulama tarafinda ikisi de ayni yuze cikiyor: `tcmk::args::get(1)`.
+
+### Olcu
+
+```text
+tcmk> run browse /notlar      -> [browse] /notlar icinde 1 girdi (2 arguman)
+tcmk> run winfiles /notlar    -> C:/notlar
+```
+
+Solda ELF, sagda PE -- ayni argumani, iki ayri yoldan alip ayni yerde
+aciliyorlar:
+
+![argv](docs/screenshot-argv.png)
+
+x86_64'te de ayni: `run browse /bin` -> `/bin icinde 25 girdi (2
+arguman)`. Argumansiz calisan uygulamalar (`notes`, `menu`) etkilenmedi.
+
+### Bilerek yapilmayanlar
+
+* **Ortam degiskeni yok.** `envp` sonlandiricisi yigina yine de konuyor:
+  onu okuyan bir program **bos bir dizi** gormeli, cop degil.
+* **`execve` dizi degil dize aliyor.** Gercek `execve` bir
+  `char *const argv[]` alir; TCMK tek bir dize alip bolmeyi cekirdege
+  birakiyor -- cunku ayni dize Win32 tarafinda **bolunmemis** halde
+  gerekiyor.
+* **En fazla sekiz arguman** ve tirnak/kacis yok: bolme sade bosluk
+  ayrimi.
 
 ## Kabuk komutlari artik ekrani dondurmuyor
 

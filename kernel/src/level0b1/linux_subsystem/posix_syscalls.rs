@@ -510,21 +510,39 @@ pub fn dispatch(frame: &mut SyscallFrame) {
             return;
         }
         SYS_EXECVE => {
-            // arg1 = yol. Imaj YERINDE degistirilemez (surec o anda kendi
-            // kodunda kosuyor); istek kaydedilip Ring 3'ten cikilir,
-            // launcher yeni imaji yukler.
+            // arg1 = yol, arg2 = arguman dizesi (NULL olabilir).
+            //
+            // Imaj YERINDE degistirilemez (surec o anda kendi kodunda
+            // kosuyor); istek kaydedilip Ring 3'ten cikilir, launcher
+            // yeni imaji yukler.
+            //
+            // Gercek `execve` bir `char *const argv[]` dizisi alir; TCMK
+            // tek bir dize alip bolmeyi cekirdege birakiyor. Sebep,
+            // ayni dizenin Win32 tarafinda **oldugu gibi** gerekmesi:
+            // `GetCommandLineA` bolunmemis bir komut satiri doner.
             let mut storage = [0u8; PATH_MAX];
-            let path = unsafe { copy_user_cstr(arg1, &mut storage) };
-            match path {
-                Some(p) if crate::level0a::core::vfs::lookup(p).is_some() => {
-                    let task = crate::level0a::core::scheduler::current_id();
-                    if crate::level0a::launcher::request_exec(task, p) {
-                        unsafe { kernel_api::exit_to_exec() }
+            let mut arg_storage = [0u8; PATH_MAX];
+            let path_len = unsafe { copy_user_cstr(arg1, &mut storage) }.map(|p| p.len());
+            let args_len = if arg2 == 0 {
+                Some(0)
+            } else {
+                unsafe { copy_user_cstr(arg2, &mut arg_storage) }.map(|a| a.len())
+            };
+            match (path_len, args_len) {
+                (Some(plen), Some(alen)) => {
+                    let path = core::str::from_utf8(&storage[..plen]).unwrap_or("");
+                    let args = core::str::from_utf8(&arg_storage[..alen]).unwrap_or("");
+                    if crate::level0a::core::vfs::lookup(path).is_none() {
+                        -ENOENT
+                    } else {
+                        let task = crate::level0a::core::scheduler::current_id();
+                        if crate::level0a::launcher::request_exec(task, path, args) {
+                            unsafe { kernel_api::exit_to_exec() }
+                        }
+                        -EINVAL
                     }
-                    -EINVAL
                 }
-                Some(_) => -ENOENT,
-                None => -EFAULT,
+                _ => -EFAULT,
             }
         }
         // `poll(pollfd[], nfds, timeout_ms)` -- "hangisi hazir?"

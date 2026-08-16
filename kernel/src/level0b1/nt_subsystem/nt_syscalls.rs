@@ -79,6 +79,7 @@ pub const NT_GET_LAST_ERROR: u32 = 0x3018;
 pub const NT_SET_LAST_ERROR: u32 = 0x3019;
 pub const NT_SET_CURRENT_DIRECTORY: u32 = 0x301A;
 pub const NT_GET_CURRENT_DIRECTORY: u32 = 0x301B;
+pub const NT_GET_COMMAND_LINE_A: u32 = 0x301C;
 
 pub const NT_USER_CREATE_WINDOW_W32: u32 = 0x3010;
 pub const NT_GDI_GET_BITS_W32: u32 = 0x3011;
@@ -727,6 +728,17 @@ fn dispatch_win32_api(frame: &mut SyscallFrame) {
                 _ => 0,
             }
         }
+
+        // GetCommandLineA() -> LPSTR
+        //
+        // Win32'nin arguman sozlesmesi POSIX'inkinden **yapisal olarak**
+        // farkli: burada bolunmemis **tek bir dize** doner, bolmek
+        // CRT'nin (`CommandLineToArgvW`) isidir. POSIX tarafi ayni
+        // argumanlari yiginda `argc`/`argv` **dizisi** olarak alir.
+        //
+        // Cekirdek argumanlari bir kez aliyor; ayrilan yalnizca sunum
+        // (bkz. `process::build_start_stack`).
+        NT_GET_COMMAND_LINE_A => crate::level0b1::process::command_line_ptr(),
 
         // --- TCMKGUI.dll: pencere cagrilari ---
         NT_USER_CREATE_WINDOW_W32 => {

@@ -37,6 +37,13 @@
 //! Ad uretimi ayrica `EEXIST`i sinar: `posix1` varken tekrar denemek
 //! hata doner, program bir sonraki numaraya gecer.
 //!
+//! ## Arguman
+//!
+//! `run browse /notlar` -- verilen dizinde acilir. Cekirdek argumanlari
+//! yigina `argc`/`argv` olarak koyuyor; `tcmk::args` onlari okuyor.
+//! Win32 tarafindaki `winfiles` ayni isi `GetCommandLineA` ile yapar --
+//! ayni yetenek, iki ayri ABI sozlesmesi.
+//!
 //! Tuslar: `j`/`k` -> asagi/yukari, Enter -> dizine gir, `u` -> ust dizin,
 //! `n` -> yeni dizin, `m` -> yeniden adlandir, `d` -> sil,
 //! `r` -> yeniden oku, `q` -> cik
@@ -44,6 +51,7 @@
 #![no_std]
 #![no_main]
 
+use tcmk::args;
 use tcmk::gui::Window;
 use tcmk::io::Stdout;
 use tcmk::sys::{self, ReadDir};
@@ -158,8 +166,25 @@ fn main() {
     let mut path = [0u8; MAX_PATH];
     let mut status = ("j/k sec  Enter gir  u ust", DIM);
 
+    // Arguman verildiyse orada acilir. Yol birlestirmesi yok: goreli ad
+    // da olabilir, cekirdek surecin dizinine gore cozer.
+    if let Some(start) = args::first() {
+        let mut target = [0u8; MAX_PATH];
+        let taken = start.len().min(MAX_PATH - 1);
+        target[..taken].copy_from_slice(&start.as_bytes()[..taken]);
+        if unsafe { sys::chdir(target.as_ptr()) } != 0 {
+            let _ = writeln!(out, "[browse] '{}' acilamadi, kokte kaliniyor.", start);
+        }
+    }
+
     let mut total = scan(&mut rows, &mut count);
-    let _ = writeln!(out, "[browse] {} icinde {} girdi.", cwd(&mut path), total);
+    let _ = writeln!(
+        out,
+        "[browse] {} icinde {} girdi ({} arguman).",
+        cwd(&mut path),
+        total,
+        args::count()
+    );
 
     let mut win = match Window::open("browse -- getdents / chdir", 250, 120, 420, 300) {
         Some(w) => w,

@@ -52,6 +52,7 @@
 
 #![no_std]
 
+pub mod args;
 pub mod canvas;
 pub mod font;
 
@@ -79,16 +80,63 @@ pub mod winapi;
 
 /// Uygulamanin giris noktasini tanimlar.
 ///
-/// GRUB/`iret` ile Ring 3'e girildiginde yigin hazirdir ama `argc/argv`
-/// yoktur; giris noktasi bu yuzden argumansizdir. `main` dondugunde
-/// otomatik olarak `sys_exit(0)` cagrilir -- Ring 3'te "donulecek yer"
-/// olmadigi icin bu sart.
+/// `main` dondugunde otomatik olarak surec sonlandirilir -- Ring 3'te
+/// "donulecek yer" olmadigi icin bu sart.
+///
+/// ## Argumanlar: iki ABI, iki giris
+///
+/// POSIX tarafinda cekirdek `argc`/`argv`yi **yigina** koyar ve giris
+/// anindaki yigin isaretcisi onlari gosterir. Rust'in `extern "C" fn`
+/// prologu o isaretciyi bozdugu icin `_start` bir asm sarmalayicidir:
+/// yigin isaretcisini ilk arguman olarak Rust tarafina gecirir.
+///
+/// Win32 tarafinda boyle bir sey yok -- argumanlar `GetCommandLineA` ile
+/// **tek bir dize** olarak alinir. O yuzden PE hedefinde `_start` sade
+/// kalir ve argumanlar cagriyla okunur.
+#[cfg(not(target_os = "windows"))]
+#[macro_export]
+macro_rules! entry {
+    ($main:path) => {
+        // `_start`: yigin isaretcisini bozmadan Rust'a gecir.
+        //
+        // i386 cdecl argumani yigindan alir; x86_64 SysV ilk argumani
+        // RDI'de bekler. Ikisinde de yigin cagri oncesi 16'ya hizalanir.
+        #[cfg(target_arch = "x86")]
+        core::arch::global_asm!(
+            ".globl _start",
+            "_start:",
+            "mov ecx, esp",
+            "and esp, -16",
+            "push ecx",
+            "call __tcmk_start",
+        );
+        #[cfg(target_arch = "x86_64")]
+        core::arch::global_asm!(
+            ".globl _start",
+            "_start:",
+            "mov rdi, rsp",
+            "and rsp, -16",
+            "call __tcmk_start",
+        );
+
+        #[no_mangle]
+        pub extern "C" fn __tcmk_start(stack: *const usize) -> ! {
+            unsafe { $crate::args::init_posix(stack) };
+            // Tip kontrolu: $main gercekten `fn()` olmali.
+            let main: fn() = $main;
+            main();
+            $crate::exit_process(0)
+        }
+    };
+}
+
+#[cfg(target_os = "windows")]
 #[macro_export]
 macro_rules! entry {
     ($main:path) => {
         #[no_mangle]
         pub extern "C" fn _start() -> ! {
-            // Tip kontrolu: $main gercekten `fn()` olmali.
+            unsafe { $crate::args::init_win32($crate::winapi::GetCommandLineA()) };
             let main: fn() = $main;
             main();
             $crate::exit_process(0)

@@ -45,6 +45,14 @@
 //! birinin yarattigini otekinde gormek, iki ABI'nin ayni dosya sistemine
 //! baktiginin dogrudan kanitidir.
 //!
+//! ## Arguman
+//!
+//! `run winfiles /notlar` -- verilen dizinde acilir. Argumanlar buraya
+//! `GetCommandLineA` ile **tek bir dize** olarak geliyor ve bolmek
+//! cagirana kaliyor (gercek Windows'ta CRT'nin isi). POSIX tarafindaki
+//! `browse` ayni argumani yiginda `argv` **dizisi** olarak aliyor --
+//! ayni yetenek, iki ayri ABI sozlesmesi.
+//!
 //! Tuslar: `j`/`k` -> sec, Enter -> dizine gir, `u` -> ust dizin,
 //! `n` -> yeni dizin, `m` -> yeniden adlandir (`MoveFileA`), `d` -> sil,
 //! `r` -> yenile, ESC -> cik
@@ -52,6 +60,7 @@
 #![no_std]
 #![no_main]
 
+use tcmk::args;
 use tcmk::winapi::{self, Win32FindData, Window};
 
 tcmk::entry!(main);
@@ -183,6 +192,14 @@ fn remove(row: &Row) -> (&'static str, u32) {
 
 fn main() {
     let mut console = winapi::Console;
+
+    // Arguman verildiyse orada acilir.
+    if let Some(start) = args::first() {
+        let mut target = [0u8; MAX_PATH];
+        let taken = start.len().min(MAX_PATH - 1);
+        target[..taken].copy_from_slice(&start.as_bytes()[..taken]);
+        unsafe { winapi::SetCurrentDirectoryA(target.as_ptr()) };
+    }
 
     let mut path = [0u8; MAX_PATH];
     let mut rows = [Row::empty(); MAX_ROWS];

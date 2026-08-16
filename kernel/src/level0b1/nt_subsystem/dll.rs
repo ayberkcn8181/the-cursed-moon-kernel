@@ -212,6 +212,12 @@ static KERNEL32: &[Export] = &[
         // nBufferLength, lpBuffer
         stack_bytes: 8,
     },
+    Export {
+        name: "GetCommandLineA",
+        ordinal: 22,
+        service: nt::NT_GET_COMMAND_LINE_A,
+        stack_bytes: 0,
+    },
 ];
 
 /// `TCMKGUI.dll` -- win32k cagrilarinin kullanici modundaki yuzu.

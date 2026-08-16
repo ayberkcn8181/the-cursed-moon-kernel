@@ -144,6 +144,15 @@ extern "system" {
     /// uzunluk (NUL haric), yetmezse **gereken** uzunluk (NUL dahil)
     /// doner. Sifir donmesi gercek bir hatadir.
     pub fn GetCurrentDirectoryA(buffer_length: Dword, buffer: *mut u8) -> Dword;
+
+    /// Surecin komut satiri -- **bolunmemis tek bir dize**.
+    ///
+    /// POSIX'in `argv`siyle arasindaki fark yapisal: orada cekirdek
+    /// argumanlari yiginda bir **dizi** olarak verir, burada tek bir
+    /// metin doner ve bolmek cagirana (gercek Windows'ta CRT'ye) kalir.
+    /// Ayni sozlesmeyi tek bicime indirmek iki taraftan birinin
+    /// beklentisini bozardi.
+    pub fn GetCommandLineA() -> *const u8;
 }
 
 // --- `GetLastError` kodlari (Windows ile ayni sayilar) ----------------

@@ -534,7 +534,7 @@ fn start_desktop() {
     // Ring 3 GUI uygulamalari (her biri kendi gorevinde).
     #[cfg(target_arch = "x86")]
     for app in ["paint", "plasma"] {
-        match level0a::launcher::spawn_user_app(app) {
+        match level0a::launcher::spawn_user_app(app, "") {
             Ok(()) => crate::println!("[worker] '{}' baslatildi.", app),
             Err(e) => crate::println!("[worker] '{}' baslatilamadi: {}", app, e),
         }

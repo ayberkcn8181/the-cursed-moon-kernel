@@ -1401,8 +1401,15 @@ fn execute(line: &str) {
         }
         "run" => {
             if arg.is_empty() {
-                write_line("kullanim: run <yol>");
+                write_line("kullanim: run <yol> [argumanlar]");
             } else {
+                // Ilk simge program, gerisi **argumanlar**. Uygulama
+                // onlari POSIX'te `argv`, Win32'de `GetCommandLineA`
+                // olarak goruyor (bkz. `process::build_start_stack`).
+                let (arg, app_args) = match arg.find(' ') {
+                    Some(i) => (&arg[..i], arg[i + 1..].trim()),
+                    None => (arg, ""),
+                };
                 // `run paint` kisa addir, yol degil. Yalnizca icinde
                 // egik cizgi olan (yani gercekten yol olan) argumanlar
                 // calisma dizinine gore cozulur; boylece `run ./notes` ve
@@ -1419,7 +1426,7 @@ fn execute(line: &str) {
                 } else {
                     arg
                 };
-                match crate::level0a::launcher::spawn_user_app(arg) {
+                match crate::level0a::launcher::spawn_user_app(arg, app_args) {
                     Ok(()) => {
                         write_str("baslatildi: ");
                         write_line(arg);
