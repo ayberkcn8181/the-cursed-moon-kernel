@@ -182,6 +182,15 @@ pub unsafe fn bring_up(ramfs_files: &[(&'static str, &'static [u8])]) {
 
     vfs::list();
 
+    // Ortam tablosu: dosya sistemi bagliktan **sonra** kurulur, cunku
+    // `HOME` gercekten var olan bir dizini gostermeli.
+    super::env::init();
+    crate::println!(
+        "[LEVEL-0a] ortam: {} degisken (HOME={})",
+        super::env::count(),
+        super::env::get("HOME").unwrap_or("?")
+    );
+
     crate::println!(
         "[LEVEL-0a] paging={} identity={} MiB | heap {} B kullanildi, {} KiB bos",
         if mmu::is_enabled() { "acik" } else { "KAPALI" },

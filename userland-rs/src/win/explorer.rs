@@ -61,6 +61,7 @@
 #![no_main]
 
 use tcmk::args;
+use tcmk::env;
 use tcmk::winapi::{self, Win32FindData, Window};
 
 tcmk::entry!(main);
@@ -193,8 +194,12 @@ fn remove(row: &Row) -> (&'static str, u32) {
 fn main() {
     let mut console = winapi::Console;
 
-    // Arguman verildiyse orada acilir.
-    if let Some(start) = args::first() {
+    // Arguman verildiyse orada acilir; verilmediyse `HOME`. Degeri
+    // POSIX ikizindeki ile ayni cekirdek tablosundan geliyor, ama yol
+    // farkli: orada yigindaki dizi taraniyor, burada
+    // `GetEnvironmentVariableA` adla soruyor.
+    let start = args::first().or_else(|| env::get("HOME"));
+    if let Some(start) = start {
         let mut target = [0u8; MAX_PATH];
         let taken = start.len().min(MAX_PATH - 1);
         target[..taken].copy_from_slice(&start.as_bytes()[..taken]);

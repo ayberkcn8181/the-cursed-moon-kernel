@@ -54,6 +54,7 @@
 
 pub mod args;
 pub mod canvas;
+pub mod env;
 pub mod font;
 
 // --- Linux/POSIX tarafi (ELF ikilisi) ---

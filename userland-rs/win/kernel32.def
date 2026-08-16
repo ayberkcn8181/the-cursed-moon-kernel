@@ -32,3 +32,4 @@ SetLastError@4 @19
 SetCurrentDirectoryA@4 @20
 GetCurrentDirectoryA@8 @21
 GetCommandLineA@0 @22
+GetEnvironmentVariableA@12 @23

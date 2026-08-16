@@ -49,6 +49,8 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 7f | **`GetLastError`/`SetLastError`** (surec basina Win32 hata kodu) | ✅ (PE32 + PE32+) |
 | 9e | **`chdir`/`getcwd`** + Win32 ikizleri (surec basina calisma dizini) | ✅ (i386 + x86_64, ELF + PE) |
 | 3b | **Program argumanlari**: SysV `argc`/`argv` + `GetCommandLineA` | ✅ (i386 + x86_64, ELF + PE) |
+| 3c | **Ortam degiskenleri**: `environ` dizisi + `GetEnvironmentVariableA` | ✅ (i386 + x86_64, ELF + PE) |
+| — | **Klavye: shift + caps lock** (US duzeni, buyuk harf ve noktalama) | ✅ (i386 + x86_64) |
 | — | **Kendi onyukleyicisi** + diske kurulum (`install`) | ✅ (i386) |
 | 8 | **`execve`** (surec kendi yerine program yukler) | ✅ (i386 + x86_64) |
 | 8 | **`fork`** (adres uzayi kopyasi + iki kez donen cagri) | ✅ (i386 + x86_64) |
@@ -93,6 +95,7 @@ Ekranda gorunenler:
   | uygulama/pencere | `apps` `run <ad> [argumanlar]` `win` `focus <id>` `mouse` |
   | uygulamalar (ELF) | `paint` `plasma` `notes` `menu` `twins` `relay` `echo2` `sigdemo` `race` `reaper` `redirect` `mux` `masked` `arena` `seeker` `browse` `waiter` `heir` `nested` `crash` `hog` `spin` |
   | uygulamalar (PE) | `winclock` (ham `int 0x2E`) `winpad` `winfiles` (IAT) -- i386'da PE32, x86_64'te PE32+ |
+  | ortam | `cd [dizin]` `pwd` `env` `set AD=deger` |
   | diger | `echo <metin>` `pipes` `clear` `help` |
 - **Sistem Gunlugu** -- cekirdek kaydinin canli goruntusu (konsol halka
   tamponu her karede pencereye cizilir).
@@ -1984,14 +1987,107 @@ arguman)`. Argumansiz calisan uygulamalar (`notes`, `menu`) etkilenmedi.
 
 ### Bilerek yapilmayanlar
 
-* **Ortam degiskeni yok.** `envp` sonlandiricisi yigina yine de konuyor:
-  onu okuyan bir program **bos bir dizi** gormeli, cop degil.
 * **`execve` dizi degil dize aliyor.** Gercek `execve` bir
   `char *const argv[]` alir; TCMK tek bir dize alip bolmeyi cekirdege
   birakiyor -- cunku ayni dize Win32 tarafinda **bolunmemis** halde
   gerekiyor.
 * **En fazla sekiz arguman** ve tirnak/kacis yok: bolme sade bosluk
   ayrimi.
+
+## Ortam degiskenleri: ayni tablo, iki ayri erisim bicimi
+
+Argumanlar geldiginde yigina bir `envp` sonlandiricisi konmustu ama
+**icerik yoktu**: onu okuyan bir program bos bir dizi goruyordu. Simdi
+dolu.
+
+Fark, argumanlardakinden bir adim daha derin. Orada ayrisan yalnizca
+**bicimdi** (dizi mi, tek dize mi); burada ayrisan **kimin aradigi**:
+
+```text
+  POSIX (ELF)   yiginda:  [argv NULL]["HOME=/tmp"]["PATH=/bin"][NULL]
+                cekirdek TABLOYU verir, aramayi program yapar
+                (gercek libc'de `getenv` de tam olarak bunu yapar)
+
+  Win32 (PE)    GetEnvironmentVariableA("HOME", buf, 64) -> 4
+                program ADI verir, aramayi CEKIRDEK yapar
+                (deger tampona yazilir; yer yetmezse gereken boy doner)
+```
+
+Bu yuzden `GetEnvironmentVariableA`nin donus sozlesmesi
+`GetCurrentDirectoryA` ile ayni kaliptadir: yer yeterse **yazilan**
+uzunluk (NUL haric), yetmezse **gereken** uzunluk (NUL dahil), degisken
+yoksa `0` ve `GetLastError` -> `ERROR_ENVVAR_NOT_FOUND` (203). POSIX
+tarafinda boyle bir hata kodu yok, cunku hata da yok: dizide ad
+bulunmazsa `None`.
+
+Cekirdekte tek bir tablo var (`level0a/core/env.rs`, 8 degisken x 64
+bayt) ve **her yeni surec baslangicta onun anlik goruntusunu aliyor**.
+Acilista `env::init()` uc degeri koyuyor; `HOME` disk bagliysa `/home`,
+degilse `/` -- var olmayan bir dizin vermek, `cd $HOME` diyen ilk
+programi bozardi.
+
+Kabuk tabloyu `set` ile degistiriyor:
+
+```text
+tcmk> env
+  HOME=/home
+  PATH=/bin
+  SHELL=tcmk
+tcmk> set HOME=/tmp
+ayarlandi: HOME=/tmp
+tcmk> run browse            -> getcwd:/tmp     (ELF, environ dizisi)
+tcmk> set HOME=/home
+tcmk> run winfiles          -> C:/home         (PE, GetEnvironmentVariableA)
+```
+
+Ekranda ikisi yan yana: solda `/tmp`'te acilmis `browse`, sagda
+`/home`'da acilmis `winfiles`. Ikisi de argumansiz calistirildi; yolu
+**ortamdan** aldilar, iki ayri ABI'den:
+
+![ortam degiskenleri](docs/screenshot-env.png)
+
+x86_64'te de ayni: `set HOME=/bin` -> argumansiz `browse` ->
+`getcwd:/bin`.
+
+### Buyuk harf: eksik olan konfor degil, yetenekti
+
+Bu is sirasinda gercek bir bosluk ortaya cikti. Klavye surucusu
+**yalnizca kucuk harf** uretiyordu -- ilk gunden beri oyleydi ve uzun
+sure fark edilmemisti, cunku komutlar (`ls`, `run`, `mkdir`) ve yollar
+hep kucuktu. Ortam degiskenleri gelenek geregi **buyuk** harflidir:
+`set HOME=/tmp` yazilamayan bir kabukta `HOME` kullanilamaz.
+
+Olcum bunu dogrudan gosterdi: `set HOME=/tmp` diye gonderilen tuslar
+ekrana `set home=/tmp` diye dustu ve tabloya **ayri bir** `home`
+degiskeni eklendi. Surucu artik shift ve caps lock tasiyor; ikisi ayri
+calisiyor, cunku etki alanlari ayri:
+
+* **Shift** her tusu etkiler (`1` -> `!`, `[` -> `{`) ve basili oldugu
+  surece gecerlidir -- birakma kodu (bit 7) ile duser. Noktalama esleri
+  icin ayri bir tablo var; `ch - 32` aritmetigi `/` -> `?` esini
+  veremezdi.
+* **Caps lock** yalnizca **harfleri** etkiler ve bir anahtardir: basma
+  aninda devrilir, birakma yok sayilir. Durum cubugunda `CAPS` yaziyor
+  -- gostergesiz bir kilit, tuslarin neden beklenmedik ciktigini
+  aciklanamaz kilardi.
+
+Harflerde ikisi birbirini **gotururur**: caps acikken `shift+a` yine
+kucuk `a` verir. Gercek klavyelerin davranisi budur.
+
+### Bilerek yapilmayanlar
+
+* **Ortam surece degil sisteme ait.** Gercek POSIX'te ortam surecin
+  adres uzayindadir: `fork` kopyalar, `execve` cagiranin verdigi `envp`
+  ile degistirir, `setenv` yalnizca kendi kopyasini bozar. TCMK'de
+  degisiklik anlik goruntuyle sinirli: surec kendi kopyasini
+  degistirebilir ama `execve`den sonra yasamaz.
+* **`setenv`/`putenv` yok.** Tabloyu yalnizca kabuk (`set`) degistiriyor;
+  boylece "oturum ortami" kavrami kabukta duruyor.
+* **`GetEnvironmentStringsA` yok.** Win32'nin toplu okuma cagrisi; TCMK
+  yalnizca adla sorgulamayi destekliyor.
+* **Sekiz degisken, 64 bayt** -- sabit tablo, dinamik ayirma yok.
+* **TR klavye duzeni yok.** Shift tablosu US; bir gun duzen eklenirse
+  degisecek yer o tek tablo.
 
 ## Kabuk komutlari artik ekrani dondurmuyor
 

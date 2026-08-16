@@ -52,6 +52,7 @@
 #![no_main]
 
 use tcmk::args;
+use tcmk::env;
 use tcmk::gui::Window;
 use tcmk::io::Stdout;
 use tcmk::sys::{self, ReadDir};
@@ -166,9 +167,11 @@ fn main() {
     let mut path = [0u8; MAX_PATH];
     let mut status = ("j/k sec  Enter gir  u ust", DIM);
 
-    // Arguman verildiyse orada acilir. Yol birlestirmesi yok: goreli ad
+    // Arguman verildiyse orada acilir; verilmediyse `HOME`. Ikisi de
+    // yoksa bulundugu dizinde kalir. Yol birlestirmesi yok: goreli ad
     // da olabilir, cekirdek surecin dizinine gore cozer.
-    if let Some(start) = args::first() {
+    let start = args::first().or_else(|| env::get("HOME"));
+    if let Some(start) = start {
         let mut target = [0u8; MAX_PATH];
         let taken = start.len().min(MAX_PATH - 1);
         target[..taken].copy_from_slice(&start.as_bytes()[..taken]);

@@ -80,6 +80,7 @@ pub const NT_SET_LAST_ERROR: u32 = 0x3019;
 pub const NT_SET_CURRENT_DIRECTORY: u32 = 0x301A;
 pub const NT_GET_CURRENT_DIRECTORY: u32 = 0x301B;
 pub const NT_GET_COMMAND_LINE_A: u32 = 0x301C;
+pub const NT_GET_ENVIRONMENT_VARIABLE_A: u32 = 0x301D;
 
 pub const NT_USER_CREATE_WINDOW_W32: u32 = 0x3010;
 pub const NT_GDI_GET_BITS_W32: u32 = 0x3011;
@@ -140,6 +141,8 @@ const ERROR_NOT_SUPPORTED: u32 = 50;
 const ERROR_DISK_FULL: u32 = 112;
 const ERROR_DIR_NOT_EMPTY: u32 = 145;
 const ERROR_ALREADY_EXISTS: u32 = 183;
+/// Adi verilen ortam degiskeni yok.
+const ERROR_ENVVAR_NOT_FOUND: u32 = 203;
 
 /// Surec basina son hata kodu.
 ///
@@ -739,6 +742,64 @@ fn dispatch_win32_api(frame: &mut SyscallFrame) {
         // Cekirdek argumanlari bir kez aliyor; ayrilan yalnizca sunum
         // (bkz. `process::build_start_stack`).
         NT_GET_COMMAND_LINE_A => crate::level0b1::process::command_line_ptr(),
+
+        // GetEnvironmentVariableA(lpName, lpBuffer, nSize) -> DWORD
+        //
+        // Win32'nin ortam erisimi POSIX'inkinden yine yapisal olarak
+        // farkli: burada **adla sorulur** ve deger tampona yazilir.
+        // POSIX tarafi ayni bilgiyi baslangic yigininda bir **dizi**
+        // (`environ`) olarak alir ve aramayi kendi yapar.
+        //
+        // Donus sozlesmesi `GetCurrentDirectoryA` ile ayni kalipta:
+        // yer yeterse yazilan uzunluk (NUL haric), yetmezse gereken
+        // uzunluk (NUL dahil), degisken yoksa 0.
+        NT_GET_ENVIRONMENT_VARIABLE_A => {
+            let mut name_storage = [0u8; PATH_MAX];
+            let name_len = arg_ptr(args, 0)
+                .and_then(|p| unsafe { copy_user_cstr(p, &mut name_storage) })
+                .map(|n| n.len());
+            let value = name_len
+                .and_then(|len| core::str::from_utf8(&name_storage[..len]).ok())
+                .and_then(crate::level0a::core::env::get);
+
+            match value {
+                // Degisken yok: Win32'de bu bir **hata**, bos dize
+                // degil. POSIX `getenv` yalnizca NULL doner; buradaki
+                // `GetLastError` ayrimi cagirana "yoktu" ile "tampon
+                // yetmedi"yi ayirt ettirir.
+                None => {
+                    set_last_error(ERROR_ENVVAR_NOT_FOUND);
+                    0
+                }
+                Some(value) => {
+                    let capacity = arg(args, 2).unwrap_or(0) as usize;
+                    match arg_ptr(args, 1) {
+                        Some(buffer) if buffer != 0 => {
+                            if capacity < value.len() + 1 {
+                                value.len() + 1
+                            } else if !mmu::is_user_accessible(buffer)
+                                || !mmu::is_user_accessible(buffer + value.len())
+                            {
+                                0
+                            } else {
+                                unsafe {
+                                    core::ptr::copy_nonoverlapping(
+                                        value.as_ptr(),
+                                        buffer as *mut u8,
+                                        value.len(),
+                                    );
+                                    (buffer as *mut u8).add(value.len()).write(0);
+                                }
+                                value.len()
+                            }
+                        }
+                        // Tampon verilmemis: yalnizca gereken boyut
+                        // sorulmus demektir (NUL dahil).
+                        _ => value.len() + 1,
+                    }
+                }
+            }
+        }
 
         // --- TCMKGUI.dll: pencere cagrilari ---
         NT_USER_CREATE_WINDOW_W32 => {

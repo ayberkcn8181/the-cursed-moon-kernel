@@ -9,7 +9,7 @@
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::level0a::core::{
-    cwd, dir, fd, frames, init, kmalloc, mmu, pipe, scheduler, tcmkfs, vfs,
+    cwd, dir, env, fd, frames, init, kmalloc, mmu, pipe, scheduler, tcmkfs, vfs,
 };
 use crate::level0a::drivers::{ata, block, gfx, partition, rtc};
 use crate::level0a::{exceptions, input, kernel_api, launcher, pit, wm};
@@ -496,6 +496,7 @@ fn execute(line: &str) {
             write_line("dosya:");
             write_line("  ls [-a] [dizin]  cat <yol>  save <yol> <metin>  cp <kaynak> <hedef>");
             write_line("  mv <kaynak> <hedef>  rm <yol>  mkdir <yol>  rmdir <yol>");
+            write_line("  env  set AD=deger");
             write_line("  mkdir <yol>  rmdir <yol>  cd [dizin]  pwd");
             write_line("uygulama / pencere:");
             write_line("  apps  run <ad>  win  focus <id>  mouse");
@@ -1325,6 +1326,39 @@ fn execute(line: &str) {
                         write_line("RAMFS dosyalari tasinamaz (cekirdek imajinda)")
                     }
                     Err(_) => write_line("tasinamadi"),
+                }
+            }
+        }
+        "env" => {
+            // Ortam tablosu **sistem geneli**: yeni baslatilan her surec
+            // bunun anlik goruntusunu yiginda `envp` olarak alir.
+            if env::count() == 0 {
+                write_line("ortam bos");
+            }
+            for i in 0..env::count() {
+                if let Some(text) = env::entry_at(i) {
+                    write_str("  ");
+                    write_line(text);
+                }
+            }
+        }
+        "set" => {
+            // `set AD=deger` -- deger bos birakilirsa degisken silinir.
+            match arg.find('=') {
+                None => write_line("kullanim: set AD=deger   (deger bossa silinir)"),
+                Some(i) => {
+                    let (name, value) = (&arg[..i], arg[i + 1..].trim());
+                    if env::set(name, value) {
+                        if value.is_empty() {
+                            write_str("silindi: ");
+                            write_line(name);
+                        } else {
+                            write_str("ayarlandi: ");
+                            write_line(arg);
+                        }
+                    } else {
+                        write_line("ayarlanamadi (tablo dolu ya da girdi cok uzun)");
+                    }
                 }
             }
         }

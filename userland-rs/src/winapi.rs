@@ -153,6 +153,17 @@ extern "system" {
     /// Ayni sozlesmeyi tek bicime indirmek iki taraftan birinin
     /// beklentisini bozardi.
     pub fn GetCommandLineA() -> *const u8;
+
+    /// Adi verilen ortam degiskeninin degerini `lpBuffer`a yazar.
+    ///
+    /// POSIX'te ayni bilgi baslangic yigininda bir `environ` **dizisi**
+    /// olarak gelir ve aramayi program yapar; burada arama cekirdekte,
+    /// program yalnizca adi verir. Donus sozlesmesi
+    /// `GetCurrentDirectoryA` ile ayni: yer yeterse yazilan uzunluk
+    /// (NUL haric), yetmezse gereken uzunluk (NUL dahil). Sifir
+    /// donmesi "degisken yok" demektir ve `GetLastError`
+    /// `ERROR_ENVVAR_NOT_FOUND` birakir.
+    pub fn GetEnvironmentVariableA(name: *const u8, buffer: *mut u8, size: Dword) -> Dword;
 }
 
 // --- `GetLastError` kodlari (Windows ile ayni sayilar) ----------------

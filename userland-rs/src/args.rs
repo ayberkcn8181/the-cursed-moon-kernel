@@ -44,6 +44,13 @@ static COUNT: AtomicUsize = AtomicUsize::new(0);
 /// icin once buraya kopyalaniyor.
 static mut CMDLINE: [u8; CMDLINE_MAX] = [0; CMDLINE_MAX];
 
+/// POSIX baslangic yigininda `environ` dizisinin adresi.
+///
+/// Argumanlarla ayni yiginda, `argv`nin NULL sonlandiricisindan hemen
+/// sonra durur -- bu yuzden onu bulan yer de burasi. `env` modulu
+/// diziyi buradan okur.
+static ENVIRON: AtomicUsize = AtomicUsize::new(0);
+
 fn record(pointer: usize, length: usize) {
     let index = COUNT.load(Ordering::Relaxed);
     if index >= MAX_ARGS {
@@ -79,6 +86,16 @@ pub unsafe fn init_posix(stack: *const usize) {
         }
         record(pointer, length);
     }
+
+    // `environ`: argv'nin NULL sonlandiricisindan hemen sonrasi.
+    // Konum **gercek** `argc`ye gore hesaplanir; MAX_ARGS budamasi
+    // yalnizca kac argumani sakladigimizi etkiler, yigin duzenini degil.
+    ENVIRON.store(stack.add(1 + argc + 1) as usize, Ordering::Relaxed);
+}
+
+/// POSIX `environ` dizisinin basi -- yoksa bos isaretci.
+pub fn environ() -> *const usize {
+    ENVIRON.load(Ordering::Relaxed) as *const usize
 }
 
 /// Win32: `GetCommandLineA`nin dondugu tek dizeyi parcalara ayirir.

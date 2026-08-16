@@ -218,6 +218,13 @@ static KERNEL32: &[Export] = &[
         service: nt::NT_GET_COMMAND_LINE_A,
         stack_bytes: 0,
     },
+    Export {
+        name: "GetEnvironmentVariableA",
+        ordinal: 23,
+        service: nt::NT_GET_ENVIRONMENT_VARIABLE_A,
+        // lpName, lpBuffer, nSize
+        stack_bytes: 12,
+    },
 ];
 
 /// `TCMKGUI.dll` -- win32k cagrilarinin kullanici modundaki yuzu.

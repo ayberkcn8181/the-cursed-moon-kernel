@@ -176,7 +176,7 @@ pub fn status_line() -> StatusLine {
     };
     let _ = write!(
         line,
-        "gorev:{}  pencere:{}  cerceve:{}  tick:{}  nabiz:{}",
+        "gorev:{}  pencere:{}  cerceve:{}  tick:{}  nabiz:{}{}",
         crate::level0a::core::scheduler::task_count(),
         wm::window_count(),
         // Cerceve sayisi durum cubugunda: bellek davranisi (talep
@@ -185,6 +185,14 @@ pub fn status_line() -> StatusLine {
         crate::level0a::core::frames::used(),
         crate::level0a::pit::ticks(),
         crate::level0a::pit::heartbeat(),
+        // Caps lock bir **anahtar**: acikken yazilan her harf degisir,
+        // ama ekranda hicbir izi olmaz. Gostergesiz bir kilit, tuslarin
+        // neden beklenmedik ciktigini aciklanamaz kilardi.
+        if crate::level0a::keyboard::caps_on() {
+            "  CAPS"
+        } else {
+            ""
+        },
     );
     line
 }

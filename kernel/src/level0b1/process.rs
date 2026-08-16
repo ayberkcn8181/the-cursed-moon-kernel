@@ -9,7 +9,7 @@
 //! ikisi de ayni Ring 3 ortamina, ayni kullanici bellek tabanina yuklenir.
 
 use crate::arch::cpu::usermode;
-use crate::level0a::core::{kmalloc, mmu, scheduler, vfs};
+use crate::level0a::core::{env, kmalloc, mmu, scheduler, vfs};
 use crate::level0a::gdt;
 use crate::level0a::kernel_api;
 #[cfg(target_arch = "x86")]
@@ -295,7 +295,7 @@ unsafe fn build_win32_command_line(
     (start - 16) & !15
 }
 
-/// POSIX: `argc`/`argv` dizisi, SysV baslangic yigini duzeninde.
+/// POSIX: `argc`/`argv`/`envp`, SysV baslangic yigini duzeninde.
 unsafe fn build_posix_stack(stack_top: usize, program: &str, args: &str) -> usize {
     let word = core::mem::size_of::<usize>();
 
@@ -325,23 +325,40 @@ unsafe fn build_posix_stack(stack_top: usize, program: &str, args: &str) -> usiz
         count += 1;
     }
 
+    // Ortam: sistem tablosunun **anlik goruntusu** (bkz. `core::env`).
+    // Her girdi `AD=deger` biciminde, tipki gercek `environ` gibi.
+    let mut environment = [0usize; env::MAX_VARS];
+    let mut env_count = 0usize;
+    for i in 0..env::count() {
+        if let Some(text) = env::entry_at(i) {
+            environment[env_count] = place(text, &mut sp);
+            env_count += 1;
+        }
+    }
+
     // Isaretci dizisi kelime hizali olmali.
     sp &= !(word - 1);
 
-    // [argc][argv0..argvN][NULL][envp NULL] -- ortam degiskeni yok, ama
-    // sonlandirici yine de konur: `envp`yi okuyan bir program bos bir
-    // dizi gormeli, cop degil.
-    let words = 1 + count + 1 + 1;
+    // [argc][argv0..argvN][NULL][envp0..envpM][NULL]
+    let words = 1 + count + 1 + env_count + 1;
     sp -= words * word;
     // x86_64 SysV: giriste yigin 16'ya hizali olmali.
     sp &= !15;
 
     (sp as *mut usize).write(count);
-    for (i, pointer) in pointers[..count].iter().enumerate() {
-        ((sp + (1 + i) * word) as *mut usize).write(*pointer);
+    let mut slot = 1usize;
+    for pointer in &pointers[..count] {
+        ((sp + slot * word) as *mut usize).write(*pointer);
+        slot += 1;
     }
-    ((sp + (1 + count) * word) as *mut usize).write(0);
-    ((sp + (2 + count) * word) as *mut usize).write(0);
+    // `argv` sonlandiricisi: `envp` hemen ardindan basliyor.
+    ((sp + slot * word) as *mut usize).write(0);
+    slot += 1;
+    for pointer in &environment[..env_count] {
+        ((sp + slot * word) as *mut usize).write(*pointer);
+        slot += 1;
+    }
+    ((sp + slot * word) as *mut usize).write(0);
     sp
 }
 

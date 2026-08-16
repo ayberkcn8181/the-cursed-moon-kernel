@@ -2,6 +2,7 @@
 
 pub mod cwd;
 pub mod dir;
+pub mod env;
 pub mod fd;
 pub mod frames;
 pub mod init;
