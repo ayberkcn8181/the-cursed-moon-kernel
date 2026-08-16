@@ -51,6 +51,8 @@ mod i386_numbers {
     pub const SYS_GETPID: usize = 20;
     pub const SYS_KILL: usize = 37;
     pub const SYS_SIGNAL: usize = 48;
+    /// i386'da `rt_sigaction`.
+    pub const SYS_SIGACTION: usize = 174;
     pub const SYS_SIGRETURN: usize = 119;
     pub const SYS_SIGPROCMASK: usize = 126;
     pub const SYS_ALARM: usize = 27;
@@ -89,8 +91,11 @@ mod x86_64_numbers {
     pub const SYS_WAITPID: usize = 61;
     pub const SYS_GETPID: usize = 39;
     pub const SYS_KILL: usize = 62;
-    /// x86_64'te klasik `signal` yoktur; yerini `rt_sigaction` alir.
-    pub const SYS_SIGNAL: usize = 13;
+    /// x86_64'te 13 gercekten `rt_sigaction`dir; sadelestirilmis
+    /// `signal` yuzu TCMK araligina alindi (kullanilmiyor -- `install`
+    /// artik libc gibi `sigaction` uzerine kuruluyor).
+    pub const SYS_SIGACTION: usize = 13;
+    pub const SYS_SIGNAL: usize = 0x50A;
     pub const SYS_SIGRETURN: usize = 15;
     pub const SYS_SIGPROCMASK: usize = 14;
     pub const SYS_ALARM: usize = 37;

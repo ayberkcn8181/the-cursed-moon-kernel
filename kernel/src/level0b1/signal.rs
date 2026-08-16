@@ -73,14 +73,41 @@ struct Disposition {
     handler: usize,
     /// Isleyici donduğunde ziplanacak tramplen (kullanici tarafi verir).
     restorer: usize,
+    /// `SA_*` bayraklari (bkz. `SA_NODEFER`, `SA_RESETHAND`).
+    flags: u32,
+    /// Isleyici kosarken **ek olarak** engellenecek sinyaller
+    /// (`sigaction`in `sa_mask` alani).
+    mask: u32,
 }
 
 impl Disposition {
     const DEFAULT: Self = Disposition {
         handler: SIG_DFL,
         restorer: 0,
+        flags: 0,
+        mask: 0,
     };
 }
+
+// --- `sigaction` bayraklari (Linux ile ayni sayilar) ------------------
+
+/// Isleyici kosarken **kendi sinyali engellenmez**.
+///
+/// Varsayilan POSIX davranisi tersidir: teslim edilen sinyal, isleyicisi
+/// kosarken otomatik engellenir. Bu bayrak o korumayi kaldirir, yani
+/// sinyal kendi isleyicisinin icinde yeniden teslim edilebilir.
+pub const SA_NODEFER: u32 = 0x4000_0000;
+
+/// Teslimden **once** yerlestirme `SIG_DFL`e doner (tek atimlik isleyici).
+///
+/// Eski `signal(2)` semantiginin ta kendisi; `sigaction` onu bayrak
+/// haline getirdi.
+pub const SA_RESETHAND: u32 = 0x8000_0000;
+
+/// Cekirdegin tanidigi bayraklar. Digerleri sessizce yok sayilir --
+/// `SA_RESTART` gibi, karsiligi olmayan bir bayragi kabul ediyormus gibi
+/// yapmak yaniltici olurdu (bkz. README).
+pub const SUPPORTED_FLAGS: u32 = SA_NODEFER | SA_RESETHAND;
 
 /// Surec basina yerlestirmeler. Gorev kimligiyle indekslenir; `fork`
 /// bunlari kopyalar (`clone_into`), `execve`/cikis sifirlar (`reset`).
@@ -95,12 +122,41 @@ static mut DISPOSITIONS: [[Disposition; MAX_SIGNAL as usize + 1]; scheduler::MAX
 const ZERO_PENDING: AtomicU32 = AtomicU32::new(0);
 static PENDING: [AtomicU32; scheduler::MAX_TASKS] = [ZERO_PENDING; scheduler::MAX_TASKS];
 
-/// Isleyiciye girilmeden onceki Ring 3 baglami. `sigreturn` bunu geri
-/// koyar. Tek katman: isleyici icinde yeni sinyal teslim edilmedigi icin
-/// yigin gerekmiyor.
-static mut SAVED: [UserContext; scheduler::MAX_TASKS] =
-    [UserContext::ZERO; scheduler::MAX_TASKS];
-static mut IN_HANDLER: [bool; scheduler::MAX_TASKS] = [false; scheduler::MAX_TASKS];
+/// Ic ice gecebilecek en fazla isleyici sayisi.
+///
+/// Onceden **tek** katman vardi ve bu, "isleyici icindeyken hicbir sinyal
+/// teslim edilmez" kuralini zorunlu kiliyordu: ikinci bir teslim tek
+/// yuvayi ezer ve surec asla eski baglamina donemezdi. Yani bir SIGALRM,
+/// suren bir SIGUSR1 isleyicisi yuzunden bekliyordu -- POSIX'te ise
+/// **yalnizca ayni sinyal** engellenir, farkli sinyaller ic ice teslim
+/// edilir.
+///
+/// Dort katman bilincli bir sinir: her katman bir `UserContext` +
+/// bir maske tutuyor, ve gercek programlarda ikiden derin ic ice sinyal
+/// zaten patolojiktir. Sinira dayanildiginda teslim **ertelenir**
+/// (sinyal `PENDING`de kalir), kaybolmaz.
+const NEST_DEPTH: usize = 4;
+
+/// Isleyiciye girilmeden onceki Ring 3 baglamlari -- **yigin**.
+/// `sigreturn` en usttekini geri koyar.
+static mut SAVED: [[UserContext; NEST_DEPTH]; scheduler::MAX_TASKS] =
+    [[UserContext::ZERO; NEST_DEPTH]; scheduler::MAX_TASKS];
+
+/// Her katmanda, isleyiciye girmeden **once** yururlukte olan maske.
+///
+/// `sigreturn` bunu geri koyar: POSIX'te isleyicinin ek engelleri
+/// (`sa_mask` + sinyalin kendisi) yalnizca isleyici suresince gecerlidir.
+static mut SAVED_MASK: [[u32; NEST_DEPTH]; scheduler::MAX_TASKS] =
+    [[0; NEST_DEPTH]; scheduler::MAX_TASKS];
+
+/// Kac isleyici ic ice suruyor (0 = normal akis).
+static DEPTH: [core::sync::atomic::AtomicUsize; scheduler::MAX_TASKS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; scheduler::MAX_TASKS];
+
+/// En derin ic ice teslim -- olcum icin.
+static MAX_NESTED: AtomicU32 = AtomicU32::new(0);
+/// Sinir dolu oldugu icin ertelenen teslim sayisi.
+static NEST_DEFERRED: AtomicU32 = AtomicU32::new(0);
 
 /// Surec basina **engellenen** sinyaller: bit N = sinyal N bloke.
 ///
@@ -205,6 +261,8 @@ pub fn set_handler(
     signo: u32,
     handler: usize,
     restorer: usize,
+    flags: u32,
+    mask: u32,
 ) -> Result<usize, SignalError> {
     if !valid(signo) {
         return Err(SignalError::InvalidSignal);
@@ -228,9 +286,39 @@ pub fn set_handler(
         let slot = (core::ptr::addr_of_mut!(DISPOSITIONS) as *mut Disposition)
             .add(task * (MAX_SIGNAL as usize + 1) + signo as usize);
         let old = slot.read().handler;
-        slot.write(Disposition { handler, restorer });
+        slot.write(Disposition {
+            handler,
+            restorer,
+            // Taninmayan bayraklar **atilir**. Kabul ediyormus gibi
+            // saklamak, `SA_RESTART` gibi karsiligi olmayan bir bayragin
+            // calistigi izlenimini verirdi.
+            flags: flags & SUPPORTED_FLAGS,
+            // SIGKILL hicbir yolla engellenemez; `sa_mask` de bir yol.
+            mask: mask & !UNBLOCKABLE,
+        });
         Ok(old)
     })
+}
+
+/// Bir sinyalin su anki isleyicisi (`sigaction`in `oldact` alani icin).
+pub fn handler_of(task: usize, signo: u32) -> usize {
+    if task >= scheduler::MAX_TASKS || !valid(signo) {
+        return SIG_DFL;
+    }
+    unsafe {
+        (core::ptr::addr_of!(DISPOSITIONS) as *const Disposition)
+            .add(task * (MAX_SIGNAL as usize + 1) + signo as usize)
+            .read()
+            .handler
+    }
+}
+
+/// En derin ic ice teslim ve sinir yuzunden ertelenen teslim sayisi.
+pub fn nesting_stats() -> (u32, u32) {
+    (
+        MAX_NESTED.load(Ordering::Relaxed),
+        NEST_DEFERRED.load(Ordering::Relaxed),
+    )
 }
 
 /// POSIX `sigprocmask`: engel maskesini okur/degistirir; **eski** maskeyi
@@ -424,9 +512,7 @@ pub fn clone_into(child: usize) {
             base.add(child * width),
             width,
         );
-        (core::ptr::addr_of_mut!(IN_HANDLER) as *mut bool)
-            .add(child)
-            .write(false);
+        DEPTH[child].store(0, Ordering::SeqCst);
     });
     PENDING[child].store(0, Ordering::SeqCst);
     // POSIX: cocuk ebeveynin engel maskesini **devralir**, ama bekleyen
@@ -450,9 +536,7 @@ pub fn reset(task: usize) {
         for i in 0..width {
             base.add(task * width + i).write(Disposition::DEFAULT);
         }
-        (core::ptr::addr_of_mut!(IN_HANDLER) as *mut bool)
-            .add(task)
-            .write(false);
+        DEPTH[task].store(0, Ordering::SeqCst);
     });
     PENDING[task].store(0, Ordering::SeqCst);
     // Engel maskesi POSIX'te `execve`'yi **asar** (yeni imaj ayni
@@ -529,9 +613,16 @@ pub unsafe fn deliver_pending(frame: &mut SyscallFrame) {
     if task >= scheduler::MAX_TASKS {
         return;
     }
-    // Isleyicinin icindeyken yeni sinyal teslim edilmez: tek katmanli
-    // `SAVED` yuvasi ezilir ve surec asla eski baglamina donemezdi.
-    if (core::ptr::addr_of!(IN_HANDLER) as *const bool).add(task).read() {
+    // Ic ice teslim artik **serbest** -- ayni sinyal degilse. POSIX
+    // kurali budur: teslim edilen sinyal kendi isleyicisi suresince
+    // engellenir (bkz. asagida `SA_NODEFER`), digerleri engellenmez.
+    //
+    // Tek sinir yigin derinligi. Dolduysa teslim ertelenir: sinyal
+    // `PENDING`de kalir ve bir isleyici dondugunde yeniden denenir.
+    if DEPTH[task].load(Ordering::SeqCst) >= NEST_DEPTH {
+        if PENDING[task].load(Ordering::SeqCst) & !BLOCKED[task].load(Ordering::SeqCst) != 0 {
+            NEST_DEFERRED.fetch_add(1, Ordering::Relaxed);
+        }
         return;
     }
 
@@ -554,9 +645,16 @@ pub unsafe fn deliver_pending(frame: &mut SyscallFrame) {
         PENDING[task].fetch_and(!(1 << signo), Ordering::SeqCst);
 
         let width = MAX_SIGNAL as usize + 1;
-        let d = (core::ptr::addr_of!(DISPOSITIONS) as *const Disposition)
-            .add(task * width + signo as usize)
-            .read();
+        let entry = (core::ptr::addr_of_mut!(DISPOSITIONS) as *mut Disposition)
+            .add(task * width + signo as usize);
+        let d = entry.read();
+
+        // `SA_RESETHAND`: yerlestirme **teslimden once** varsayilana
+        // doner, yani isleyici tek atimliktir. Eski `signal(2)`
+        // semantiginin ta kendisi.
+        if d.flags & SA_RESETHAND != 0 {
+            entry.write(Disposition::DEFAULT);
+        }
 
         match d.handler {
             SIG_IGN => continue,
@@ -573,10 +671,17 @@ pub unsafe fn deliver_pending(frame: &mut SyscallFrame) {
                 continue;
             }
             handler => {
+                let depth = DEPTH[task].load(Ordering::SeqCst);
                 let mut context = frame.user_context();
-                (core::ptr::addr_of_mut!(SAVED) as *mut UserContext)
-                    .add(task)
-                    .write(context);
+
+                // Baglam ve **o anki maske** birlikte saklanir: isleyici
+                // dondugunde ikisi de geri gelmeli.
+                let saved = core::ptr::addr_of_mut!(SAVED) as *mut UserContext;
+                saved.add(task * NEST_DEPTH + depth).write(context);
+                let saved_mask = core::ptr::addr_of_mut!(SAVED_MASK) as *mut u32;
+                saved_mask
+                    .add(task * NEST_DEPTH + depth)
+                    .write(blocked);
                 if usermode::build_signal_frame(&mut context, signo, handler, d.restorer)
                     .is_none()
                 {
@@ -589,9 +694,21 @@ pub unsafe fn deliver_pending(frame: &mut SyscallFrame) {
                     );
                     crate::level0a::kernel_api::exit_current_task(128 + signo);
                 }
-                (core::ptr::addr_of_mut!(IN_HANDLER) as *mut bool)
-                    .add(task)
-                    .write(true);
+                // POSIX: isleyici kosarken **kendi sinyali** engellenir
+                // (`SA_NODEFER` bunu kaldirir) ve `sa_mask`teki sinyaller
+                // de eklenir. Ayni sinyalin kendi isleyicisinde yeniden
+                // teslim edilmesi boylece engellenmis oluyor -- eskiden
+                // bu isi "hicbir sinyal teslim edilmez" kurali yapiyordu.
+                let mut extra = d.mask;
+                if d.flags & SA_NODEFER == 0 {
+                    extra |= 1 << signo;
+                }
+                BLOCKED[task].store((blocked | extra) & !UNBLOCKABLE, Ordering::SeqCst);
+
+                let depth = depth + 1;
+                DEPTH[task].store(depth, Ordering::SeqCst);
+                MAX_NESTED.fetch_max(depth as u32, Ordering::Relaxed);
+
                 frame.set_user_context(&context);
                 DELIVERED.fetch_add(1, Ordering::Relaxed);
                 return;
@@ -613,20 +730,31 @@ pub unsafe fn sigreturn(frame: &mut SyscallFrame) -> bool {
     if task >= scheduler::MAX_TASKS {
         return false;
     }
-    let in_handler = (core::ptr::addr_of!(IN_HANDLER) as *const bool).add(task);
-    if !in_handler.read() {
+    let depth = DEPTH[task].load(Ordering::SeqCst);
+    if depth == 0 {
         // Isleyici icinde degilken `sigreturn` cagirmak, kullanicinin
         // rastgele bir baglama zipladigi anlamina gelirdi.
         return false;
     }
+    let depth = depth - 1;
+    DEPTH[task].store(depth, Ordering::SeqCst);
+
     let context = (core::ptr::addr_of!(SAVED) as *const UserContext)
-        .add(task)
+        .add(task * NEST_DEPTH + depth)
         .read();
     frame.set_user_context(&context);
-    (core::ptr::addr_of_mut!(IN_HANDLER) as *mut bool)
-        .add(task)
-        .write(false);
+
+    // Isleyicinin ek engelleri yalnizca isleyici suresince gecerliydi.
+    let saved_mask = (core::ptr::addr_of!(SAVED_MASK) as *const u32)
+        .add(task * NEST_DEPTH + depth)
+        .read();
+    BLOCKED[task].store(saved_mask, Ordering::SeqCst);
+
     // POSIX: `sigsuspend`in maskesi isleyici **dondukten sonra** kalkar.
-    restore_mask(task);
+    // Yalnizca **en distaki** donuste: ic katmanlarda geri yuklenirse
+    // `sigsuspend` maskesi daha isleyici bitmeden kalkardi.
+    if depth == 0 {
+        restore_mask(task);
+    }
     true
 }

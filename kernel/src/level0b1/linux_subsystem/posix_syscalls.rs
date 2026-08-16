@@ -80,6 +80,8 @@ mod i386_numbers {
     /// (tramplen); gercek Linux'ta o deger `sigaction.sa_restorer`
     /// alanindan gelir -- yani fikir ayni, tasima yolu farkli.
     pub const SYS_SIGNAL: u32 = 48;
+    /// i386'da `rt_sigaction`. Yapi isaretciyle gelir (bkz. cagri).
+    pub const SYS_SIGACTION: u32 = 174;
     pub const SYS_SIGRETURN: u32 = 119;
     pub const SYS_SIGPROCMASK: u32 = 126;
     pub const SYS_ALARM: u32 = 27;
@@ -121,10 +123,11 @@ mod x86_64_numbers {
     pub const SYS_WAITPID: u32 = 61;
     pub const SYS_GETPID: u32 = 39;
     pub const SYS_KILL: u32 = 62;
-    /// x86_64'te klasik `signal` numarasi yoktur; yerini `rt_sigaction`
-    /// alir. TCMK ayni yuvayi sadelestirilmis uc registerli bicimle
-    /// kullanir (isleyici, tramplen) -- `sigaction` yapisi kopyalanmaz.
-    pub const SYS_SIGNAL: u32 = 13;
+    /// x86_64'te 13 **gercekten** `rt_sigaction`dir. Sadelestirilmis
+    /// `signal` yuzu icin ayri bir numara ayrildi: kullanici tarafi
+    /// zaten libc gibi `signal`i `sigaction` uzerine kuruyor.
+    pub const SYS_SIGACTION: u32 = 13;
+    pub const SYS_SIGNAL: u32 = 0x50A;
     pub const SYS_SIGRETURN: u32 = 15;
     /// x86_64'te klasik `sigprocmask` yoktur; `rt_sigprocmask` gecer.
     pub const SYS_SIGPROCMASK: u32 = 14;
@@ -198,6 +201,35 @@ fn store_status(ptr: usize, code: u32) -> bool {
 
 /// Kullanici alanindan gelen yol adinin en fazla uzunlugu.
 const PATH_MAX: usize = 128;
+
+/// `sigaction` yapisinin kelime sayisi: isleyici, tramplen, bayrak, maske.
+const SIGACTION_WORDS: usize = 4;
+
+/// Kullanici alanindan ardisik kelimeler okur.
+///
+/// Her kelime **ayri ayri** dogrulanir: yapi iki sayfaya yayilmis
+/// olabilir ve ikincisi kullaniciya ait olmayabilir.
+fn read_user_words(addr: usize, out: &mut [usize]) -> bool {
+    let width = core::mem::size_of::<usize>();
+    for (i, slot) in out.iter_mut().enumerate() {
+        let at = addr + i * width;
+        if !mmu::is_user_accessible(at) || !mmu::is_user_accessible(at + width - 1) {
+            return false;
+        }
+        *slot = unsafe { (at as *const usize).read_unaligned() };
+    }
+    true
+}
+
+/// Kullanici alanina tek bir kelime yazar.
+fn write_user_word(addr: usize, value: usize) -> bool {
+    let width = core::mem::size_of::<usize>();
+    if !mmu::is_user_accessible(addr) || !mmu::is_user_accessible(addr + width - 1) {
+        return false;
+    }
+    unsafe { (addr as *mut usize).write_unaligned(value) };
+    true
+}
 
 /// Kullanici isaretcisinden yol adini alip bir `kernel_api` cagrisina verir.
 ///
@@ -888,10 +920,62 @@ pub fn dispatch(frame: &mut SyscallFrame) {
             }
         }
 
+        // `sigaction(signo, act, oldact)` -- isleyiciyi **bayraklariyla**
+        // kaydeder.
+        //
+        // `signal(2)`den farki tam olarak bayraklar ve `sa_mask`: bir
+        // isleyici artik kendi sinyali disinda baska sinyalleri de
+        // engelleyebilir, ya da `SA_NODEFER` ile kendi sinyalini bile
+        // engellemeyebilir.
+        //
+        // Yapi kullanici alanindan **isaretciyle** gelir, gercek
+        // `rt_sigaction` gibi: dort kelime (isleyici, tramplen, bayrak,
+        // maske). Registerlere sigdirmak icin sadelestirmek, bayrak
+        // eklendikce yeniden bozulacak bir ABI demek olurdu.
+        SYS_SIGACTION => {
+            let task = crate::level0a::core::scheduler::current_id();
+            let mut act = [0usize; SIGACTION_WORDS];
+            if arg2 != 0 && !read_user_words(arg2, &mut act) {
+                -EFAULT
+            } else {
+                // Eski yerlestirme once okunur: `oldact` istenmisse
+                // degistirmeden onceki deger yazilmali.
+                let previous = signal::handler_of(task, arg1 as u32);
+                let result = if arg2 == 0 {
+                    // `act` NULL: yalnizca sorgu.
+                    Ok(previous)
+                } else {
+                    signal::set_handler(
+                        task,
+                        arg1 as u32,
+                        act[0],
+                        act[1],
+                        act[2] as u32,
+                        act[3] as u32,
+                    )
+                };
+                match result {
+                    Ok(old) => {
+                        if arg3 != 0 && !write_user_word(arg3, old) {
+                            -EFAULT
+                        } else {
+                            0
+                        }
+                    }
+                    Err(_) => -EINVAL,
+                }
+            }
+        }
+
         SYS_SIGNAL => {
             // arg1 = sinyal, arg2 = isleyici, arg3 = tramplen.
+            //
+            // Sadelestirilmis eski yuz: bayrak yok, `sa_mask` yok.
+            // Kullanici tarafi artik `sigaction`i kullaniyor; bu yol
+            // i386 Linux'un gercek `signal`(48) numarasi oldugu icin
+            // duruyor.
             let task = crate::level0a::core::scheduler::current_id();
-            match signal::set_handler(task, arg1 as u32, arg2, arg3) {
+            match signal::set_handler(task, arg1 as u32, arg2, arg3, 0, 0) {
                 Ok(previous) => previous as i32,
                 Err(_) => -EINVAL,
             }

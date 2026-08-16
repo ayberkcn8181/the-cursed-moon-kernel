@@ -850,6 +850,15 @@ fn execute(line: &str) {
             write_num(signal::suspend_count() as usize);
             write_str("   uyutulan gorev: ");
             write_num(scheduler::sig_waits());
+            // Ic ice teslim: en derin katman ve yigin doludur diye
+            // ertelenen teslim sayisi. Derinlik 1'den buyukse bir
+            // isleyicinin icinde baska bir sinyal kosmus demektir.
+            let (deepest, deferred) = signal::nesting_stats();
+            write_str("   ic ice: ");
+            write_num(deepest as usize);
+            write_str(" (ertelenen ");
+            write_num(deferred as usize);
+            write_str(")");
             newline();
             write_line("  id  gorev        isleyicili       bekleyen        engelli");
             for i in 0..scheduler::MAX_TASKS {

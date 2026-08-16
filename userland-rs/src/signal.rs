@@ -73,28 +73,110 @@ extern "C" {
     fn __tcmk_sigreturn();
 }
 
-/// Bir sinyal icin isleyici kurar; onceki isleyiciyi doner.
+// --- `sigaction` bayraklari (Linux ile ayni sayilar) ------------------
+
+/// Isleyici kosarken **kendi sinyali engellenmez**.
 ///
-/// `SIGKILL` icin basarisizdir (negatif doner) -- yakalanamaz.
-pub fn install(signo: u32, handler: extern "C" fn(u32)) -> isize {
+/// Varsayilan POSIX davranisi tersidir: teslim edilen sinyal, isleyicisi
+/// kosarken otomatik engellenir -- yani bir isleyici kendi kendini
+/// yeniden cagiramaz. Bu bayrak o korumayi kaldirir.
+pub const SA_NODEFER: u32 = 0x4000_0000;
+
+/// Teslimden **once** yerlestirme `SIG_DFL`e doner: tek atimlik isleyici.
+///
+/// Eski `signal(2)` semantiginin ta kendisi; `sigaction` onu bayrak
+/// haline getirdi.
+pub const SA_RESETHAND: u32 = 0x8000_0000;
+
+/// `sigaction`in cekirdege verdigi yapi -- dort kelime.
+///
+/// Gercek `struct sigaction`in sadelestirilmisi: `sa_handler`,
+/// `sa_restorer`, `sa_flags`, `sa_mask`. Registerlere sigdirmak yerine
+/// **isaretciyle** gecirilir, tipki `rt_sigaction` gibi; bayrak
+/// eklendikce bozulmayan tek tasima bicimi budur.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SigAction {
+    pub handler: usize,
+    pub restorer: usize,
+    pub flags: u32,
+    pub mask: u32,
+}
+
+/// Ham `sigaction` cagrisi. `old` NULL olabilir.
+fn sigaction_raw(signo: u32, act: *const SigAction, old: *mut usize) -> isize {
     unsafe {
         sys::syscall3(
-            sys::SYS_SIGNAL,
+            sys::SYS_SIGACTION,
             signo as usize,
-            handler as usize,
-            __tcmk_sigreturn as *const () as usize,
+            act as usize,
+            old as usize,
         ) as isize
     }
 }
 
+/// Bir sinyal icin isleyici kurar -- **bayraklariyla**.
+///
+/// `install` bunun bayraksiz halidir; libc'de `signal()`in `sigaction()`
+/// uzerine kurulmus olmasiyla ayni iliski.
+pub fn action(signo: u32, handler: extern "C" fn(u32), flags: u32, mask: u32) -> isize {
+    let act = SigAction {
+        handler: handler as usize,
+        restorer: __tcmk_sigreturn as *const () as usize,
+        flags,
+        mask,
+    };
+    sigaction_raw(signo, &act, core::ptr::null_mut())
+}
+
+/// Bir sinyal icin isleyici kurar; onceki isleyiciyi doner.
+///
+/// `SIGKILL` icin basarisizdir (negatif doner) -- yakalanamaz.
+pub fn install(signo: u32, handler: extern "C" fn(u32)) -> isize {
+    let mut previous = 0usize;
+    let act = SigAction {
+        handler: handler as usize,
+        restorer: __tcmk_sigreturn as *const () as usize,
+        flags: 0,
+        mask: 0,
+    };
+    let result = sigaction_raw(signo, &act, &mut previous);
+    if result < 0 {
+        result
+    } else {
+        previous as isize
+    }
+}
+
+/// Yerlestirmeyi degistirmeden **sorar**.
+pub fn current_handler(signo: u32) -> usize {
+    let mut previous = 0usize;
+    if sigaction_raw(signo, core::ptr::null(), &mut previous) < 0 {
+        return SIG_DFL;
+    }
+    previous
+}
+
 /// Sinyali yok saydirir.
 pub fn ignore(signo: u32) -> isize {
-    unsafe { sys::syscall3(sys::SYS_SIGNAL, signo as usize, SIG_IGN, 0) as isize }
+    let act = SigAction {
+        handler: SIG_IGN,
+        restorer: 0,
+        flags: 0,
+        mask: 0,
+    };
+    sigaction_raw(signo, &act, core::ptr::null_mut())
 }
 
 /// Varsayilan davranisa dondurur.
 pub fn default(signo: u32) -> isize {
-    unsafe { sys::syscall3(sys::SYS_SIGNAL, signo as usize, SIG_DFL, 0) as isize }
+    let act = SigAction {
+        handler: SIG_DFL,
+        restorer: 0,
+        flags: 0,
+        mask: 0,
+    };
+    sigaction_raw(signo, &act, core::ptr::null_mut())
 }
 
 /// Bir surece sinyal gonderir. POSIX'te `kill` "oldur" degil "sinyal

@@ -63,6 +63,7 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 8 | **POSIX sinyalleri** (`kill`/`signal`/`sigreturn`, isleyici cagrisi) | ✅ (i386 + x86_64) |
 | 8 | **Sinyal maskesi + `alarm`** (`sigprocmask`, PIT'ten `SIGALRM`) | ✅ (i386 + x86_64) |
 | 8 | **`pause`/`sigsuspend`** (sinyali **uyuyarak** beklemek) | ✅ (i386 + x86_64) |
+| 8 | **`sigaction`** + **ic ice teslim** (`SA_NODEFER`, `SA_RESETHAND`, `sa_mask`) | ✅ (i386 + x86_64) |
 | 8+ | musl/busybox | ⏳ yapilmadi |
 
 ## Grafiksel Alfa
@@ -89,7 +90,7 @@ Ekranda gorunenler:
   | bellek/disk | `mem` `disk` `df` `format onayla` `sync` `install onayla` |
   | dosya | `ls [dizin]` `mkdir <yol>` `rmdir <yol>` `cat <yol>` `save <yol> <metin>` `cp <kaynak> <hedef>` `mv <kaynak> <hedef>` `rm <yol>` |
   | uygulama/pencere | `apps` `run <ad>` `win` `focus <id>` `mouse` |
-  | uygulamalar (ELF) | `paint` `plasma` `notes` `menu` `twins` `relay` `echo2` `sigdemo` `race` `reaper` `redirect` `mux` `masked` `arena` `seeker` `browse` `waiter` `heir` `crash` `hog` `spin` |
+  | uygulamalar (ELF) | `paint` `plasma` `notes` `menu` `twins` `relay` `echo2` `sigdemo` `race` `reaper` `redirect` `mux` `masked` `arena` `seeker` `browse` `waiter` `heir` `nested` `crash` `hog` `spin` |
   | uygulamalar (PE) | `winclock` (ham `int 0x2E`) `winpad` `winfiles` (IAT) -- i386'da PE32, x86_64'te PE32+ |
   | diger | `echo <metin>` `pipes` `clear` `help` |
 - **Sistem Gunlugu** -- cekirdek kaydinin canli goruntusu (konsol halka
@@ -1857,6 +1858,79 @@ gosterir; yalin `*` ise gorelidir, "bulundugum dizin" demektir.
   calisan bir yol ile uygulamadan calisan ayni yol ayrisabilirdi.
 * **`fdopendir`/`openat` yok.** Goreli cozum yol adiyla yapilir, dizin
   tanimlayicisina gore degil.
+
+## `sigaction`: ic ice teslim ve bayraklar
+
+Bugune kadar bir isleyici koşarken **hicbir** sinyal teslim
+edilmiyordu. Sebep tasarimdaydi: saklanan Ring 3 baglami tek yuvaydi,
+ikinci bir teslim onu ezer ve surec asla eski yerine donemezdi. Yani
+suren bir `SIGUSR1` isleyicisi, gelen bir `SIGALRM`i bekletiyordu.
+
+POSIX kurali daha dar: **yalnizca ayni sinyal** engellenir. Farkli
+sinyaller ic ice teslim edilir. Baglam artik **dort katmanli bir yigin**
+oldugu icin TCMK de bunu yapabiliyor:
+
+| | onceden | simdi |
+|---|---|---|
+| farkli sinyal, isleyici icinde | bekler | **teslim edilir** |
+| ayni sinyal, isleyici icinde | bekler | bekler (POSIX kurali) |
+| ayni sinyal + `SA_NODEFER` | -- | **teslim edilir** |
+| engelleme mekanizmasi | "hicbir sinyal" bayragi | gercek maske |
+
+Yigin dolduğunda teslim **ertelenir** -- sinyal `PENDING`de kalir,
+kaybolmaz; `sigs` ciktisinda hem en derin katman hem ertelenen sayisi
+gorunur.
+
+### Bayraklar ve `sa_mask`
+
+`sigaction`, `signal(2)`den iki sey daha tasir: bayraklar ve
+isleyici suresince eklenecek engel maskesi.
+
+| bayrak | ne yapar |
+|---|---|
+| `SA_NODEFER` | isleyici kendi sinyalini engellemez |
+| `SA_RESETHAND` | teslimden once yerlestirme `SIG_DFL`e doner |
+| `sa_mask` | isleyici suresince **ek** sinyaller engellenir |
+
+Yapi cekirdege **isaretciyle** gecer (dort kelime: isleyici, tramplen,
+bayrak, maske), tipki gercek `rt_sigaction` gibi. Registerlere
+sigdirmak icin sadelestirmek, bayrak eklendikce yeniden bozulacak bir
+ABI demek olurdu.
+
+Kullanici tarafinda `signal()` artik `sigaction()` **uzerine kurulu** --
+libc'de de oyledir. Bunun bir yan faydasi x86_64'te goruldu: orada 13
+numara gercekten `rt_sigaction`dir, ve sadelestirilmis `signal` yuzu o
+numarayi odunc almayi birakti.
+
+### Dort sinav, hepsi belirlenimli
+
+`nested` uygulamasi sinyalleri **kendine** gonderiyor ve `alarm` her
+zaman firliyor; yani sinavlarin hicbiri zamanlama sansina bagli degil:
+
+![sigaction](docs/screenshot-sigaction.png)
+
+```text
+[nested] A ic ice farkli sinyal: gecti (SIGALRM, SIGUSR1'in icinde kostu)
+[nested] B ayni sinyal engelli:  gecti (ic ice girmedi, teslim ertelendi)
+[nested] C SA_NODEFER:           gecti (ayni sinyal kendi icinde teslim edildi)
+[nested] D SA_RESETHAND:         gecti (bir kez kostu, yerlestirme SIG_DFL'e dondu)
+```
+
+B ile C ayni programin ayni isleyicisi, tek farki bayrak -- yani
+karsilastirma baska hicbir degiskene bagli degil. Iki mimaride de dort
+sinav geciyor. `masked`, `waiter` ve `sigdemo` da teslim makinesi
+degistikten sonra ayni sekilde calisiyor (regresyon kosusu).
+
+### Bilerek yapilmayanlar
+
+* **`SA_RESTART` ve `SA_SIGINFO` yok** ve **kabul de edilmiyor**:
+  taninmayan bayraklar `set_handler`da atiliyor. Saklamak, karsiligi
+  olmayan bir bayragin calistigi izlenimini verirdi. `SA_RESTART`in
+  anlamli olmasi icin once kesilebilir bir bloklayan cagri gerekir;
+  `pause`/`sigsuspend` POSIX'te zaten hicbir kosulda yeniden
+  baslatilmaz.
+* **Dort katman siniri.** Gercek programlarda ikiden derin ic ice
+  sinyal patolojiktir; sinira dayanildiginda teslim ertelenir.
 
 ## Kabuk komutlari artik ekrani dondurmuyor
 
