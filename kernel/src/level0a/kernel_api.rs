@@ -7,7 +7,7 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::level0a::core::{cwd, fd, pipe, scheduler, tcmkfs, vfs};
+use crate::level0a::core::{cwd, env, fd, pipe, scheduler, tcmkfs, vfs};
 
 /// Standart POSIX tanimlayicilari.
 pub const FD_STDIN: u32 = 0;
@@ -198,6 +198,35 @@ pub fn chdir(path: &str) -> Result<(), KernelError> {
 /// POSIX `getcwd`: surecin calisma dizini.
 pub fn getcwd() -> &'static str {
     cwd::current()
+}
+
+/// Surecin ortamindan bir degisken okur.
+///
+/// POSIX tarafinda bu cagri **gereksizdir** -- program ayni bilgiyi
+/// baslangic yigininda dizi olarak aldi ve aramayi kendi yapiyor.
+/// Win32 tarafi (`GetEnvironmentVariableA`) ise adla soruyor; cagri
+/// onun icin var.
+pub fn getenv(name: &str) -> Option<&'static str> {
+    env::get(scheduler::current_id(), name)
+}
+
+/// Surecin ortamindaki bir degiskeni degistirir.
+///
+/// Deger bos verilirse degisken **silinir** (Win32'de
+/// `SetEnvironmentVariableA(name, NULL)` ile ayni anlam).
+///
+/// Degisiklik yalnizca **cagiran surecin** tablosunu etkiler: kardesler
+/// gormez, ama `fork` ile dogan cocuk ve `execve` ile yuklenen yeni imaj
+/// gorur -- cunku ikisi de ayni yuvadan devam eder.
+pub fn setenv(name: &str, value: &str) -> Result<(), KernelError> {
+    if name.is_empty() || name.contains('=') {
+        return Err(KernelError::NotSupported);
+    }
+    if env::set(scheduler::current_id(), name, value) {
+        Ok(())
+    } else {
+        Err(KernelError::NoSpace)
+    }
 }
 
 /// Yola gore dosya acar ve yeni bir tanimlayici dondurur.

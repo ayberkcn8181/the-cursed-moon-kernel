@@ -81,6 +81,7 @@ pub const NT_SET_CURRENT_DIRECTORY: u32 = 0x301A;
 pub const NT_GET_CURRENT_DIRECTORY: u32 = 0x301B;
 pub const NT_GET_COMMAND_LINE_A: u32 = 0x301C;
 pub const NT_GET_ENVIRONMENT_VARIABLE_A: u32 = 0x301D;
+pub const NT_SET_ENVIRONMENT_VARIABLE_A: u32 = 0x301E;
 
 pub const NT_USER_CREATE_WINDOW_W32: u32 = 0x3010;
 pub const NT_GDI_GET_BITS_W32: u32 = 0x3011;
@@ -141,6 +142,8 @@ const ERROR_NOT_SUPPORTED: u32 = 50;
 const ERROR_DISK_FULL: u32 = 112;
 const ERROR_DIR_NOT_EMPTY: u32 = 145;
 const ERROR_ALREADY_EXISTS: u32 = 183;
+/// Cagriya verilen parametre gecersiz (bos ad, okunamayan isaretci).
+const ERROR_INVALID_PARAMETER: u32 = 87;
 /// Adi verilen ortam degiskeni yok.
 const ERROR_ENVVAR_NOT_FOUND: u32 = 203;
 
@@ -760,7 +763,7 @@ fn dispatch_win32_api(frame: &mut SyscallFrame) {
                 .map(|n| n.len());
             let value = name_len
                 .and_then(|len| core::str::from_utf8(&name_storage[..len]).ok())
-                .and_then(crate::level0a::core::env::get);
+                .and_then(kernel_api::getenv);
 
             match value {
                 // Degisken yok: Win32'de bu bir **hata**, bos dize
@@ -797,6 +800,45 @@ fn dispatch_win32_api(frame: &mut SyscallFrame) {
                         // sorulmus demektir (NUL dahil).
                         _ => value.len() + 1,
                     }
+                }
+            }
+        }
+
+        // SetEnvironmentVariableA(lpName, lpValue) -> BOOL
+        //
+        // Windows'ta bu cagri surecin **kendi** ortam blogunu degistirir;
+        // baska surecleri etkilemez ama `CreateProcess` ile dogan cocuga
+        // gecer. TCMK'de de oyle: tablo gorev yuvasina bagli, `fork`
+        // kopyalar, `execve` korur.
+        //
+        // `lpValue` NULL verilirse degisken **silinir** -- Windows'un
+        // sozlesmesi bu, ve POSIX tarafindaki `unsetenv`in karsiligi.
+        NT_SET_ENVIRONMENT_VARIABLE_A => {
+            let mut name_storage = [0u8; PATH_MAX];
+            let name_len = arg_ptr(args, 0)
+                .and_then(|p| unsafe { copy_user_cstr(p, &mut name_storage) })
+                .map(|n| n.len());
+            let mut value_storage = [0u8; PATH_MAX];
+            // NULL isaretci ile bos dize ayni sonuca ciksa da yollari
+            // ayri: NULL hic okunmaz, bos dize okunur ve bos bulunur.
+            let value_len = match arg_ptr(args, 1) {
+                Some(0) | None => Some(0),
+                Some(p) => unsafe { copy_user_cstr(p, &mut value_storage) }.map(|v| v.len()),
+            };
+
+            let name = name_len.and_then(|len| core::str::from_utf8(&name_storage[..len]).ok());
+            let value = value_len.and_then(|len| core::str::from_utf8(&value_storage[..len]).ok());
+            match (name, value) {
+                (Some(name), Some(value)) => match kernel_api::setenv(name, value) {
+                    Ok(()) => WIN32_TRUE,
+                    Err(e) => {
+                        set_last_error(win32_error_of(e));
+                        WIN32_FALSE
+                    }
+                },
+                _ => {
+                    set_last_error(ERROR_INVALID_PARAMETER);
+                    WIN32_FALSE
                 }
             }
         }

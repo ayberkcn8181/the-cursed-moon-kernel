@@ -164,6 +164,17 @@ extern "system" {
     /// donmesi "degisken yok" demektir ve `GetLastError`
     /// `ERROR_ENVVAR_NOT_FOUND` birakir.
     pub fn GetEnvironmentVariableA(name: *const u8, buffer: *mut u8, size: Dword) -> Dword;
+
+    /// Surecin **kendi** ortam blogundaki bir degiskeni degistirir.
+    ///
+    /// Windows'ta da boyledir: cagri baska surecleri etkilemez ama
+    /// `CreateProcess` ile dogan cocuga gecer. `lpValue` NULL verilirse
+    /// degisken silinir -- POSIX'in `unsetenv`i.
+    ///
+    /// POSIX tarafinda bunun karsiligi bir sistem cagrisi **degildir**:
+    /// orada ortam surecin kendi belleginde durur ve `setenv` onu
+    /// dogrudan duzenler.
+    pub fn SetEnvironmentVariableA(name: *const u8, value: *const u8) -> Bool;
 }
 
 // --- `GetLastError` kodlari (Windows ile ayni sayilar) ----------------
@@ -179,6 +190,9 @@ pub const ERROR_NOT_SUPPORTED: Dword = 50;
 pub const ERROR_DISK_FULL: Dword = 112;
 pub const ERROR_DIR_NOT_EMPTY: Dword = 145;
 pub const ERROR_ALREADY_EXISTS: Dword = 183;
+/// `GetEnvironmentVariableA` adi bulamayinca birakir. Sifir donusu ile
+/// birlikte "yok" demektir -- POSIX'te bunun karsiligi yalnizca `NULL`.
+pub const ERROR_ENVVAR_NOT_FOUND: Dword = 203;
 
 /// `FILETIME` -- 1601-01-01'den beri gecen 100 nanosaniyelik araliklar.
 ///

@@ -24,6 +24,10 @@ path = "src/win/notepad.rs"
 name = "winfiles"
 path = "src/win/explorer.rs"
 
+[[bin]]
+name = "winenv"
+path = "src/win/envtest.rs"
+
 [profile.dev]
 panic = "abort"
 opt-level = 1

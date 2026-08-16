@@ -100,6 +100,9 @@ pub unsafe fn fork(frame: &SyscallFrame) -> Result<usize, ForkError> {
     crate::level0b1::signal::clone_into(child);
     // POSIX: cocuk ebeveynin calisma dizininde dogar.
     crate::level0a::core::cwd::clone_into(child);
+    // ...ve ebeveynin ortamiyla. Kopya oldugu icin cocugun `setenv`i
+    // ebeveyne yansimaz -- gercek `fork` davranisi.
+    crate::level0a::core::env::clone_into(child, parent);
 
     scheduler::set_address_space(child, child_space);
 

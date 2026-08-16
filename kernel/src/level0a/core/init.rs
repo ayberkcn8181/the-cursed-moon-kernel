@@ -187,8 +187,8 @@ pub unsafe fn bring_up(ramfs_files: &[(&'static str, &'static [u8])]) {
     super::env::init();
     crate::println!(
         "[LEVEL-0a] ortam: {} degisken (HOME={})",
-        super::env::count(),
-        super::env::get("HOME").unwrap_or("?")
+        super::env::count(super::env::SESSION),
+        super::env::get(super::env::SESSION, "HOME").unwrap_or("?")
     );
 
     crate::println!(

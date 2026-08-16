@@ -278,6 +278,11 @@ fn spawn_inner(
         // kullanir, yeni bir yuva ayirmaz. `fork` ise ayri yuva aldigi
         // icin ebeveynin dizinini ayrica kopyalar (bkz. `cwd::clone_into`).
         crate::level0a::core::cwd::reset(index);
+        // Ortam da yuvaya bagli ve ayni gerekceyle: `execve` korusun,
+        // `fork` ayrica kopyalasin. Yeni yuva **oturum tablosundan**
+        // doguyor -- kabukta `set` ile kurulan ortam boylece miras
+        // kaliyor.
+        crate::level0a::core::env::reset(index);
 
         Some(index)
     })

@@ -118,6 +118,11 @@ pub const SYS_YIELD: usize = 0x506;
 pub const SYS_WIN_POS: usize = 0x507;
 pub const SYS_SLEEP: usize = 0x508;
 pub const SYS_EXECVE: usize = 0x509;
+/// `setenv`/`unsetenv`. Linux'ta boyle bir sistem cagrisi yoktur --
+/// orada ortam surecin kendi belleginde ve libc'nin isidir. TCMK'de
+/// tablo cekirdekte oldugu icin cagri gerekiyor; numaranin TCMK
+/// araliginda olmasi da bunu soyluyor.
+pub const SYS_SETENV: usize = 0x50B;
 
 pub const STDIN: usize = 0;
 pub const STDOUT: usize = 1;
@@ -463,6 +468,21 @@ pub unsafe fn chdir(path: *const u8) -> isize {
     syscall1(SYS_CHDIR, path as usize) as isize
 }
 
+/// Surecin ortamindaki bir degiskeni degistirir.
+///
+/// `value` bos (ya da NULL) verilirse degisken **silinir** --
+/// `unsetenv`in karsiligi.
+///
+/// Degisiklik yalnizca **bu** surecin tablosunda: kardesler gormez, ama
+/// `fork` ile dogan cocuk ve `execve` ile yuklenen yeni imaj gorur.
+///
+/// # Safety
+/// `name` ve `value` NUL sonlandirmali gecerli diziler olmalidir
+/// (`value` icin NULL da kabul edilir).
+pub unsafe fn setenv(name: *const u8, value: *const u8) -> isize {
+    syscall2(SYS_SETENV, name as usize, value as usize) as isize
+}
+
 /// POSIX `getcwd`: calisma dizinini `buf`a yazar.
 ///
 /// Linux sozlesmesi: **uzunlugu** (sondaki NUL dahil) doner; tampon
@@ -609,12 +629,33 @@ pub fn yield_now() {
 /// birakir, ayni gorevde yeni programi yukler. Hata halinde negatif
 /// errno doner (dosya yok, yol gecersiz).
 pub fn execve(path: &str) -> isize {
-    let mut buf = [0u8; 64];
-    if path.len() >= buf.len() {
+    execve_args(path, "")
+}
+
+/// Argumanli `execve`.
+///
+/// Yeni imaj bunlari POSIX tarafinda `argv` dizisi, Win32 tarafinda
+/// `GetCommandLineA`nin dondugu tek dize olarak gorur -- cekirdek
+/// argumanlari bir kez aliyor, ayrilan yalnizca sunum.
+pub fn execve_args(path: &str, args: &str) -> isize {
+    let mut path_buf = [0u8; 64];
+    let mut args_buf = [0u8; 96];
+    if path.len() >= path_buf.len() || args.len() >= args_buf.len() {
         return -22; // -EINVAL
     }
-    buf[..path.len()].copy_from_slice(path.as_bytes());
-    unsafe { syscall1(SYS_EXECVE, buf.as_ptr() as usize) as isize }
+    path_buf[..path.len()].copy_from_slice(path.as_bytes());
+    args_buf[..args.len()].copy_from_slice(args.as_bytes());
+    unsafe {
+        syscall2(
+            SYS_EXECVE,
+            path_buf.as_ptr() as usize,
+            if args.is_empty() {
+                0
+            } else {
+                args_buf.as_ptr() as usize
+            },
+        ) as isize
+    }
 }
 
 /// Sureci en az `ms` milisaniye uyutur.

@@ -1332,11 +1332,11 @@ fn execute(line: &str) {
         "env" => {
             // Ortam tablosu **sistem geneli**: yeni baslatilan her surec
             // bunun anlik goruntusunu yiginda `envp` olarak alir.
-            if env::count() == 0 {
+            if env::count(env::SESSION) == 0 {
                 write_line("ortam bos");
             }
-            for i in 0..env::count() {
-                if let Some(text) = env::entry_at(i) {
+            for i in 0..env::count(env::SESSION) {
+                if let Some(text) = env::entry_at(env::SESSION, i) {
                     write_str("  ");
                     write_line(text);
                 }
@@ -1348,7 +1348,7 @@ fn execute(line: &str) {
                 None => write_line("kullanim: set AD=deger   (deger bossa silinir)"),
                 Some(i) => {
                     let (name, value) = (&arg[..i], arg[i + 1..].trim());
-                    if env::set(name, value) {
+                    if env::set(env::SESSION, name, value) {
                         if value.is_empty() {
                             write_str("silindi: ");
                             write_line(name);

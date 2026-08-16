@@ -225,6 +225,13 @@ static KERNEL32: &[Export] = &[
         // lpName, lpBuffer, nSize
         stack_bytes: 12,
     },
+    Export {
+        name: "SetEnvironmentVariableA",
+        ordinal: 24,
+        service: nt::NT_SET_ENVIRONMENT_VARIABLE_A,
+        // lpName, lpValue
+        stack_bytes: 8,
+    },
 ];
 
 /// `TCMKGUI.dll` -- win32k cagrilarinin kullanici modundaki yuzu.

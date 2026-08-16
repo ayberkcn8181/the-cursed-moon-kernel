@@ -33,3 +33,4 @@ SetCurrentDirectoryA@4 @20
 GetCurrentDirectoryA@8 @21
 GetCommandLineA@0 @22
 GetEnvironmentVariableA@12 @23
+SetEnvironmentVariableA@8 @24

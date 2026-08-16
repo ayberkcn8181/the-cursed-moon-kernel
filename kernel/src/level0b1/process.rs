@@ -325,12 +325,16 @@ unsafe fn build_posix_stack(stack_top: usize, program: &str, args: &str) -> usiz
         count += 1;
     }
 
-    // Ortam: sistem tablosunun **anlik goruntusu** (bkz. `core::env`).
-    // Her girdi `AD=deger` biciminde, tipki gercek `environ` gibi.
+    // Ortam: **calisan gorevin kendi tablosu** (bkz. `core::env`). Yuva
+    // ayrilirken oturumdan kopyalanmis, `fork`ta ebeveynden devralinmis,
+    // `setenv` ile degistirilmis olabilir -- yigina yazilan o son
+    // halidir. Her girdi `AD=deger` biciminde, tipki gercek `environ`
+    // gibi.
+    let table = crate::level0a::core::scheduler::current_id();
     let mut environment = [0usize; env::MAX_VARS];
     let mut env_count = 0usize;
-    for i in 0..env::count() {
-        if let Some(text) = env::entry_at(i) {
+    for i in 0..env::count(table) {
+        if let Some(text) = env::entry_at(table, i) {
             environment[env_count] = place(text, &mut sp);
             env_count += 1;
         }

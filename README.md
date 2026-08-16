@@ -50,6 +50,7 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 9e | **`chdir`/`getcwd`** + Win32 ikizleri (surec basina calisma dizini) | ✅ (i386 + x86_64, ELF + PE) |
 | 3b | **Program argumanlari**: SysV `argc`/`argv` + `GetCommandLineA` | ✅ (i386 + x86_64, ELF + PE) |
 | 3c | **Ortam degiskenleri**: `environ` dizisi + `GetEnvironmentVariableA` | ✅ (i386 + x86_64, ELF + PE) |
+| 3d | **Surec basina ortam**: `setenv` + `SetEnvironmentVariableA` (fork/execve mirasi) | ✅ (i386 + x86_64, ELF + PE) |
 | — | **Klavye: shift + caps lock** (US duzeni, buyuk harf ve noktalama) | ✅ (i386 + x86_64) |
 | — | **Kendi onyukleyicisi** + diske kurulum (`install`) | ✅ (i386) |
 | 8 | **`execve`** (surec kendi yerine program yukler) | ✅ (i386 + x86_64) |
@@ -93,8 +94,8 @@ Ekranda gorunenler:
   | bellek/disk | `mem` `disk` `df` `format onayla` `sync` `install onayla` |
   | dosya | `ls [dizin]` `mkdir <yol>` `rmdir <yol>` `cat <yol>` `save <yol> <metin>` `cp <kaynak> <hedef>` `mv <kaynak> <hedef>` `rm <yol>` |
   | uygulama/pencere | `apps` `run <ad> [argumanlar]` `win` `focus <id>` `mouse` |
-  | uygulamalar (ELF) | `paint` `plasma` `notes` `menu` `twins` `relay` `echo2` `sigdemo` `race` `reaper` `redirect` `mux` `masked` `arena` `seeker` `browse` `waiter` `heir` `nested` `crash` `hog` `spin` |
-  | uygulamalar (PE) | `winclock` (ham `int 0x2E`) `winpad` `winfiles` (IAT) -- i386'da PE32, x86_64'te PE32+ |
+  | uygulamalar (ELF) | `paint` `plasma` `notes` `menu` `twins` `relay` `echo2` `sigdemo` `race` `reaper` `redirect` `mux` `masked` `arena` `seeker` `browse` `waiter` `heir` `nested` `bequest` `crash` `hog` `spin` |
+  | uygulamalar (PE) | `winclock` (ham `int 0x2E`) `winpad` `winfiles` `winenv` (IAT) -- i386'da PE32, x86_64'te PE32+ |
   | ortam | `cd [dizin]` `pwd` `env` `set AD=deger` |
   | diger | `echo <metin>` `pipes` `clear` `help` |
 - **Sistem Gunlugu** -- cekirdek kaydinin canli goruntusu (konsol halka
@@ -2074,17 +2075,112 @@ calisiyor, cunku etki alanlari ayri:
 Harflerde ikisi birbirini **gotururur**: caps acikken `shift+a` yine
 kucuk `a` verir. Gercek klavyelerin davranisi budur.
 
+### Ortam artik surecin
+
+Ilk surumde tablo **sistem geneliydi** ve her surec baslangicta onun
+anlik goruntusunu aliyordu. Okumak icin yetiyordu, ama bir sureci kendi
+ortamini degistiremez birakiyordu: `setenv` yoktu, cunku yazacak yer
+yoktu.
+
+Artik her gorev yuvasinin kendi tablosu var ve POSIX'in uc kurali --
+`cwd`de oldugu gibi -- oldugu gibi geciyor:
+
+| olay | ortam |
+|---|---|
+| yeni gorev yuvasi | **oturum tablosunun** kopyasi (`spawn_inner`) |
+| `fork` | ebeveynden kopyalanir |
+| `execve` | **degismez** -- yuva ayni kaldigi icin kendiliginden |
+
+Ucuncu satir yine tasarimin sonucu, ayri bir kod degil: sifirlama imaj
+yuklenirken degil **yuva ayrilirken** yapiliyor, `execve` de yuvayi
+yeniden kullaniyor. Gercek POSIX ayni sonuca `execve(path, argv,
+environ)` deyimiyle varir -- cagiran kendi ortamini acikca aktarir.
+
+Tablolar `MAX_TASKS + 1` satirlik tek bir dizi; son satir (`SESSION`)
+hicbir goreve ait degil, kabugun `set` ile duzenledigi **oturum
+ortamidir**. Ayri bir tur yerine ayni dizinin bir satiri olmasi,
+"kopyala" isleminin her yerde tek bir kalip olmasini sagliyor.
+
+#### `bequest`: dort sinav, hepsi belirlenimli
+
+```text
+tcmk> run bequest
+[bequest] A setenv kendinde:  gecti (get() yeni degeri gordu)
+[bequest] B fork mirasi:      gecti (cocuk 'alfa' gordu)
+[bequest] C kardes yalitimi:  gecti (cocugun yazdigi ebeveyne sizmadi)
+[bequest] D: TCMK_MIRAS=beta yazildi, execve...
+[bequest] D execve sonrasi:   gecti (TCMK_MIRAS=beta)
+```
+
+D sinavi programin **kendisini** yeniden yukluyor: ayni ikili, iki
+asama, ayrimi arguman yapiyor. Cocugun cevabi ekrana yazarak degil
+**cikis koduyla** geliyor -- iki surecin ciktisi ayni konsolda
+karisabilir, cikis kodu karisamaz.
+
+![bequest](docs/screenshot-bequest.png)
+
+x86_64'te de dordu birden geciyor.
+
+#### `setenv` neden bir sistem cagrisi (ve Win32'de neden dogal)
+
+Gercek POSIX'te `setenv` **cekirdege hic ugramaz**: ortam surecin kendi
+belleginde bir dizidir, libc onu dogrudan duzenler. TCMK'de tablo
+cekirdekte oldugu icin bir cagri gerekiyor -- numarasi da bu yuzden
+Linux araliginda degil TCMK araliginda (`0x50B`).
+
+Win32 tarafinda ayni islev **zaten** bir cekirdek cagrisidir:
+`SetEnvironmentVariableA` sureci temsil eden blogu degistirir, kullanici
+dizisini degil. Yani TCMK'nin sadelestirmesi bir tarafta ayrilik, oteki
+tarafta tam isabet.
+
+Bunun gorunur bir sonucu var: POSIX tarafinda okuma yigindaki **anlik
+goruntuden** yapildigi icin, cekirdege yazmak o goruntuyu degistirmez.
+`tcmk::env::set` bu yuzden iki is yapiyor -- cekirdege bildiriyor
+(cocuklarin gorecegi ortam) **ve** yerel bir katmani guncelliyor (bu
+surecin `get`inin gorecegi deger). Gercek libc'nin `setenv`i de tam
+olarak ikincisini yapar. Win32 tarafinda yerel katman yok, cunku okuma
+zaten cekirdege soruluyor.
+
+#### `winenv`: Win32'nin donus sozlesmesi
+
+POSIX'in `getenv`i isaretci ya da NULL doner, baska bilgi tasimaz.
+`GetEnvironmentVariableA`nin donusu **uc anlam** tasir ve gercek Windows
+programlari ucune de bagimlidir:
+
+```text
+  0            -> degisken yok      (GetLastError = ERROR_ENVVAR_NOT_FOUND)
+  <= nSize     -> yazildi, boyu bu
+  >  nSize     -> yazilmadi, GEREKEN boy bu (NUL dahil)
+```
+
+Ucuncusu "once kucuk tamponla sor, gerekirse buyut" kalibinin temeli.
+Taklit edilmezse o kalibi kullanan bir ikili degeri sessizce kirpilmis
+alirdi -- `winenv.exe` bunu dogrudan olcuyor:
+
+```text
+tcmk> run winenv
+[winenv] A oturum mirasi:            gecti (HOME okundu)
+[winenv] B SetEnvironmentVariableA:  gecti (yazilan deger geri okundu)
+[winenv] C gereken boy:              gecti (6 dondu, tampon bozulmadi)
+[winenv] D NULL ile silme:           gecti (silindi, GetLastError = 203)
+```
+
+![winenv](docs/screenshot-winenv.png)
+
+PE32 (i386) ve PE32+ (x86_64) ikilisinde de ayni dort sonuc.
+
 ### Bilerek yapilmayanlar
 
-* **Ortam surece degil sisteme ait.** Gercek POSIX'te ortam surecin
-  adres uzayindadir: `fork` kopyalar, `execve` cagiranin verdigi `envp`
-  ile degistirir, `setenv` yalnizca kendi kopyasini bozar. TCMK'de
-  degisiklik anlik goruntuyle sinirli: surec kendi kopyasini
-  degistirebilir ama `execve`den sonra yasamaz.
-* **`setenv`/`putenv` yok.** Tabloyu yalnizca kabuk (`set`) degistiriyor;
-  boylece "oturum ortami" kavrami kabukta duruyor.
+* **`execve` cagiranin `envp`sini almiyor.** Gercek `execve` ucuncu
+  parametre olarak bir ortam dizisi alir; TCMK'de yeni imaj **yuvada
+  duran** tabloyu devralir. Sonuc cogu durumda ayni (`execve(path, argv,
+  environ)` deyimi tam olarak bunu yapar), ama cagiranin **baska** bir
+  ortam vermesi mumkun degil.
 * **`GetEnvironmentStringsA` yok.** Win32'nin toplu okuma cagrisi; TCMK
   yalnizca adla sorgulamayi destekliyor.
+* **Yerel katman dort girdilik.** POSIX tarafinda bir surec dortten
+  fazla degiskeni kendi icinde degistirirse `set` basarisiz bildiriyor --
+  sessizce eski degeri gostermektense.
 * **Sekiz degisken, 64 bayt** -- sabit tablo, dinamik ayirma yok.
 * **TR klavye duzeni yok.** Shift tablosu US; bir gun duzen eklenirse
   degisecek yer o tek tablo.

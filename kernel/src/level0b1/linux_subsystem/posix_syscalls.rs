@@ -39,6 +39,18 @@ pub const SYS_YIELD: u32 = 0x506;
 pub const SYS_WIN_POS: u32 = 0x507;
 pub const SYS_SLEEP: u32 = 0x508;
 pub const SYS_EXECVE: u32 = 0x509;
+/// `setenv`/`unsetenv` -- Linux'ta boyle bir sistem cagrisi **yoktur**.
+///
+/// Gercek POSIX'te ortam surecin kendi belleginde bir dizidir ve libc
+/// onu cekirdege sormadan duzenler. TCMK'de tablo cekirdekte durdugu
+/// icin (bkz. `level0a/core/env.rs`) bir cagri gerekiyor. Numaranin
+/// Linux araliginda degil TCMK araliginda olmasi da bunu soyluyor: bu
+/// cagri Linux uyumlulugunun degil, TCMK'nin kendi tasariminin sonucu.
+///
+/// Win32 tarafinda ayni islev **gercekten** bir cekirdek cagrisidir
+/// (`SetEnvironmentVariableA` sureci temsil eden blogu degistirir), yani
+/// iki ABI burada da ayni yerde bulusmuyor.
+pub const SYS_SETENV: u32 = 0x50B;
 
 // Linux syscall numaralari MIMARIYE GORE DEGISIR -- ayni isim, farkli sayi.
 // Bunu tek bir kumeyle gecistirmek Faz 4'te gercek bir hataya yol acti:
@@ -841,6 +853,40 @@ pub fn dispatch(frame: &mut SyscallFrame) {
             Ok(()) => 0,
             Err(e) => e,
         },
+
+        // `setenv(ad, deger)` -- surecin ortamini degistirir.
+        //
+        // Deger bos verilirse (ya da NULL) degisken **silinir**; POSIX'in
+        // `unsetenv`i ve Win32'nin `SetEnvironmentVariableA(ad, NULL)`
+        // cagrisi ayni anlama geliyor, o yuzden tek bir cagri yetiyor.
+        //
+        // Degisiklik yalnizca cagiran surecin tablosunda; kardesler
+        // gormez, ama `fork` ile dogan cocuk ve `execve` ile yuklenen
+        // yeni imaj gorur -- ikisi de ayni yuvadan devam ettigi icin.
+        SYS_SETENV => {
+            let mut name_storage = [0u8; PATH_MAX];
+            let mut value_storage = [0u8; PATH_MAX];
+            let name = unsafe { copy_user_cstr(arg1, &mut name_storage) }.map(|n| n.len());
+            let value = if arg2 == 0 {
+                Some(0)
+            } else {
+                unsafe { copy_user_cstr(arg2, &mut value_storage) }.map(|v| v.len())
+            };
+            match (name, value) {
+                (Some(name_len), Some(value_len)) => {
+                    let name = core::str::from_utf8(&name_storage[..name_len]).ok();
+                    let value = core::str::from_utf8(&value_storage[..value_len]).ok();
+                    match (name, value) {
+                        (Some(name), Some(value)) => match kernel_api::setenv(name, value) {
+                            Ok(()) => 0,
+                            Err(e) => errno_of(e),
+                        },
+                        _ => -EFAULT,
+                    }
+                }
+                _ => -EFAULT,
+            }
+        }
 
         // `getcwd(buf, size)` -- calisma dizinini kullaniciya yazar.
         //
