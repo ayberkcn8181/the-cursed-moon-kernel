@@ -7,7 +7,7 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::level0a::core::{scheduler, vfs};
+use crate::level0a::core::scheduler;
 
 /// Baslatilmayi bekleyen uygulamanin yolu. Gorev girisi `extern "C" fn()`
 /// oldugu icin arguman gecirilemiyor; yol bu kuyruk uzerinden aktarilir.
@@ -137,17 +137,27 @@ static KNOWN_APPS: &[(&str, &str, &str)] = &[
 ];
 
 /// Kabuktan gelen adi tam yola ve gorev adina cevirir.
-fn resolve(path: &str) -> Option<(&str, &'static str)> {
+///
+/// Uc basamak, gittikce genelleserek:
+///
+///   1. **Gomulu liste**: kisa ad -> tam yol. Gorev adi da buradan gelir,
+///      yani `ps` tablosunda "app" degil "winfiles" gorunur.
+///   2. **`PATH`/`PATHEXT` aramasi**: listede olmayan bir ad, ortamdaki
+///      dizinlerde aranir (bkz. `kernel_api::resolve_program`). Kabugun
+///      gomulu listeye bagimliligi boylece bir **kolaylik** oldu,
+///      zorunluluk degil -- diske atilan yeni bir ikili de calisir.
+///   3. Bulunamazsa hata.
+///
+/// Ikinci basamak `PATHEXT`i de kapsadigi icin `run winfiles` artik iki
+/// ayri yoldan calisiyor: listeden (`/bin/winfiles.exe`) ve aramadan
+/// (`winfiles` + `.exe`). Liste silinse bile calismaya devam ederdi.
+fn resolve<'a>(path: &str, buf: &'a mut [u8]) -> Option<(&'a str, &'static str)> {
     for (short, full, task) in KNOWN_APPS {
         if *short == path || *full == path {
             return Some((full, task));
         }
     }
-    // Bilinen listede yok: VFS'te varsa dogrudan calistirilir.
-    if vfs::lookup(path).is_some() {
-        return Some((path, "app"));
-    }
-    None
+    crate::level0a::kernel_api::resolve_program(path, buf).map(|found| (found, "app"))
 }
 
 /// Kabugun `apps` komutu icin kullanilabilir uygulama listesi.
@@ -157,8 +167,9 @@ pub fn available() -> &'static [(&'static str, &'static str, &'static str)] {
 
 /// Bir uygulamayi yeni bir gorevde Ring 3'te baslatir.
 pub fn spawn_user_app(path: &str, args: &str) -> Result<(), &'static str> {
+    let mut found = [0u8; MAX_PATH];
     let (resolved, task_name) =
-        resolve(path).ok_or("bilinmeyen uygulama ('apps'/'ls' ile listeleyin)")?;
+        resolve(path, &mut found).ok_or("bilinmeyen uygulama ('apps'/'ls' ile listeleyin)")?;
     if resolved.len() >= MAX_PATH {
         return Err("yol cok uzun");
     }

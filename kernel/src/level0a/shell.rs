@@ -496,7 +496,7 @@ fn execute(line: &str) {
             write_line("dosya:");
             write_line("  ls [-a] [dizin]  cat <yol>  save <yol> <metin>  cp <kaynak> <hedef>");
             write_line("  mv <kaynak> <hedef>  rm <yol>  mkdir <yol>  rmdir <yol>");
-            write_line("  env  set AD=deger");
+            write_line("  env  set AD=deger  which <ad>");
             write_line("  mkdir <yol>  rmdir <yol>  cd [dizin]  pwd");
             write_line("uygulama / pencere:");
             write_line("  apps  run <ad>  win  focus <id>  mouse");
@@ -1049,6 +1049,31 @@ fn execute(line: &str) {
             newline();
         }
         "pwd" => write_line(shell_cwd()),
+        "which" => {
+            // `PATH`/`PATHEXT` aramasini **gorunur** kilar. Ortam
+            // tablosu ilk gunden `PATH` tasiyordu ama hicbir sey onu
+            // okumuyordu; artik hem `run` hem `execve` buradan geciyor,
+            // ve bu komut o aramanin cevabini oldugu gibi gosteriyor.
+            if arg.is_empty() {
+                write_line("kullanim: which <ad>");
+            } else {
+                let mut buf = [0u8; tcmkfs::PATH_MAX];
+                match kernel_api::resolve_program(arg, &mut buf) {
+                    Some(found) => {
+                        write_line(found);
+                        // Uzanti eklendiyse soyle: `winfiles` ->
+                        // `/bin/winfiles.exe` donusumu Windows'un
+                        // `PATHEXT` kalibidir, sessiz kalmasi yaniltirdi.
+                        if !arg.contains('/') && !found.ends_with(arg) {
+                            write_str("  (PATHEXT: ");
+                            write_str(env::get(env::SESSION, "PATHEXT").unwrap_or(""));
+                            write_line(" eklendi)");
+                        }
+                    }
+                    None => write_line("bulunamadi (PATH: /bin)"),
+                }
+            }
+        }
         "cd" => {
             let target = if arg.is_empty() { "/" } else { arg };
             let mut buf = [0u8; tcmkfs::PATH_MAX];

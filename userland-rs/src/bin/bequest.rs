@@ -32,6 +32,10 @@
 //!   E  cagiranin verdigi envp tabloyu YERINE geciyor mu?
 //!      execve(..., ["TCMK_MIRAS=gamma"]) -> yeni imaj "gamma" gormeli
 //!      ve HOME GORMEMELI: verilen dizi ortamin tamamidir
+//!
+//!   F  egik cizgisiz ad PATH'te araniyor mu?
+//!      execve("bequest", ...) -> argv[0] "/bin/bequest" olmali;
+//!      cekirdek yerlestirdigi icin cozumun kaniti odur
 //! ```
 //!
 //! D sinavi programin **kendisini** yeniden yukler: ayni ikili, iki
@@ -42,7 +46,7 @@
 //! Cocugun cevabi **cikis koduyla** geliyor, ekrana yazarak degil: iki
 //! surecin ciktisi ayni konsolda karisabilir, cikis kodu karisamaz.
 //!
-//! Tuslar: `x` -> miras sinavi (D), `e` -> envp sinavi (E), `q` -> cik
+//! Tuslar: `x` -> miras (D), `e` -> envp (E), `p` -> PATH (F), `q` -> cik
 
 #![no_std]
 #![no_main]
@@ -92,7 +96,7 @@ fn main() {
     // tablosundan yeniden kurdu -- yani exec'ten once yazilan deger
     // hala oradaysa, tablo yuvada kaldi demektir.
     let phase = args::first();
-    if phase == Some("exec") || phase == Some("envp") {
+    if phase == Some("exec") || phase == Some("envp") || phase == Some("yol") {
         let value = env::get(NAME);
         let home = env::get("HOME");
         // Iki mod, iki ayri beklenti:
@@ -103,20 +107,37 @@ fn main() {
         //         gorunuyor ve HOME **yok** -- verilen dizi ortamin
         //         tamamidir, eskisinin uzerine eklenmez.
         let explicit = phase == Some("envp");
-        let passed = if explicit {
+        // Ucuncu mod (F) ortama degil **cozume** bakiyor: exec `bequest`
+        // diye cagrildi, egik cizgisiz. `argv[0]` cekirdegin yerlestirdigi
+        // **cozulmus** yoldur, yani orada `/bin/bequest` gorunuyorsa
+        // `PATH` gercekten arandi demektir.
+        let by_path = phase == Some("yol");
+        let program = args::get(0).unwrap_or("<yok>");
+        let passed = if by_path {
+            program == "/bin/bequest"
+        } else if explicit {
             value == Some("gamma") && home.is_none()
         } else {
             value == Some("beta") && home.is_some()
         };
-        let _ = writeln!(
-            out,
-            "[bequest] {} execve sonrasi: {} ({}={}, HOME={})",
-            if explicit { "E envp" } else { "D miras" },
-            if passed { "gecti" } else { "KALDI" },
-            NAME,
-            value.unwrap_or("<yok>"),
-            home.unwrap_or("<yok>")
-        );
+        if by_path {
+            let _ = writeln!(
+                out,
+                "[bequest] F PATH aramasi: {} (argv[0]={})",
+                if passed { "gecti" } else { "KALDI" },
+                program
+            );
+        } else {
+            let _ = writeln!(
+                out,
+                "[bequest] {} execve sonrasi: {} ({}={}, HOME={})",
+                if explicit { "E envp" } else { "D miras" },
+                if passed { "gecti" } else { "KALDI" },
+                NAME,
+                value.unwrap_or("<yok>"),
+                home.unwrap_or("<yok>")
+            );
+        }
         // Ekranda da kalsin: exec'ten sonra ayri bir pencere aciliyor.
         let mut win = match Window::open("bequest -- execve sonrasi", 300, 200, 430, 140) {
             Some(w) => w,
@@ -132,22 +153,33 @@ fn main() {
             win.text(
                 6,
                 3,
-                if explicit {
+                if by_path {
+                    "F: PATH ile cozulen yol"
+                } else if explicit {
                     "E: execve'ye verilen envp"
                 } else {
                     "D: execve'den sonra miras"
                 },
                 ACCENT,
             );
-            win.text(6, 34, NAME, FG);
-            win.text(120, 34, value.unwrap_or("<yok>"), if passed { OK } else { WARN });
-            win.text(6, 50, "HOME", DIM);
-            win.text(120, 50, home.unwrap_or("<yok>"), DIM);
+            if by_path {
+                win.text(6, 34, "istenen", DIM);
+                win.text(120, 34, "bequest", FG);
+                win.text(6, 50, "argv[0]", DIM);
+                win.text(120, 50, program, if passed { OK } else { WARN });
+            } else {
+                win.text(6, 34, NAME, FG);
+                win.text(120, 34, value.unwrap_or("<yok>"), if passed { OK } else { WARN });
+                win.text(6, 50, "HOME", DIM);
+                win.text(120, 50, home.unwrap_or("<yok>"), DIM);
+            }
             win.text(
                 6,
                 72,
                 if !passed {
-                    "KALDI -- ortam beklenen gibi degil"
+                    "KALDI -- beklenen gibi degil"
+                } else if by_path {
+                    "gecti -- egik cizgisiz ad PATH'te bulundu"
                 } else if explicit {
                     "gecti -- verilen dizi ortamin tamami"
                 } else {
@@ -245,6 +277,12 @@ fn main() {
                 sys::execve_args("/bin/bequest", "exec");
                 let _ = writeln!(out, "[bequest] execve basarisiz");
             }
+            // F: yol yerine **ad**. Cekirdek `PATH`i arayip bulmali.
+            b'p' => {
+                let _ = writeln!(out, "[bequest] F: execve(\"bequest\") -- egik cizgisiz");
+                sys::execve_args("bequest", "yol");
+                let _ = writeln!(out, "[bequest] execve basarisiz");
+            }
             // E: bu kez ortam **acikca** veriliyor. Yuvada duran tablo
             // (HOME dahil) tamamen yerini bu dizeye birakmali.
             b'e' => {
@@ -291,11 +329,11 @@ fn draw(win: &mut Window, checks: &[Check; 3]) {
         12,
         h - 39,
         if passed == checks.len() {
-            "uc sinav da gecti -- x / e ile execve"
+            "uc sinav da gecti -- x / e / p"
         } else {
             "BIR SINAV KALDI"
         },
         if passed == checks.len() { OK } else { WARN },
     );
-    win.text(6, h - 14, "x miras  e envp  q cik", DIM);
+    win.text(6, h - 14, "x miras  e envp  p PATH  q cik", DIM);
 }

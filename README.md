@@ -52,6 +52,7 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 3c | **Ortam degiskenleri**: `environ` dizisi + `GetEnvironmentVariableA` | ✅ (i386 + x86_64, ELF + PE) |
 | 3d | **Surec basina ortam**: `setenv` + `SetEnvironmentVariableA` (fork/execve mirasi) | ✅ (i386 + x86_64, ELF + PE) |
 | 3e | **`execve(yol, argv, envp)`** -- cagiranin verdigi ortam tabloyu yerine gecer | ✅ (i386 + x86_64) |
+| 3f | **`PATH` aramasi + `PATHEXT`** (`which`, `run`, `execve`) | ✅ (i386 + x86_64, ELF + PE) |
 | — | **Klavye: shift + caps lock** (US duzeni, buyuk harf ve noktalama) | ✅ (i386 + x86_64) |
 | — | **Kendi onyukleyicisi** + diske kurulum (`install`) | ✅ (i386) |
 | 8 | **`execve`** (surec kendi yerine program yukler) | ✅ (i386 + x86_64) |
@@ -97,7 +98,7 @@ Ekranda gorunenler:
   | uygulama/pencere | `apps` `run <ad> [argumanlar]` `win` `focus <id>` `mouse` |
   | uygulamalar (ELF) | `paint` `plasma` `notes` `menu` `twins` `relay` `echo2` `sigdemo` `race` `reaper` `redirect` `mux` `masked` `arena` `seeker` `browse` `waiter` `heir` `nested` `bequest` `crash` `hog` `spin` |
   | uygulamalar (PE) | `winclock` (ham `int 0x2E`) `winpad` `winfiles` `winenv` (IAT) -- i386'da PE32, x86_64'te PE32+ |
-  | ortam | `cd [dizin]` `pwd` `env` `set AD=deger` |
+  | ortam | `cd [dizin]` `pwd` `env` `set AD=deger` `which <ad>` |
   | diger | `echo <metin>` `pipes` `clear` `help` |
 - **Sistem Gunlugu** -- cekirdek kaydinin canli goruntusu (konsol halka
   tamponu her karede pencereye cizilir).
@@ -2120,7 +2121,7 @@ karisabilir, cikis kodu karisamaz.
 
 ![bequest](docs/screenshot-bequest.png)
 
-x86_64'te de besi birden geciyor.
+x86_64'te de altisi birden geciyor.
 
 #### `setenv` neden bir sistem cagrisi (ve Win32'de neden dogal)
 
@@ -2179,6 +2180,62 @@ gormeli **ve** oturumdan gelen `HOME`u **gormemeli**:
 seyle kanitlaniyor.
 
 ![envp](docs/screenshot-envp.png)
+
+#### `PATH` nihayet okunuyor -- ve yaninda `PATHEXT`
+
+Ortam tablosu ilk gunden `PATH=/bin` tasiyordu ama **hicbir sey onu
+okumuyordu**: kabuk uygulamalari gomulu bir listeden buluyor, `execve`
+tam yol istiyordu. Degisken vardi, anlami yoktu.
+
+Artik hem `run` hem `execve` aramadan geciyor. Ad bir egik cizgi
+iceriyorsa yol olarak alinir (POSIX'te de oyle: `./a.out` aranmaz);
+icermiyorsa `PATH` bilesenleri sirayla denenir.
+
+Ikinci degisken burada devreye giriyor ve TCMK'de **gercek bir ise
+yariyor**:
+
+```text
+  PATH=/bin   PATHEXT=.exe
+
+  "browse"    -> /bin/browse           bulundu (uzantiya gerek yok)
+  "winfiles"  -> /bin/winfiles         yok
+                 /bin/winfiles.exe     bulundu
+```
+
+`PATHEXT` Windows'un kalibidir; POSIX'te karsiligi yoktur, cunku orada
+dosya adi neyse odur ve calistirilabilirlik izin bitinden gelir. TCMK'de
+izin biti yok -- ama **iki bicimli** bir isim uzayi var (`browse` ELF,
+`winfiles.exe` PE), yani Windows'un cozdugu sorun burada da gercek. Iki
+gelenek tek aramada bulusuyor: once yalin ad, sonra uzantilar.
+
+Arama `which` ile dogrudan gorulebiliyor:
+
+```text
+tcmk> which browse
+/bin/browse
+tcmk> which winfiles
+/bin/winfiles.exe
+  (PATHEXT: .exe eklendi)
+tcmk> which /bin/plasma
+/bin/plasma
+tcmk> which yokboyle
+bulunamadi (PATH: /bin)
+```
+
+![PATH](docs/screenshot-path.png)
+
+Kabugun gomulu listesi boylece bir **kolaylik** oldu, zorunluluk degil:
+listede olmayan `hello` artik `run hello` ile calisiyor (once
+calismiyordu -- eski yedek yol yalnizca tam yol deniyordu). `bequest`in
+altinci sinavi ayni seyi `execve` tarafinda olcuyor:
+
+```text
+[bequest] F: execve("bequest") -- egik cizgisiz
+[bequest] F PATH aramasi: gecti (argv[0]=/bin/bequest)
+```
+
+Kanit `argv[0]`: onu **cekirdek** yerlestiriyor ve oraya cozulmus yolu
+yaziyor. Program `bequest` diye cagirdi, `/bin/bequest` gordu.
 
 #### `winenv`: Win32'nin donus sozlesmesi
 

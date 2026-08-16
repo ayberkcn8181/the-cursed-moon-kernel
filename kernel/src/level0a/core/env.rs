@@ -244,5 +244,10 @@ pub fn init() {
     };
     set(SESSION, "HOME", home);
     set(SESSION, "PATH", "/bin");
+    // Windows'un kalibi, ve TCMK'de gercek bir ise yariyor: isim uzayi
+    // **iki bicimli** (ELF `browse`, PE `winfiles.exe`), yani uzantisiz
+    // yazilan bir adin calistirilabilir hale gelmesi gerekiyor. POSIX'te
+    // boyle bir degisken yoktur -- orada dosya adi neyse odur.
+    set(SESSION, "PATHEXT", ".exe");
     set(SESSION, "SHELL", "tcmk");
 }

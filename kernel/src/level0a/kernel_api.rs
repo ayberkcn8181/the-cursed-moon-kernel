@@ -200,6 +200,107 @@ pub fn getcwd() -> &'static str {
     cwd::current()
 }
 
+/// Bir program adini calistirilabilir bir yola cevirir.
+///
+/// ## Neden `PATH` bu ise kadar okunmadi
+///
+/// Ortam tablosu ilk gunden `PATH=/bin` tasiyordu ama **hicbir sey onu
+/// okumuyordu**: kabuk uygulamalari gomulu bir listeden buluyor,
+/// `execve` ise tam yol istiyordu. Yani degisken vardi, anlami yoktu.
+///
+/// ## Iki gelenek, tek arama
+///
+/// Ad bir egik cizgi iceriyorsa yol olarak alinir (POSIX'te de oyle:
+/// `./a.out` aranmaz, dogrudan acilir). Icermiyorsa `PATH` bilesenleri
+/// sirayla denenir -- ve her bilesende **once yalin ad**, sonra
+/// `PATHEXT` uzantilari:
+///
+/// ```text
+///   PATH=/bin  PATHEXT=.exe
+///
+///   "browse"    -> /bin/browse           (bulundu, uzantiya gerek yok)
+///   "winfiles"  -> /bin/winfiles         (yok)
+///                  /bin/winfiles.exe     (bulundu)
+/// ```
+///
+/// Ikinci satir Windows'un kalibi: orada `PATHEXT` uzantisiz yazilan bir
+/// adi calistirilabilir hale getirir. POSIX'te boyle bir sey yoktur --
+/// dosya adi neyse odur, calistirilabilirligi izin bitinden gelir.
+/// TCMK'de izin biti yok, ama **iki bicimli** bir isim uzayi var
+/// (`browse` ELF, `winfiles.exe` PE), yani Windows'un cozdugu sorun
+/// burada da gercek.
+pub fn resolve_program<'a>(name: &str, buf: &'a mut [u8]) -> Option<&'a str> {
+    if name.is_empty() {
+        return None;
+    }
+
+    // Egik cizgi varsa arama yok: yol zaten verilmis.
+    if name.contains('/') {
+        let mut direct = [0u8; PATH_MAX];
+        let resolved = cwd::resolve(name, &mut direct)?;
+        if vfs::lookup(resolved).is_none() {
+            return None;
+        }
+        let len = resolved.len();
+        if len > buf.len() {
+            return None;
+        }
+        buf[..len].copy_from_slice(resolved.as_bytes());
+        return core::str::from_utf8(&buf[..len]).ok();
+    }
+
+    let path = env::get(scheduler::current_id(), "PATH").unwrap_or("/bin");
+    let extensions = env::get(scheduler::current_id(), "PATHEXT").unwrap_or("");
+
+    for directory in path.split(':') {
+        if directory.is_empty() {
+            continue;
+        }
+        // Once yalin ad, sonra her uzanti. Sira onemli: `browse` diye
+        // bir dosya varken `browse.exe` aramak gereksiz, ve ters sira
+        // uzantili bir ikiliyi uzantisizin onune gecirirdi.
+        if let Some(found) = try_candidate(directory, name, "", buf) {
+            return Some(found);
+        }
+        for extension in extensions.split(';') {
+            if extension.is_empty() {
+                continue;
+            }
+            if let Some(found) = try_candidate(directory, name, extension, buf) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+/// `dizin/ad+uzanti` adayini kurar ve VFS'te arar.
+fn try_candidate<'a>(
+    directory: &str,
+    name: &str,
+    extension: &str,
+    buf: &'a mut [u8],
+) -> Option<&'a str> {
+    let needs_slash = !directory.ends_with('/');
+    let len = directory.len() + usize::from(needs_slash) + name.len() + extension.len();
+    if len > buf.len() {
+        return None;
+    }
+
+    let mut at = 0usize;
+    for part in [directory, if needs_slash { "/" } else { "" }, name, extension] {
+        buf[at..at + part.len()].copy_from_slice(part.as_bytes());
+        at += part.len();
+    }
+
+    let candidate = core::str::from_utf8(&buf[..at]).ok()?;
+    if vfs::lookup(candidate).is_some() {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
 /// Surecin ortamindan bir degisken okur.
 ///
 /// POSIX tarafinda bu cagri **gereksizdir** -- program ayni bilgiyi

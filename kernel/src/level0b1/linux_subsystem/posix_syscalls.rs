@@ -614,9 +614,17 @@ pub fn dispatch(frame: &mut SyscallFrame) {
                 (Some(plen), Some(alen)) => {
                     let path = core::str::from_utf8(&storage[..plen]).unwrap_or("");
                     let args = core::str::from_utf8(&arg_storage[..alen]).unwrap_or("");
-                    if crate::level0a::core::vfs::lookup(path).is_none() {
+                    // Yol `PATH`/`PATHEXT` uzerinden cozuluyor: egik
+                    // cizgi iceren adlar oldugu gibi, icermeyenler
+                    // aranarak. `execvp`nin yaptigi da budur -- fark su
+                    // ki orada arama libc'de, burada cekirdekte (tablo
+                    // cekirdekte oldugu icin).
+                    let mut program = [0u8; PATH_MAX];
+                    let resolved = kernel_api::resolve_program(path, &mut program);
+                    if resolved.is_none() {
                         -ENOENT
                     } else {
+                        let path = resolved.unwrap();
                         let task = crate::level0a::core::scheduler::current_id();
                         // arg3 = `envp`. Sifirsa ortam **korunur** (yuva
                         // ayni kaldigi icin kendiliginden); doluysa
