@@ -28,6 +28,10 @@
 //!   D  execve'den sonra yasiyor mu?
 //!      "beta" yazilir, /bin/bequest `exec` argumaniyla yuklenir;
 //!      yeni imaj degeri yigindaki environ dizisinden okur
+//!
+//!   E  cagiranin verdigi envp tabloyu YERINE geciyor mu?
+//!      execve(..., ["TCMK_MIRAS=gamma"]) -> yeni imaj "gamma" gormeli
+//!      ve HOME GORMEMELI: verilen dizi ortamin tamamidir
 //! ```
 //!
 //! D sinavi programin **kendisini** yeniden yukler: ayni ikili, iki
@@ -38,7 +42,7 @@
 //! Cocugun cevabi **cikis koduyla** geliyor, ekrana yazarak degil: iki
 //! surecin ciktisi ayni konsolda karisabilir, cikis kodu karisamaz.
 //!
-//! Tuslar: `x` -> execve sinavi, `q` -> cik
+//! Tuslar: `x` -> miras sinavi (D), `e` -> envp sinavi (E), `q` -> cik
 
 #![no_std]
 #![no_main]
@@ -87,18 +91,34 @@ fn main() {
     // dizisinden geliyor ve o diziyi cekirdek, gorev yuvasinin
     // tablosundan yeniden kurdu -- yani exec'ten once yazilan deger
     // hala oradaysa, tablo yuvada kaldi demektir.
-    if args::first() == Some("exec") {
+    let phase = args::first();
+    if phase == Some("exec") || phase == Some("envp") {
         let value = env::get(NAME);
-        let passed = value == Some("beta");
+        let home = env::get("HOME");
+        // Iki mod, iki ayri beklenti:
+        //
+        //   exec  ortam **korundu**: exec'ten once yazilan "beta" duruyor
+        //         ve oturumdan gelen HOME de yerinde.
+        //   envp  ortam **degistirildi**: cagiranin verdigi "gamma"
+        //         gorunuyor ve HOME **yok** -- verilen dizi ortamin
+        //         tamamidir, eskisinin uzerine eklenmez.
+        let explicit = phase == Some("envp");
+        let passed = if explicit {
+            value == Some("gamma") && home.is_none()
+        } else {
+            value == Some("beta") && home.is_some()
+        };
         let _ = writeln!(
             out,
-            "[bequest] D execve sonrasi: {} ({}={})",
+            "[bequest] {} execve sonrasi: {} ({}={}, HOME={})",
+            if explicit { "E envp" } else { "D miras" },
             if passed { "gecti" } else { "KALDI" },
             NAME,
-            value.unwrap_or("<yok>")
+            value.unwrap_or("<yok>"),
+            home.unwrap_or("<yok>")
         );
         // Ekranda da kalsin: exec'ten sonra ayri bir pencere aciliyor.
-        let mut win = match Window::open("bequest -- execve sonrasi", 300, 200, 420, 120) {
+        let mut win = match Window::open("bequest -- execve sonrasi", 300, 200, 430, 140) {
             Some(w) => w,
             None => return,
         };
@@ -109,16 +129,29 @@ fn main() {
             let (w, h) = (win.width(), win.height());
             win.clear(BG);
             win.fill(0, 0, w, 22, PANEL);
-            win.text(6, 3, "D: execve'den sonra ortam", ACCENT);
-            win.text(6, 34, NAME, FG);
-            win.text(120, 34, value.unwrap_or("<yok>"), if passed { OK } else { WARN });
             win.text(
                 6,
-                56,
-                if passed {
-                    "gecti -- deger exec'ten sagladi"
+                3,
+                if explicit {
+                    "E: execve'ye verilen envp"
                 } else {
-                    "KALDI -- deger kayboldu"
+                    "D: execve'den sonra miras"
+                },
+                ACCENT,
+            );
+            win.text(6, 34, NAME, FG);
+            win.text(120, 34, value.unwrap_or("<yok>"), if passed { OK } else { WARN });
+            win.text(6, 50, "HOME", DIM);
+            win.text(120, 50, home.unwrap_or("<yok>"), DIM);
+            win.text(
+                6,
+                72,
+                if !passed {
+                    "KALDI -- ortam beklenen gibi degil"
+                } else if explicit {
+                    "gecti -- verilen dizi ortamin tamami"
+                } else {
+                    "gecti -- deger exec'ten sagladi"
                 },
                 if passed { OK } else { WARN },
             );
@@ -212,6 +245,18 @@ fn main() {
                 sys::execve_args("/bin/bequest", "exec");
                 let _ = writeln!(out, "[bequest] execve basarisiz");
             }
+            // E: bu kez ortam **acikca** veriliyor. Yuvada duran tablo
+            // (HOME dahil) tamamen yerini bu dizeye birakmali.
+            b'e' => {
+                env::set(NAME, "beta");
+                let _ = writeln!(out, "[bequest] E: envp=[{}=gamma], execve...", NAME);
+                sys::execve_env(
+                    "/bin/bequest",
+                    "envp",
+                    Some(&["TCMK_MIRAS=gamma"]),
+                );
+                let _ = writeln!(out, "[bequest] execve basarisiz");
+            }
             _ => {}
         }
         draw(&mut win, &checks);
@@ -246,11 +291,11 @@ fn draw(win: &mut Window, checks: &[Check; 3]) {
         12,
         h - 39,
         if passed == checks.len() {
-            "uc sinav da gecti -- x ile execve"
+            "uc sinav da gecti -- x / e ile execve"
         } else {
             "BIR SINAV KALDI"
         },
         if passed == checks.len() { OK } else { WARN },
     );
-    win.text(6, h - 14, "x execve sinavi   q cik", DIM);
+    win.text(6, h - 14, "x miras  e envp  q cik", DIM);
 }

@@ -19,7 +19,7 @@
 //!   42 = sys_pipe    (argumansiz; (okuma << 16) | yazma doner)
 
 use crate::arch::cpu::regs::SyscallFrame;
-use crate::level0a::core::{fd, mmu, scheduler};
+use crate::level0a::core::{env, fd, mmu, scheduler};
 use crate::level0a::gui_api;
 use crate::level0a::kernel_api::{self, KernelError};
 use crate::level0b1::signal;
@@ -231,6 +231,75 @@ fn read_user_words(addr: usize, out: &mut [usize]) -> bool {
         *slot = unsafe { (at as *const usize).read_unaligned() };
     }
     true
+}
+
+/// `envp` dizisinden okunan tek bir `AD=deger` satiri.
+///
+/// Cekirdek yiginda duruyor: isaretciler cagiranin adres uzayina bakar
+/// ve o uzay `execve` ile gider, yani satirlarin **once** kopyalanmasi
+/// sart.
+#[derive(Clone, Copy)]
+struct EnvEntry {
+    bytes: [u8; env::MAX_ENTRY],
+    len: usize,
+}
+
+impl EnvEntry {
+    const EMPTY: EnvEntry = EnvEntry {
+        bytes: [0; env::MAX_ENTRY],
+        len: 0,
+    };
+
+    fn as_str(&self) -> Option<&str> {
+        core::str::from_utf8(&self.bytes[..self.len]).ok()
+    }
+}
+
+/// NULL ile biten `char *envp[]` dizisini cekirdege kopyalar.
+///
+/// Donus: kac girdi okundugu. Okunamayan bir isaretci `None` verir --
+/// gecersiz bir `envp` ile exec etmek POSIX'te de `EFAULT`tur.
+fn read_user_env(addr: usize, out: &mut [EnvEntry; env::MAX_VARS]) -> Option<usize> {
+    let width = core::mem::size_of::<usize>();
+    let mut count = 0usize;
+    let mut index = 0usize;
+    loop {
+        let at = addr + index * width;
+        if !mmu::is_user_accessible(at) || !mmu::is_user_accessible(at + width - 1) {
+            return None;
+        }
+        let pointer = unsafe { (at as *const usize).read_unaligned() };
+        if pointer == 0 {
+            return Some(count);
+        }
+        // Tablo dolduysa kalanlar sessizce atilir: sabit boyutlu tablo
+        // zaten `MAX_VARS` kadar tasiyabiliyor (bkz. `core::env`).
+        if count < out.len() {
+            let mut scratch = [0u8; PATH_MAX];
+            let text = unsafe { copy_user_cstr(pointer, &mut scratch) }?;
+            let taken = text.len().min(env::MAX_ENTRY - 1);
+            out[count].bytes[..taken].copy_from_slice(&text.as_bytes()[..taken]);
+            out[count].len = taken;
+            count += 1;
+        }
+        index += 1;
+        if index > env::MAX_VARS * 4 {
+            // Sonlandirilmamis dizi: sinirsiz dolasmak yerine hata.
+            return None;
+        }
+    }
+}
+
+/// Okunan `envp` satirlarini gorevin tablosuna **yerlestirir**.
+///
+/// Once temizlenir: yeni ortam eskisinin uzerine eklenmez, yerine gecer.
+fn apply_user_env(task: usize, entries: &[EnvEntry]) {
+    env::clear(task);
+    for entry in entries {
+        if let Some(text) = entry.as_str() {
+            env::set_entry(task, text);
+        }
+    }
 }
 
 /// Kullanici alanina tek bir kelime yazar.
@@ -534,6 +603,7 @@ pub fn dispatch(frame: &mut SyscallFrame) {
             // `GetCommandLineA` bolunmemis bir komut satiri doner.
             let mut storage = [0u8; PATH_MAX];
             let mut arg_storage = [0u8; PATH_MAX];
+            let mut env_storage = [EnvEntry::EMPTY; env::MAX_VARS];
             let path_len = unsafe { copy_user_cstr(arg1, &mut storage) }.map(|p| p.len());
             let args_len = if arg2 == 0 {
                 Some(0)
@@ -548,10 +618,31 @@ pub fn dispatch(frame: &mut SyscallFrame) {
                         -ENOENT
                     } else {
                         let task = crate::level0a::core::scheduler::current_id();
-                        if crate::level0a::launcher::request_exec(task, path, args) {
-                            unsafe { kernel_api::exit_to_exec() }
+                        // arg3 = `envp`. Sifirsa ortam **korunur** (yuva
+                        // ayni kaldigi icin kendiliginden); doluysa
+                        // tablonun **yerine gecer** -- gercek `execve`de
+                        // de verilen dizi ortamin tamamidir.
+                        //
+                        // Kopyalama, imaj birakilmadan **once** yapilmak
+                        // zorunda: isaretciler cagiranin adres uzayina
+                        // bakiyor ve o uzay exec ile gidecek.
+                        let environment = if arg3 == 0 {
+                            Some(0usize)
+                        } else {
+                            read_user_env(arg3, &mut env_storage)
+                        };
+                        match environment {
+                            None => -EFAULT,
+                            Some(entries) => {
+                                if crate::level0a::launcher::request_exec(task, path, args) {
+                                    if arg3 != 0 {
+                                        apply_user_env(task, &env_storage[..entries]);
+                                    }
+                                    unsafe { kernel_api::exit_to_exec() }
+                                }
+                                -EINVAL
+                            }
                         }
-                        -EINVAL
                     }
                 }
                 _ => -EFAULT,

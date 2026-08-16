@@ -51,6 +51,7 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 3b | **Program argumanlari**: SysV `argc`/`argv` + `GetCommandLineA` | ✅ (i386 + x86_64, ELF + PE) |
 | 3c | **Ortam degiskenleri**: `environ` dizisi + `GetEnvironmentVariableA` | ✅ (i386 + x86_64, ELF + PE) |
 | 3d | **Surec basina ortam**: `setenv` + `SetEnvironmentVariableA` (fork/execve mirasi) | ✅ (i386 + x86_64, ELF + PE) |
+| 3e | **`execve(yol, argv, envp)`** -- cagiranin verdigi ortam tabloyu yerine gecer | ✅ (i386 + x86_64) |
 | — | **Klavye: shift + caps lock** (US duzeni, buyuk harf ve noktalama) | ✅ (i386 + x86_64) |
 | — | **Kendi onyukleyicisi** + diske kurulum (`install`) | ✅ (i386) |
 | 8 | **`execve`** (surec kendi yerine program yukler) | ✅ (i386 + x86_64) |
@@ -2109,7 +2110,7 @@ tcmk> run bequest
 [bequest] B fork mirasi:      gecti (cocuk 'alfa' gordu)
 [bequest] C kardes yalitimi:  gecti (cocugun yazdigi ebeveyne sizmadi)
 [bequest] D: TCMK_MIRAS=beta yazildi, execve...
-[bequest] D execve sonrasi:   gecti (TCMK_MIRAS=beta)
+[bequest] D miras execve sonrasi: gecti (TCMK_MIRAS=beta, HOME=/)
 ```
 
 D sinavi programin **kendisini** yeniden yukluyor: ayni ikili, iki
@@ -2119,7 +2120,7 @@ karisabilir, cikis kodu karisamaz.
 
 ![bequest](docs/screenshot-bequest.png)
 
-x86_64'te de dordu birden geciyor.
+x86_64'te de besi birden geciyor.
 
 #### `setenv` neden bir sistem cagrisi (ve Win32'de neden dogal)
 
@@ -2140,6 +2141,44 @@ goruntuden** yapildigi icin, cekirdege yazmak o goruntuyu degistirmez.
 surecin `get`inin gorecegi deger). Gercek libc'nin `setenv`i de tam
 olarak ikincisini yapar. Win32 tarafinda yerel katman yok, cunku okuma
 zaten cekirdege soruluyor.
+
+#### `execve`nin ucuncu parametresi
+
+Ilk surumde `execve` yalnizca yol ve arguman aliyordu: yeni imaj
+**yuvada duran** tabloyu devraliyordu ve cagiranin baska bir ortam
+vermesi mumkun degildi. Artik ucuncu parametre var ve gercek POSIX
+anlamini tasiyor -- verilen dizi yeni surecin ortaminin **tamamidir**,
+eskisinin uzerine eklenmez.
+
+```text
+  execve(yol, argv, NULL)        -> ortam KORUNUR   (TCMK genislemesi)
+  execve(yol, argv, ["A=1"])     -> ortam bu DIZIYE esitlenir
+```
+
+Ilk satir gercek POSIX'te yoktur: orada cagiran kendi `environ`unu
+vermek zorundadir. TCMK'de gorev yuvasi exec boyunca ayni kaldigi icin
+"koru" bedava geliyor, ve `execve(path, argv, environ)` deyiminin
+sonucuyla ayni yere cikiyor.
+
+Kopyalama sirasi burada bir zorunluluk: `envp` isaretcileri **cagiranin**
+adres uzayina bakiyor ve o uzay exec ile gidecek, yani satirlar imaj
+birakilmadan **once** cekirdege alinmak zorunda. Uygulama sirasi da
+onemli: once yolun gecerliligi sinaniyor, sonra tablo degistiriliyor --
+basarisiz bir `execve` cagiranin ortamini bozmamali.
+
+`bequest`in besinci sinavi tam olarak bunu olcuyor. `TCMK_MIRAS=beta`
+yazilip `["TCMK_MIRAS=gamma"]` ile exec ediliyor; yeni imaj `gamma`
+gormeli **ve** oturumdan gelen `HOME`u **gormemeli**:
+
+```text
+[bequest] E: envp=[TCMK_MIRAS=gamma], execve...
+[bequest] E envp execve sonrasi: gecti (TCMK_MIRAS=gamma, HOME=<yok>)
+```
+
+`HOME=<yok>` satiri sinavin asil yeri: dizinin "tamami" olmasi, eksilen
+seyle kanitlaniyor.
+
+![envp](docs/screenshot-envp.png)
 
 #### `winenv`: Win32'nin donus sozlesmesi
 
@@ -2171,11 +2210,11 @@ PE32 (i386) ve PE32+ (x86_64) ikilisinde de ayni dort sonuc.
 
 ### Bilerek yapilmayanlar
 
-* **`execve` cagiranin `envp`sini almiyor.** Gercek `execve` ucuncu
-  parametre olarak bir ortam dizisi alir; TCMK'de yeni imaj **yuvada
-  duran** tabloyu devralir. Sonuc cogu durumda ayni (`execve(path, argv,
-  environ)` deyimi tam olarak bunu yapar), ama cagiranin **baska** bir
-  ortam vermesi mumkun degil.
+* **`CreateProcess`in `lpEnvironment`i yok.** Win32 tarafinda yeni
+  surece ortam vermenin yolu `CreateProcess`tir; TCMK'de o cagri hic
+  yok, dolayisiyla PE tarafi ortami yalnizca **devralir**.
+* **`envp` sekiz satir, satir basi 64 bayt.** Fazlasi sessizce atilir --
+  cekirdek tablosunun siniri zaten bu.
 * **`GetEnvironmentStringsA` yok.** Win32'nin toplu okuma cagrisi; TCMK
   yalnizca adla sorgulamayi destekliyor.
 * **Yerel katman dort girdilik.** POSIX tarafinda bir surec dortten

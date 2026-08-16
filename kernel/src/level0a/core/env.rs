@@ -172,6 +172,29 @@ pub fn set(table: usize, name: &str, value: &str) -> bool {
     })
 }
 
+/// Bir tablodaki her seyi siler.
+///
+/// `execve` cagirana kendi `envp`sini verdiginde gerekiyor: yeni ortam
+/// eskisinin **uzerine eklenmez**, onun **yerine gecer**. Gercek POSIX
+/// de boyledir -- `execve`ye verilen dizi ortamin tamamidir.
+pub fn clear(table: usize) {
+    if table < TABLES {
+        COUNTS[table].store(0, Ordering::Relaxed);
+    }
+}
+
+/// `AD=deger` biciminde tek bir girdiyi yerlestirir.
+///
+/// `envp` dizisindeki her satir zaten bu bicimdedir; ayristirmayi tek
+/// bir yerde tutmak, cagiranin ad ile degeri elle ayirmasini onluyor.
+/// `=` icermeyen satirlar POSIX'te de yok sayilir.
+pub fn set_entry(table: usize, text: &str) -> bool {
+    match text.find('=') {
+        Some(i) => set(table, &text[..i], &text[i + 1..]),
+        None => false,
+    }
+}
+
 /// Bir tabloyu digerinin uzerine kopyalar.
 ///
 /// Tek kalip: yuva ayrilirken oturumdan, `fork`ta ebeveynden. Ikisi de

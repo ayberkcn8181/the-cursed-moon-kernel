@@ -638,6 +638,27 @@ pub fn execve(path: &str) -> isize {
 /// `GetCommandLineA`nin dondugu tek dize olarak gorur -- cekirdek
 /// argumanlari bir kez aliyor, ayrilan yalnizca sunum.
 pub fn execve_args(path: &str, args: &str) -> isize {
+    execve_env(path, args, None)
+}
+
+/// `envp` dizisinde tasinabilecek girdi sayisi ve satir boyu -- cekirdek
+/// tablosuyla ayni sinirlar (bkz. `level0a/core/env.rs`).
+const ENVP_MAX: usize = 8;
+const ENV_ENTRY_MAX: usize = 64;
+
+/// Ortami **acikca veren** `execve`.
+///
+/// Gercek `execve`nin ucuncu parametresi budur ve anlami sudur: verilen
+/// dizi yeni surecin ortaminin **tamami**dir, eskisinin uzerine eklenmez.
+///
+/// `env` `None` verilirse ortam **korunur** -- TCMK'de gorev yuvasi ayni
+/// kaldigi icin bu bedava gelir, ve `execve(path, argv, environ)`
+/// deyiminin sonucuyla ayni yere cikar. Gercek POSIX'te "koru" diye bir
+/// secenek yoktur; cagiran kendi `environ`unu vermek zorundadir.
+///
+/// Her satir `AD=deger` biciminde olmalidir; `=` icermeyenler yok
+/// sayilir (POSIX'te de oyle).
+pub fn execve_env(path: &str, args: &str, env: Option<&[&str]>) -> isize {
     let mut path_buf = [0u8; 64];
     let mut args_buf = [0u8; 96];
     if path.len() >= path_buf.len() || args.len() >= args_buf.len() {
@@ -645,14 +666,39 @@ pub fn execve_args(path: &str, args: &str) -> isize {
     }
     path_buf[..path.len()].copy_from_slice(path.as_bytes());
     args_buf[..args.len()].copy_from_slice(args.as_bytes());
+
+    // Satirlar NUL sonlandirmali kopyalanir ve isaretcileri NULL ile
+    // biten bir diziye dizilir -- cekirdegin bekledigi `char *envp[]`
+    // duzeni bu. Hepsi yiginda: `execve` basarili olursa bu cerceve
+    // zaten birakiliyor, basarisiz olursa da kimse ona bakmiyor.
+    let mut entries = [[0u8; ENV_ENTRY_MAX]; ENVP_MAX];
+    let mut pointers = [0usize; ENVP_MAX + 1];
+    let mut count = 0usize;
+    if let Some(list) = env {
+        for text in list.iter() {
+            if count >= ENVP_MAX || text.len() >= ENV_ENTRY_MAX {
+                continue;
+            }
+            entries[count][..text.len()].copy_from_slice(text.as_bytes());
+            pointers[count] = entries[count].as_ptr() as usize;
+            count += 1;
+        }
+    }
+    pointers[count] = 0;
+
     unsafe {
-        syscall2(
+        syscall3(
             SYS_EXECVE,
             path_buf.as_ptr() as usize,
             if args.is_empty() {
                 0
             } else {
                 args_buf.as_ptr() as usize
+            },
+            if env.is_some() {
+                pointers.as_ptr() as usize
+            } else {
+                0
             },
         ) as isize
     }
