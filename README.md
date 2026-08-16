@@ -89,7 +89,7 @@ Ekranda gorunenler:
   | bellek/disk | `mem` `disk` `df` `format onayla` `sync` `install onayla` |
   | dosya | `ls [dizin]` `mkdir <yol>` `rmdir <yol>` `cat <yol>` `save <yol> <metin>` `cp <kaynak> <hedef>` `mv <kaynak> <hedef>` `rm <yol>` |
   | uygulama/pencere | `apps` `run <ad>` `win` `focus <id>` `mouse` |
-  | uygulamalar (ELF) | `paint` `plasma` `notes` `menu` `twins` `relay` `echo2` `sigdemo` `race` `reaper` `redirect` `mux` `masked` `arena` `seeker` `browse` `waiter` `crash` `hog` `spin` |
+  | uygulamalar (ELF) | `paint` `plasma` `notes` `menu` `twins` `relay` `echo2` `sigdemo` `race` `reaper` `redirect` `mux` `masked` `arena` `seeker` `browse` `waiter` `heir` `crash` `hog` `spin` |
   | uygulamalar (PE) | `winclock` (ham `int 0x2E`) `winpad` `winfiles` (IAT) -- i386'da PE32, x86_64'te PE32+ |
   | diger | `echo <metin>` `pipes` `clear` `help` |
 - **Sistem Gunlugu** -- cekirdek kaydinin canli goruntusu (konsol halka
@@ -1811,6 +1811,33 @@ Bu tek karar POSIX'in iki kuralini birden karsiliyor:
 
 `fork` ayri yuva aldigi icin ebeveynin dizinini ayrica kopyalar
 (`cwd::clone_into`).
+
+Ikisi de **olculdu**. `heir` uygulamasi once `/miras`a gecip fork
+ediyor; cocuk kendi `getcwd`ini ebeveyninkiyle karsilastirip cevabi
+**cikis koduyla** birakiyor, ebeveyn `waitpid` ile okuyor. Sonra `x`
+tusu `execve("/bin/browse")` cagiriyor -- `browse` acilirken ust
+satirda `getcwd`i gosteriyor:
+
+![heir](docs/screenshot-heir.png)
+
+```text
+[heir] ebeveyn cwd: /miras
+[heir] cocuk cwd: /miras (devralindi)
+[heir] fork sinavi: gecti
+[heir] execve /bin/browse -- cwd korunmali: /miras
+[browse] /miras icinde 0 girdi.
+```
+
+Son satir exec sinavinin kendisi: `heir`in yerine yuklenen **baska bir
+ikili**, ayni dizinde acildi.
+
+Sinav bir kere de yanlis "kaldi" demisti: karsilastirma sabit bir yola
+(`"/miras"`) yapiliyordu ve disk bagli olmayan bir kosuda `chdir`
+sessizce basarisiz olunca sinav basarisiz gorunuyordu -- oysa devralma
+dogru calisiyordu, yalnizca gidilecek dizin yoktu. Karsilastirma
+**ebeveynin gercek dizinine** cevrildi; sinanan sey "cocuk ebeveynle
+ayni yerde mi", bir yol adinin kendisi degil. x86_64'te (disk yok) ayni
+sinav kokten kosuyor ve yine geciyor.
 
 ### Olcum bir hata daha buldu
 
