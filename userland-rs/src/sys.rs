@@ -50,6 +50,10 @@ mod i386_numbers {
     pub const SYS_CLOCK_GETTIME: usize = 265;
     pub const SYS_UNAME: usize = 122;
     pub const SYS_FSYNC: usize = 118;
+    pub const SYS_GETPPID: usize = 64;
+    pub const SYS_WRITEV: usize = 146;
+    pub const SYS_NANOSLEEP: usize = 162;
+    pub const SYS_EXIT_GROUP: usize = 252;
     pub const SYS_GETCWD: usize = 183;
     pub const SYS_WAITPID: usize = 7;
     pub const SYS_PIPE: usize = 42;
@@ -94,6 +98,10 @@ mod x86_64_numbers {
     pub const SYS_CLOCK_GETTIME: usize = 228;
     pub const SYS_UNAME: usize = 63;
     pub const SYS_FSYNC: usize = 74;
+    pub const SYS_GETPPID: usize = 110;
+    pub const SYS_WRITEV: usize = 20;
+    pub const SYS_NANOSLEEP: usize = 35;
+    pub const SYS_EXIT_GROUP: usize = 231;
     pub const SYS_GETCWD: usize = 79;
     pub const SYS_BRK: usize = 12;
     pub const SYS_PIPE: usize = 22;
@@ -610,6 +618,48 @@ pub fn uname() -> Option<UtsName> {
         return None;
     }
     Some(info)
+}
+
+/// POSIX `getppid`: ebeveynin kimligi.
+pub fn getppid() -> usize {
+    unsafe { syscall0(SYS_GETPPID) }
+}
+
+/// POSIX `nanosleep` -- `sleep_ms`in **gercek Linux numarasi** uzerinden
+/// yuzu.
+///
+/// Ayni yetenek, iki yol: `sleep_ms` TCMK'nin kendi cagrisini kullanir,
+/// bu ise derlenmis bir Linux ikilisinin kullanacagi numarayi. Ikisinin
+/// de calismasi, yuzeyin gercekten Linux'a benzedigini gosteriyor.
+pub fn nanosleep(seconds: usize, nanoseconds: usize) -> isize {
+    let spec = [seconds, nanoseconds];
+    unsafe { syscall2(SYS_NANOSLEEP, spec.as_ptr() as usize, 0) as isize }
+}
+
+/// `writev` icin tek bir tampon tanimi (`struct iovec`).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct IoVec {
+    pub base: *const u8,
+    pub len: usize,
+}
+
+impl IoVec {
+    pub fn new(data: &[u8]) -> Self {
+        IoVec {
+            base: data.as_ptr(),
+            len: data.len(),
+        }
+    }
+}
+
+/// POSIX `writev`: birden cok tamponu **tek cagride** yazar.
+///
+/// glibc'nin stdio'su ciktisini bazi yollarda boyle bosaltir (baslik +
+/// govde tek cagride); desteklenmeseydi o yollar `ENOSYS` gorur ve
+/// hicbir sey yazilmazdi.
+pub fn writev(fd: usize, parts: &[IoVec]) -> isize {
+    unsafe { syscall3(SYS_WRITEV, fd, parts.as_ptr() as usize, parts.len()) as isize }
 }
 
 /// POSIX `fsync`: bekleyen yazmalari diske indirir.

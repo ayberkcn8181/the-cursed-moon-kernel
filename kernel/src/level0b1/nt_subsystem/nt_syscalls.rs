@@ -87,6 +87,8 @@ pub const NT_GET_SYSTEM_TIME_AS_FILE_TIME: u32 = 0x3020;
 pub const NT_GET_SYSTEM_TIME: u32 = 0x3021;
 pub const NT_FLUSH_FILE_BUFFERS: u32 = 0x3022;
 pub const NT_GET_VERSION_EX_A: u32 = 0x3023;
+pub const NT_GET_CURRENT_PROCESS_ID: u32 = 0x3024;
+pub const NT_GET_CURRENT_THREAD_ID: u32 = 0x3025;
 
 pub const NT_USER_CREATE_WINDOW_W32: u32 = 0x3010;
 pub const NT_GDI_GET_BITS_W32: u32 = 0x3011;
@@ -1056,6 +1058,19 @@ fn dispatch_win32_api(frame: &mut SyscallFrame) {
                     WIN32_FALSE
                 }
             }
+        }
+
+        // GetCurrentProcessId() / GetCurrentThreadId()
+        //
+        // POSIX'te bu ikisi ayri cagridir (`getpid`/`gettid`) ve **ayri
+        // sayilar** dondururler, cunku bir surecte cok is parcacigi olur.
+        // TCMK'de is parcacigi yok: bir gorev = bir surec = bir akis.
+        //
+        // Bu yuzden ikisi de ayni sayiyi donduruyor, ve bu bir eksiklik
+        // degil dogru cevap: sistemde gercekten tek bir akis var. Ayri
+        // sayilar uydurmak, is parcacigi varmis gibi gorunmek olurdu.
+        NT_GET_CURRENT_PROCESS_ID | NT_GET_CURRENT_THREAD_ID => {
+            crate::level0a::core::scheduler::current_id()
         }
 
         // --- TCMKGUI.dll: pencere cagrilari ---

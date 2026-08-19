@@ -267,6 +267,18 @@ static KERNEL32: &[Export] = &[
         // lpVersionInformation
         stack_bytes: 4,
     },
+    Export {
+        name: "GetCurrentProcessId",
+        ordinal: 30,
+        service: nt::NT_GET_CURRENT_PROCESS_ID,
+        stack_bytes: 0,
+    },
+    Export {
+        name: "GetCurrentThreadId",
+        ordinal: 31,
+        service: nt::NT_GET_CURRENT_THREAD_ID,
+        stack_bytes: 0,
+    },
 ];
 
 /// `TCMKGUI.dll` -- win32k cagrilarinin kullanici modundaki yuzu.

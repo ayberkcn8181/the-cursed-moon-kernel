@@ -213,6 +213,15 @@ extern "system" {
     /// `dwOSVersionInfoSize` cagiran tarafindan doldurulmalidir --
     /// cekirdek onu dogrular.
     pub fn GetVersionExA(version_information: *mut OsVersionInfoA) -> Bool;
+
+    /// Surecin kimligi. POSIX `getpid` ile ayni sayiyi verir.
+    pub fn GetCurrentProcessId() -> Dword;
+    /// Is parcaciginin kimligi.
+    ///
+    /// TCMK'de is parcacigi yok -- bir gorev = bir surec = bir akis --
+    /// yani bu cagri surec kimligiyle **ayni** sayiyi dondurur. Ayri bir
+    /// sayi uydurmak, is parcacigi varmis gibi gorunmek olurdu.
+    pub fn GetCurrentThreadId() -> Dword;
 }
 
 /// `SYSTEMTIME` -- Windows'un bolunmus zaman yapisi (sekiz `WORD`).

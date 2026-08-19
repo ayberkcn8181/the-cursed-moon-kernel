@@ -288,6 +288,21 @@ fn spawn_inner(
     })
 }
 
+/// Bir gorevin ebeveyni (POSIX `getppid`).
+///
+/// Yuva geri kazanildigi icin "ebeveyn hala yasiyor mu" sorusu ayri;
+/// burada yalnizca kayitli deger doner. Init'in ebeveyni kendisidir --
+/// gercek POSIX'te de `getppid()` bir noktada 1'e (ya da 0'a) dayanir.
+pub fn parent_of(task: usize) -> usize {
+    if task >= MAX_TASKS {
+        return 0;
+    }
+    crate::arch::cpu::without_interrupts(|| unsafe {
+        let tasks = core::ptr::addr_of!(TASKS) as *const Task;
+        (*tasks.add(task)).parent
+    })
+}
+
 /// Sonlanmis bir gorevin yuvasini geri verir.
 ///
 /// Yigin bellegi **birakilmaz**, yuvada saklanir: bir sonraki `spawn` onu

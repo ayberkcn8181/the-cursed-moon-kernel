@@ -32,7 +32,14 @@
 //!   D  GetVersionExA        -> platform NT(2); boyut alani bos gelirse
 //!                              cagri BASARISIZ olmali
 //!   E  GetSystemTime        -> makul takvim + FILETIME sifir degil
+//!   F  GetCurrentProcessId  -> ThreadId ile AYNI olmali
 //! ```
+//!
+//! F bir eksikligi degil bir **gercegi** olcuyor: POSIX'te `getpid` ve
+//! `gettid` ayri sayilar dondururler cunku bir surecte cok is parcacigi
+//! olur. TCMK'de is parcacigi yok -- bir gorev = bir surec = bir akis --
+//! yani ayni sayiyi dondurmek dogru cevap. Ayri sayilar uydurmak, is
+//! parcacigi varmis gibi gorunmek olurdu.
 //!
 //! Tuslar: `q` -> cik
 
@@ -66,7 +73,7 @@ const EMPTY: Check = Check {
 
 fn main() {
     let mut console = winapi::Console;
-    let mut checks = [EMPTY; 5];
+    let mut checks = [EMPTY; 6];
 
     // --- A: RAMFS dosyasi ---
     let file = unsafe { winapi::GetFileAttributesA(b"C:\\bin\\browse\0".as_ptr()) };
@@ -166,6 +173,19 @@ fn main() {
         passed: e,
     };
 
+    // --- F: surec ve is parcacigi kimligi ---
+    let process = unsafe { winapi::GetCurrentProcessId() };
+    let thread = unsafe { winapi::GetCurrentThreadId() };
+    checks[5] = Check {
+        name: "F surec kimligi",
+        detail: if process == thread {
+            "ProcessId == ThreadId (tek akis)"
+        } else {
+            "iki kimlik AYRISTI -- is parcacigi yok"
+        },
+        passed: process == thread,
+    };
+
     for check in &checks {
         let _ = core::fmt::Write::write_str(&mut console, "[winprobe] ");
         let _ = core::fmt::Write::write_str(&mut console, check.name);
@@ -177,7 +197,7 @@ fn main() {
         let _ = core::fmt::Write::write_str(&mut console, ")\n");
     }
 
-    let mut win = match Window::create("winprobe -- Win32 sorma cagrilari", 300, 180, 470, 230) {
+    let mut win = match Window::create("winprobe -- Win32 sorma cagrilari", 300, 180, 460, 230) {
         Some(w) => w,
         None => return,
     };
@@ -190,23 +210,22 @@ fn main() {
     }
 }
 
-fn draw(win: &mut Window, checks: &[Check; 5], now: &SystemTime, version: &OsVersionInfoA) {
+fn draw(win: &mut Window, checks: &[Check; 6], now: &SystemTime, version: &OsVersionInfoA) {
     let (w, h) = (win.width(), win.height());
     win.clear(BG);
     win.fill(0, 0, w, 22, PANEL);
     win.text(6, 3, "Win32: ayni cekirdek, baska sozlesme", ACCENT);
 
+    // Ozet pencerede, ayrinti seri gunlukte (bkz. POSIX ikizi).
     let mut y = 30;
     for check in checks {
         win.text(6, y, check.name, FG);
         win.text(
-            200,
+            320,
             y,
             if check.passed { "gecti" } else { "KALDI" },
             if check.passed { OK } else { WARN },
         );
-        y += 13;
-        win.text(16, y, check.detail, DIM);
         y += 16;
     }
 
@@ -221,7 +240,7 @@ fn draw(win: &mut Window, checks: &[Check; 5], now: &SystemTime, version: &OsVer
         6,
         h - 14,
         if passed == checks.len() {
-            "bes sinav da gecti   q cik"
+            "alti sinav da gecti   q cik"
         } else {
             "BIR SINAV KALDI   q cik"
         },

@@ -92,6 +92,11 @@ mod i386_numbers {
     pub const SYS_CLOCK_GETTIME: u32 = 265;
     pub const SYS_UNAME: u32 = 122;
     pub const SYS_FSYNC: u32 = 118;
+    pub const SYS_GETPPID: u32 = 64;
+    pub const SYS_WRITEV: u32 = 146;
+    pub const SYS_NANOSLEEP: u32 = 162;
+    pub const SYS_SCHED_YIELD: u32 = 158;
+    pub const SYS_EXIT_GROUP: u32 = 252;
     pub const SYS_BRK: u32 = 45;
     pub const SYS_GETPID: u32 = 20;
     pub const SYS_KILL: u32 = 37;
@@ -140,6 +145,11 @@ mod x86_64_numbers {
     pub const SYS_CLOCK_GETTIME: u32 = 228;
     pub const SYS_UNAME: u32 = 63;
     pub const SYS_FSYNC: u32 = 74;
+    pub const SYS_GETPPID: u32 = 110;
+    pub const SYS_WRITEV: u32 = 20;
+    pub const SYS_NANOSLEEP: u32 = 35;
+    pub const SYS_SCHED_YIELD: u32 = 24;
+    pub const SYS_EXIT_GROUP: u32 = 231;
     pub const SYS_BRK: u32 = 12;
     pub const SYS_PIPE: u32 = 22;
     pub const SYS_FORK: u32 = 57;
@@ -408,7 +418,15 @@ pub fn dispatch(frame: &mut SyscallFrame) {
     let [arg1, arg2, arg3, _, _] = frame.args();
 
     let result: i32 = match number {
-        SYS_EXIT => {
+        // `exit` ve `exit_group` ayni yere iner.
+        //
+        // Ikisini de tasimak sart, cunku **glibc `exit` cagirmaz**:
+        // `_exit` bile `exit_group`a duser (butun is parcaciklarini
+        // birlikte sonlandirmak icin). TCMK'de is parcacigi yok, yani
+        // ayrim pratikte kayboluyor -- ama numarayi tanimayan bir
+        // cekirdek, gercek bir Linux ikilisini **cikamaz** hale
+        // getirirdi.
+        SYS_EXIT | SYS_EXIT_GROUP => {
             // Geri donmez.
             kernel_api::exit_current_task(arg1 as u32);
         }
@@ -616,7 +634,10 @@ pub fn dispatch(frame: &mut SyscallFrame) {
             frame.set_return(gui_api::mouse_state());
             return;
         }
-        SYS_YIELD => {
+        // TCMK'nin kendi numarasi (0x506) **ve** gercek Linux numarasi.
+        // Ikincisi olmadan, derleyicinin urettigi bir ikili bu yetenege
+        // hic ulasamazdi.
+        SYS_YIELD | SYS_SCHED_YIELD => {
             crate::level0a::core::scheduler::yield_now();
             frame.set_return(0);
             return;
@@ -1223,7 +1244,96 @@ pub fn dispatch(frame: &mut SyscallFrame) {
             return;
         }
 
+        // `nanosleep(istek, kalan)` -- `SYS_SLEEP`in gercek Linux yuzu.
+        //
+        // Ayni yetenek, iki numara: TCMK'nin kendi cagrisi milisaniye
+        // aliyor, Linux'unki bir `struct timespec` isaretcisi. Ikincisi
+        // olmadan derlenmis bir Linux ikilisi uyuyamazdi.
+        //
+        // `kalan` (arg2) doldurulmuyor: yalnizca **sinyalle kesilen** bir
+        // uykuda anlamli ve TCMK'nin uykusu kesilmiyor. Doldurmus gibi
+        // yapmak, kalan sureyi kullanan bir donguyu yaniltirdi.
+        SYS_NANOSLEEP => {
+            let width = core::mem::size_of::<usize>();
+            if !mmu::is_user_accessible(arg1) || !mmu::is_user_accessible(arg1 + 2 * width - 1) {
+                -EFAULT
+            } else {
+                let seconds = unsafe { (arg1 as *const usize).read_unaligned() };
+                let nanoseconds =
+                    unsafe { ((arg1 + width) as *const usize).read_unaligned() };
+                let ms = seconds * 1000 + nanoseconds / 1_000_000;
+                if ms == 0 {
+                    crate::level0a::core::scheduler::yield_now();
+                } else {
+                    crate::level0a::core::scheduler::sleep_ticks(((ms as u32) / 10).max(1));
+                }
+                0
+            }
+        }
+
+        // `writev(fd, iovec[], count)` -- tek cagride birden cok tampon.
+        //
+        // glibc'nin stdio'su ciktisini bazi yollarda boyle bosaltir
+        // (baslik + govde tek cagride). Desteklenmezse o yollar `ENOSYS`
+        // gorur ve **hicbir sey yazilmaz** -- sessiz bir program.
+        //
+        // `struct iovec` iki kelime: taban + uzunluk. Atomiklik vaadi
+        // yok; parcalar sirayla yaziliyor.
+        SYS_WRITEV => {
+            let width = core::mem::size_of::<usize>();
+            let count = arg3;
+            if count > MAX_POLL_FDS {
+                return_errno(frame, -EINVAL);
+                return;
+            }
+            let mut total = 0usize;
+            let mut failed = None;
+            for i in 0..count {
+                let record = arg2 + i * 2 * width;
+                if !mmu::is_user_accessible(record)
+                    || !mmu::is_user_accessible(record + 2 * width - 1)
+                {
+                    failed = Some(-EFAULT);
+                    break;
+                }
+                let base = unsafe { (record as *const usize).read_unaligned() };
+                let len = unsafe { ((record + width) as *const usize).read_unaligned() };
+                if len == 0 {
+                    continue;
+                }
+                match unsafe { kernel_api::write(arg1 as u32, base as *const u8, len) } {
+                    Ok(written) => total += written,
+                    Err(e) => {
+                        // Kismi yazma gerceklestiyse onu bildirmek dogru:
+                        // POSIX de "yazilan kadarini don" der.
+                        if total == 0 {
+                            failed = Some(errno_of(e));
+                        }
+                        break;
+                    }
+                }
+            }
+            match failed {
+                Some(e) => e,
+                None => {
+                    frame.set_return(total);
+                    return;
+                }
+            }
+        }
+
         SYS_GETPID => crate::level0a::core::scheduler::current_id() as i32,
+
+        // `getppid()` -- ebeveynin kimligi.
+        //
+        // `fork`tan sonra cocugun "beni kim dogurdu" sorusunun cevabi.
+        // Yuva geri kazanildigi icin ebeveyn artik yasamiyor olabilir;
+        // cagri yine de kayitli degeri doner -- POSIX'te de oyle, orada
+        // oksuz surecler init'e devredilir.
+        SYS_GETPPID => {
+            let me = crate::level0a::core::scheduler::current_id();
+            crate::level0a::core::scheduler::parent_of(me) as i32
+        }
 
         SYS_SETPRIORITY => {
             // setpriority(which, who, prio). `which` yalnizca PRIO_PROCESS

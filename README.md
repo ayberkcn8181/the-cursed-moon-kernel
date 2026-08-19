@@ -56,6 +56,7 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 5f | **`stat`/`access`** + `GetFileAttributesA` (acmadan sormak) | ✅ (i386 + x86_64, ELF + PE) |
 | 9f | **Saat**: `time`/`clock_gettime` + `GetSystemTime(AsFileTime)` | ✅ (i386 + x86_64, ELF + PE) |
 | 9g | **`uname`** + `GetVersionExA`, **`fsync`** + `FlushFileBuffers` | ✅ (i386 + x86_64, ELF + PE) |
+| 9h | **Gercek Linux numaralari**: `exit_group` `nanosleep` `sched_yield` `writev` `getppid` | ✅ (i386 + x86_64) |
 | — | **Klavye: shift + caps lock** (US duzeni, buyuk harf ve noktalama) | ✅ (i386 + x86_64) |
 | — | **Kendi onyukleyicisi** + diske kurulum (`install`) | ✅ (i386) |
 | 8 | **`execve`** (surec kendi yerine program yukler) | ✅ (i386 + x86_64) |
@@ -2354,12 +2355,16 @@ tek cumle bu.
 
 ```text
 tcmk> run probe
-[probe] A stat dosya:      gecti (var, salt okunur, boyu dolu)
-[probe] B stat dizin:      gecti (ima edilen dizin gorundu)
-[probe] C stat yok:        gecti (olmayan yol None dondu)
-[probe] D access:          gecti (F_OK gecti, W_OK RAMFS icin gecmedi)
-[probe] E uname:           gecti (sysname ve machine dogru)
-[probe] F monotonik saat:  gecti (400 ms uykudan sonra ilerlemis)
+[probe] A stat dosya:         gecti (var, salt okunur, boyu dolu)
+[probe] B stat dizin:         gecti (ima edilen dizin gorundu)
+[probe] C stat yok:           gecti (olmayan yol None dondu)
+[probe] D access:             gecti (F_OK gecti, W_OK RAMFS icin gecmedi)
+[probe] E uname:              gecti (sysname ve machine dogru)
+[probe] F monotonik saat:     gecti (400 ms uykudan sonra ilerlemis)
+[probe] G nanosleep:          gecti (gercek Linux numarasiyla uyudu)
+[probe] H writev:             gecti (iki tampon yazildi, donus toplam)
+[probe] I getppid/exit_group: gecti (cocuk ebeveynini tanidi ve exit_group
+                                     ile cikti)
 
 tcmk> run winprobe
 [winprobe] A dosya ozellikleri: gecti (READONLY var, DIRECTORY yok)
@@ -2367,6 +2372,7 @@ tcmk> run winprobe
 [winprobe] C olmayan yol:       gecti (0xFFFFFFFF + GetLastError = 2)
 [winprobe] D GetVersionExA:     gecti (platform NT(2), bos boyut reddedildi)
 [winprobe] E saat:              gecti (takvim ve FILETIME dolu)
+[winprobe] F surec kimligi:     gecti (ProcessId == ThreadId, tek akis)
 ```
 
 ![probe](docs/screenshot-probe.png)
@@ -2379,8 +2385,49 @@ Iki sinav ozellikle **olumsuz** tarafi olcuyor, cunku asil kanit orada:
   Windows `dwOSVersionInfoSize`i dogrular ve doldurulmamis bir yapiyi
   reddeder; kabul etseydi cagiranin hangi surumu bekledigi bilinemezdi.
 
-On bir sinav da iki mimaride geciyor (i386/ELF32+PE32,
+On bes sinav da iki mimaride geciyor (i386/ELF32+PE32,
 x86_64/ELF64+PE32+).
+
+## Ayni yetenek, gercek numara
+
+`probe`in G ve I sinavlari baska bir seyi olcuyor, ve o sey bu projenin
+iddiasinin tam merkezinde.
+
+TCMK bazi yetenekleri **kendi** numaralariyla zaten sunuyordu: uyku
+`0x508`, `yield` `0x506`. Kendi userland'imiz o numaralari kullaniyordu
+ve her sey calisiyordu. Ama derleyicinin urettigi gercek bir Linux
+ikilisi o numaralari **bilmez**; `nanosleep` deyip 162 (ya da x86_64'te
+35) cagirir ve `ENOSYS` alirdi.
+
+En kritigi cikis: **glibc `exit` cagirmaz**. `_exit` bile `exit_group`a
+duser -- butun is parcaciklarini birlikte sonlandirmak icin. Numarayi
+tanimayan bir cekirdek, gercek bir Linux programini **cikamaz** hale
+getirirdi.
+
+Bu turden alti numara eklendi ve hepsi mevcut koda baglandi:
+
+| cagri | i386 | x86_64 | neden |
+|---|---|---|---|
+| `exit_group` | 252 | 231 | glibc'nin gercekte cagirdigi cikis |
+| `sched_yield` | 158 | 24 | `0x506` ile ayni yere iner |
+| `nanosleep` | 162 | 35 | `0x508` ile ayni yere iner |
+| `writev` | 146 | 20 | stdio ciktisini boyle bosaltir |
+| `getppid` | 64 | 110 | `fork` sonrasi "beni kim dogurdu" |
+| `fsync` | 118 | 74 | kabugun `sync`i artik uygulamalarda da |
+
+`nanosleep`in `kalan` parametresi bilerek doldurulmuyor: yalnizca
+**sinyalle kesilen** bir uykuda anlamlidir ve TCMK'nin uykusu kesilmiyor.
+Doldurmus gibi yapmak, kalan sureyi kullanan bir donguyu yaniltirdi.
+
+`writev` de atomiklik vaat etmiyor -- parcalar sirayla yaziliyor -- ama
+donus **toplam**: tek parca yazip donen bir uygulama ciktinin yarisini
+kaybederdi. `probe` H tam olarak bunu sinar.
+
+Win32 tarafinda bu batinin karsiligi `GetCurrentProcessId` /
+`GetCurrentThreadId`. Ikisi de **ayni** sayiyi donduruyor ve bu bir
+eksiklik degil: POSIX'te `getpid`/`gettid` ayrisir cunku bir surecte cok
+is parcacigi olur; TCMK'de bir gorev = bir surec = bir akis. Ayri sayilar
+uydurmak, is parcacigi varmis gibi gorunmek olurdu.
 
 ### Bilerek yapilmayanlar
 
@@ -2392,6 +2439,15 @@ x86_64/ELF64+PE32+).
   siniyor -- iki ABI'nin de sozlesmesi oyle.
 * **`GetLocalTime` yok**: saat dilimi kavrami yok, `GetSystemTime` ile
   ayni seyi dondururdu.
+* **`ftruncate`/`SetEndOfFile` yok.** TCMKFS'te dosyayi kisaltmak blok
+  zincirini kesip kuyrugu serbest birakmayi gerektiriyor; `write_all`
+  bunu sil-ve-yeniden-yarat ile yapiyor ama bu `fd` uzerinden isleyen bir
+  `ftruncate` icin yeterli degil.
+* **`readv` yok**: `writev`in esi, ama okuma yolunda ayni baski yok --
+  glibc stdio okumayi tek tamponla yapiyor.
+* **`arch_prctl`/`set_tid_address` yok**: gercek bir glibc ikilisinin
+  TLS kurmasi icin gerekli olurdu; TCMK'nin kendi userland'i TLS
+  kullanmiyor.
 
 ## Kabuk komutlari artik ekrani dondurmuyor
 
