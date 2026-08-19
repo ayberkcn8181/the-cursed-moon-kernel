@@ -53,6 +53,9 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 3d | **Surec basina ortam**: `setenv` + `SetEnvironmentVariableA` (fork/execve mirasi) | ✅ (i386 + x86_64, ELF + PE) |
 | 3e | **`execve(yol, argv, envp)`** -- cagiranin verdigi ortam tabloyu yerine gecer | ✅ (i386 + x86_64) |
 | 3f | **`PATH` aramasi + `PATHEXT`** (`which`, `run`, `execve`) | ✅ (i386 + x86_64, ELF + PE) |
+| 5f | **`stat`/`access`** + `GetFileAttributesA` (acmadan sormak) | ✅ (i386 + x86_64, ELF + PE) |
+| 9f | **Saat**: `time`/`clock_gettime` + `GetSystemTime(AsFileTime)` | ✅ (i386 + x86_64, ELF + PE) |
+| 9g | **`uname`** + `GetVersionExA`, **`fsync`** + `FlushFileBuffers` | ✅ (i386 + x86_64, ELF + PE) |
 | — | **Klavye: shift + caps lock** (US duzeni, buyuk harf ve noktalama) | ✅ (i386 + x86_64) |
 | — | **Kendi onyukleyicisi** + diske kurulum (`install`) | ✅ (i386) |
 | 8 | **`execve`** (surec kendi yerine program yukler) | ✅ (i386 + x86_64) |
@@ -96,8 +99,8 @@ Ekranda gorunenler:
   | bellek/disk | `mem` `disk` `df` `format onayla` `sync` `install onayla` |
   | dosya | `ls [dizin]` `mkdir <yol>` `rmdir <yol>` `cat <yol>` `save <yol> <metin>` `cp <kaynak> <hedef>` `mv <kaynak> <hedef>` `rm <yol>` |
   | uygulama/pencere | `apps` `run <ad> [argumanlar]` `win` `focus <id>` `mouse` |
-  | uygulamalar (ELF) | `paint` `plasma` `notes` `menu` `twins` `relay` `echo2` `sigdemo` `race` `reaper` `redirect` `mux` `masked` `arena` `seeker` `browse` `waiter` `heir` `nested` `bequest` `crash` `hog` `spin` |
-  | uygulamalar (PE) | `winclock` (ham `int 0x2E`) `winpad` `winfiles` `winenv` (IAT) -- i386'da PE32, x86_64'te PE32+ |
+  | uygulamalar (ELF) | `paint` `plasma` `notes` `menu` `twins` `relay` `echo2` `sigdemo` `race` `reaper` `redirect` `mux` `masked` `arena` `seeker` `browse` `waiter` `heir` `nested` `bequest` `probe` `crash` `hog` `spin` |
+  | uygulamalar (PE) | `winclock` (ham `int 0x2E`) `winpad` `winfiles` `winenv` `winprobe` (IAT) -- i386'da PE32, x86_64'te PE32+ |
   | ortam | `cd [dizin]` `pwd` `env` `set AD=deger` `which <ad>` |
   | diger | `echo <metin>` `pipes` `clear` `help` |
 - **Sistem Gunlugu** -- cekirdek kaydinin canli goruntusu (konsol halka
@@ -2280,6 +2283,115 @@ PE32 (i386) ve PE32+ (x86_64) ikilisinde de ayni dort sonuc.
 * **Sekiz degisken, 64 bayt** -- sabit tablo, dinamik ayirma yok.
 * **TR klavye duzeni yok.** Shift tablosu US; bir gun duzen eklenirse
   degisecek yer o tek tablo.
+
+## Sormak icin acmak gerekmiyor: `stat`, saat, `uname`
+
+Bu turdeki cagrilar uzun sure eksikti ve eksiklikleri **sessizdi** --
+hicbir sey bozulmuyordu, yalnizca uygulamalar dolambacli yollar
+kullaniyordu.
+
+| soru | onceki tek cevap | simdi |
+|---|---|---|
+| bu yol var mi? | `open` deneyip sonuca bakmak | `stat` / `access` |
+| bu bir dizin mi? | **cevap yoktu** (`open` dizinde calismiyordu) | `stat` |
+| saat kac? | POSIX'te **cevap yoktu** | `time` / `clock_gettime` |
+| hangi sistemdeyim? | cevap yoktu | `uname` |
+| yazdiklarim diskte mi? | yalnizca kabugun `sync` komutu | `fsync` |
+
+Saat satiri en carpici olani: RTC surucusu bastan beri oradaydi ve bir
+**PE** onu `NtQuerySystemTime` ile okuyabiliyordu. Ayni cekirdekte kosan
+bir **ELF** okuyamiyordu. Asimetri kaynakta degil, yalnizca ceviri
+katmanindaydi.
+
+### Ayni cagri, iki sozlesme
+
+Her biri tek bir `kernel_api` girisine iniyor; ayrisan cevabin bicimi,
+ve her satirin kendi sebebi var:
+
+```text
+  stat(yol, buf)            -> 0/-errno, bilgi TAMPONA yazilir
+  GetFileAttributesA(yol)   -> bilgi DONUS DEGERINDE, bayrak kumesi;
+                               hata 0 degil 0xFFFFFFFF
+
+  time()                    -> 1970'ten beri SANIYE
+  GetSystemTimeAsFileTime   -> 1601'den beri 100 NANOSANIYELIK ARALIK
+
+  uname(buf)                -> alti DIZE (sysname, release, machine...)
+  GetVersionExA(buf)        -> uc SAYI + servis paketi dizesi
+```
+
+Birinci satirda hata degerinin `0` olmamasi rastlanti degil: sifir
+"hicbir ozellik yok" demek olurdu ve o **gecerli bir durum**
+sayilabilirdi. Windows bu yuzden `INVALID_FILE_ATTRIBUTES`i tum bitler
+bir secmis.
+
+Ucuncu satir pratikte fark yaratiyor: bir Windows programi
+`dwMajorVersion >= 5` diye **sayi** karsilastirir; ayni is POSIX'te
+dizeyi ayristirmakla yapilir.
+
+Ikinci satirda cevrim (`filetime_of`) tek yerde duruyor. Iki taraftan
+birine otekinin cagini dayatmak, o tarafta derlenmis her programin tarih
+hesabini kaydirirdi.
+
+### `stat` neden `struct stat` degil
+
+Gercek `struct stat`in yirmi alani var; TCMK ucunu veriyor: boyut, dizin
+mi, salt okunur mu. Sebep, `uname`de tam tersini yapmis olmamizla ayni:
+
+* `utsname` **oldugu gibi** dolduruluyor (alti alan, her biri 65 bayt),
+  cunku alanlarin karsiligi var -- yalnizca degerler TCMK'nin. Yapi glibc
+  basliklarinda sabittir ve alanlara ofsetle erisilir.
+* `stat`in on yedi alaninin ise **karsiligi yok**: izin, sahiplik, aygit
+  numarasi, bag sayisi. Sifirla doldurmak, "bilinmiyor" ile "sifir"
+  arasindaki farki silerdi.
+
+`read_only` da bir izin biti degil, **arka uc** bilgisi: RAMFS dosyalari
+cekirdek imajinin icindedir. Win32 tarafinda ayni gercek
+`FILE_ATTRIBUTE_READONLY` olarak gorunuyor -- iki dunyada da dogru olan
+tek cumle bu.
+
+### Olcum
+
+```text
+tcmk> run probe
+[probe] A stat dosya:      gecti (var, salt okunur, boyu dolu)
+[probe] B stat dizin:      gecti (ima edilen dizin gorundu)
+[probe] C stat yok:        gecti (olmayan yol None dondu)
+[probe] D access:          gecti (F_OK gecti, W_OK RAMFS icin gecmedi)
+[probe] E uname:           gecti (sysname ve machine dogru)
+[probe] F monotonik saat:  gecti (400 ms uykudan sonra ilerlemis)
+
+tcmk> run winprobe
+[winprobe] A dosya ozellikleri: gecti (READONLY var, DIRECTORY yok)
+[winprobe] B dizin ozellikleri: gecti (DIRECTORY bayragi var)
+[winprobe] C olmayan yol:       gecti (0xFFFFFFFF + GetLastError = 2)
+[winprobe] D GetVersionExA:     gecti (platform NT(2), bos boyut reddedildi)
+[winprobe] E saat:              gecti (takvim ve FILETIME dolu)
+```
+
+![probe](docs/screenshot-probe.png)
+
+Iki sinav ozellikle **olumsuz** tarafi olcuyor, cunku asil kanit orada:
+
+* `probe` F'de tek okuma bir sey kanitlamaz -- saatin calismasi demek
+  **ilerlemesi** demek, o yuzden uyku oncesi/sonrasi fark bakiliyor.
+* `winprobe` D'de ikinci cagri bilerek **bos** bir yapiyla yapiliyor.
+  Windows `dwOSVersionInfoSize`i dogrular ve doldurulmamis bir yapiyi
+  reddeder; kabul etseydi cagiranin hangi surumu bekledigi bilinemezdi.
+
+On bir sinav da iki mimaride geciyor (i386/ELF32+PE32,
+x86_64/ELF64+PE32+).
+
+### Bilerek yapilmayanlar
+
+* **`CLOCK_MONOTONIC` cozunurlugu 10 ms** (PIT 100 Hz). Nanosaniye alani
+  dolduruluyor ama o kadar ince degil; sozlesmeyi tutmak icin var.
+* **`lstat` yok** -- sembolik bag da yok, ayrimin karsiligi olmazdi.
+* **`fsync` dosya basina degil**: TCMKFS'te dosya basina tampon yok, tek
+  bir ortak tablo var. Cagri yine de `fd` aliyor ve gecerliligini
+  siniyor -- iki ABI'nin de sozlesmesi oyle.
+* **`GetLocalTime` yok**: saat dilimi kavrami yok, `GetSystemTime` ile
+  ayni seyi dondururdu.
 
 ## Kabuk komutlari artik ekrani dondurmuyor
 

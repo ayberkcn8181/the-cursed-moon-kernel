@@ -232,6 +232,41 @@ static KERNEL32: &[Export] = &[
         // lpName, lpValue
         stack_bytes: 8,
     },
+    Export {
+        name: "GetFileAttributesA",
+        ordinal: 25,
+        service: nt::NT_GET_FILE_ATTRIBUTES_A,
+        // lpFileName
+        stack_bytes: 4,
+    },
+    Export {
+        name: "GetSystemTimeAsFileTime",
+        ordinal: 26,
+        service: nt::NT_GET_SYSTEM_TIME_AS_FILE_TIME,
+        // lpSystemTimeAsFileTime
+        stack_bytes: 4,
+    },
+    Export {
+        name: "GetSystemTime",
+        ordinal: 27,
+        service: nt::NT_GET_SYSTEM_TIME,
+        // lpSystemTime
+        stack_bytes: 4,
+    },
+    Export {
+        name: "FlushFileBuffers",
+        ordinal: 28,
+        service: nt::NT_FLUSH_FILE_BUFFERS,
+        // hFile
+        stack_bytes: 4,
+    },
+    Export {
+        name: "GetVersionExA",
+        ordinal: 29,
+        service: nt::NT_GET_VERSION_EX_A,
+        // lpVersionInformation
+        stack_bytes: 4,
+    },
 ];
 
 /// `TCMKGUI.dll` -- win32k cagrilarinin kullanici modundaki yuzu.

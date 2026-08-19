@@ -567,6 +567,79 @@ pub fn file_size(fd_num: u32) -> Result<usize, KernelError> {
     vfs::size(entry.node).ok_or(KernelError::BadFileDescriptor)
 }
 
+/// Bir yol hakkinda bilinen her sey.
+///
+/// Gercek `struct stat`in yirmi alani var; burada uc tane, cunku
+/// TCMKFS'te digerlerinin **karsiligi yok**. Sifir dolu alanlar tasimak
+/// programlara var olmayan bir bilgi vaat etmek olurdu.
+///
+/// `read_only` bir izin biti degil, **arka uc** bilgisi: RAMFS dosyalari
+/// cekirdek imajinin icindedir, degistirilemezler. Win32 tarafinda ayni
+/// gercek `FILE_ATTRIBUTE_READONLY` olarak gorunuyor -- iki dunyada da
+/// dogru olan tek cumle bu.
+#[derive(Clone, Copy)]
+pub struct FileInfo {
+    pub size: usize,
+    pub is_dir: bool,
+    pub read_only: bool,
+}
+
+/// Yola gore dosya/dizin bilgisi (POSIX `stat`, Win32
+/// `GetFileAttributesA`).
+///
+/// Bu cagriya kadar "bu yol var mi?" sorusunun tek cevabi **acmakti**:
+/// `open` deneyip sonuca bakmak. Dizinler icin o bile calismiyordu, ve
+/// acmanin yan etkisi var -- tanimlayici tuketiyor. `stat` yan etkisiz
+/// soruyor.
+pub fn stat(path: &str) -> Result<FileInfo, KernelError> {
+    let mut buf = [0u8; PATH_MAX];
+    let path = resolve(path, &mut buf).ok_or(KernelError::NotFound)?;
+
+    if let Some(node) = vfs::lookup(path) {
+        return Ok(FileInfo {
+            size: vfs::size(node).unwrap_or(0),
+            is_dir: false,
+            read_only: vfs::source(node) == Some(vfs::Source::Ram),
+        });
+    }
+
+    // Dosya degilse dizin olabilir: dizinlerin VFS'te dugumu yok
+    // (bkz. `is_dir_path`), varliklari yollardan cikarilir.
+    if is_dir_path(path) {
+        return Ok(FileInfo {
+            size: 0,
+            is_dir: true,
+            // Diskteki dizinler degistirilebilir; RAMFS yollarindan
+            // **ima edilen** dizinler (ornegin `/bin`) degil.
+            read_only: !(tcmkfs::mounted() && tcmkfs::resolve(path).is_some()),
+        });
+    }
+
+    Err(KernelError::NotFound)
+}
+
+/// Bekleyen yazmalari diske indirir (POSIX `fsync`, Win32
+/// `FlushFileBuffers`).
+///
+/// TCMKFS inode tablosunu ve bitmap'i onbellekte tutuyor; guc kesilirse
+/// aradaki fark kaybolur. Kabugun `sync` komutu bunu zaten yapiyordu --
+/// eksik olan, bir **uygulamanin** ayni seyi isteyebilmesiydi.
+///
+/// Tanimlayici basina degil, dosya sistemi genelinde: TCMKFS'te
+/// dosya basina bir tampon yok, tek bir ortak tablo var. Cagriya yine de
+/// bir `fd` veriliyor cunku iki ABI'nin de sozlesmesi oyle -- ve
+/// gecerliligi sinaniyor, sessizce yok saymak yaniltirdi.
+pub fn fsync(fd_num: u32) -> Result<(), KernelError> {
+    let entry = fd::get(fd_num as usize).ok_or(KernelError::BadFileDescriptor)?;
+    if entry.kind != fd::FdKind::File {
+        return Err(KernelError::NotSupported);
+    }
+    if !tcmkfs::mounted() {
+        return Err(KernelError::ReadOnly);
+    }
+    tcmkfs::sync().map_err(|_| KernelError::NoSpace)
+}
+
 // --- Dizin gezinmesi ---------------------------------------------------
 //
 // Bu cagriya kadar bir uygulama dosya sistemini **goremiyordu**: adini

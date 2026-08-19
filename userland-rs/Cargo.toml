@@ -28,6 +28,10 @@ path = "src/win/explorer.rs"
 name = "winenv"
 path = "src/win/envtest.rs"
 
+[[bin]]
+name = "winprobe"
+path = "src/win/probe.rs"
+
 [profile.dev]
 panic = "abort"
 opt-level = 1

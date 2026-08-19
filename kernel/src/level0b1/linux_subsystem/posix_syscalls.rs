@@ -85,6 +85,13 @@ mod i386_numbers {
     pub const SYS_RENAME: u32 = 38;
     pub const SYS_CHDIR: u32 = 12;
     pub const SYS_GETCWD: u32 = 183;
+    /// i386'da `stat64`. Kayit bicimi TCMK'ye ozgu (bkz. cagri).
+    pub const SYS_STAT: u32 = 195;
+    pub const SYS_ACCESS: u32 = 33;
+    pub const SYS_TIME: u32 = 13;
+    pub const SYS_CLOCK_GETTIME: u32 = 265;
+    pub const SYS_UNAME: u32 = 122;
+    pub const SYS_FSYNC: u32 = 118;
     pub const SYS_BRK: u32 = 45;
     pub const SYS_GETPID: u32 = 20;
     pub const SYS_KILL: u32 = 37;
@@ -127,6 +134,12 @@ mod x86_64_numbers {
     pub const SYS_RENAME: u32 = 82;
     pub const SYS_CHDIR: u32 = 80;
     pub const SYS_GETCWD: u32 = 79;
+    pub const SYS_STAT: u32 = 4;
+    pub const SYS_ACCESS: u32 = 21;
+    pub const SYS_TIME: u32 = 201;
+    pub const SYS_CLOCK_GETTIME: u32 = 228;
+    pub const SYS_UNAME: u32 = 63;
+    pub const SYS_FSYNC: u32 = 74;
     pub const SYS_BRK: u32 = 12;
     pub const SYS_PIPE: u32 = 22;
     pub const SYS_FORK: u32 = 57;
@@ -179,6 +192,11 @@ const EROFS: i32 = 30;
 const EINTR: i32 = 4;
 /// Sonuc verilen tampona sigmiyor (`getcwd`).
 const ERANGE: i32 = 34;
+/// Izin yok -- TCMK'de tek kaynagi RAMFS'in salt okunur olmasi.
+const EACCES: i32 = 13;
+
+/// `clock_gettime` saat kimlikleri (Linux ile ayni sayilar).
+const CLOCK_MONOTONIC: usize = 1;
 
 /// `setpriority`/`getpriority` icin desteklenen tek `which` degeri.
 const PRIO_PROCESS: usize = 0;
@@ -310,6 +328,19 @@ fn write_user_word(addr: usize, value: usize) -> bool {
     }
     unsafe { (addr as *mut usize).write_unaligned(value) };
     true
+}
+
+/// Kullanici isaretcisindeki yolu `stat`e verir.
+///
+/// Disaridaki `None` "yol okunamadi" (`EFAULT`), icerideki `Err` ise
+/// "yol yok" demek -- ikisini ayirmak cagirana dogru errno'yu secme
+/// imkani veriyor.
+fn stat_user_path(
+    ptr: usize,
+    storage: &mut [u8; PATH_MAX],
+) -> Option<Result<kernel_api::FileInfo, KernelError>> {
+    let path = unsafe { copy_user_cstr(ptr, storage) }?;
+    Some(kernel_api::stat(path))
 }
 
 /// Kullanici isaretcisinden yol adini alip bir `kernel_api` cagrisina verir.
@@ -848,6 +879,163 @@ pub fn dispatch(frame: &mut SyscallFrame) {
             }
             Err(e) => errno_of(e),
         },
+
+        // `stat(yol, buf)` -- yola gore bilgi; **acmadan**.
+        //
+        // Bu cagriya kadar "bu yol var mi?" sorusunun tek cevabi acmakti:
+        // `open` deneyip sonuca bakmak. Dizinlerde o bile calismiyordu ve
+        // acmanin yan etkisi var -- tanimlayici tuketiyor.
+        //
+        // Kayit bicimi `getdents`te oldugu gibi **TCMK'ye ozgu**: iki
+        // `u32`, yani sekiz bayt, iki mimaride de ayni yerlesim.
+        //
+        //   [0..4)  boyut
+        //   [4..8)  bayraklar: bit0 = dizin, bit1 = salt okunur
+        //
+        // Gercek `struct stat`i taklit etmek yirmi alanin on yedisini
+        // sifirla doldurmak olurdu; sifir, "bilinmiyor" ile "sifir"
+        // arasindaki farki silerdi.
+        SYS_STAT => {
+            let mut storage = [0u8; PATH_MAX];
+            match stat_user_path(arg1, &mut storage) {
+                None => -EFAULT,
+                Some(Err(e)) => errno_of(e),
+                Some(Ok(info)) => {
+                    if !mmu::is_user_accessible(arg2) || !mmu::is_user_accessible(arg2 + 7) {
+                        -EFAULT
+                    } else {
+                        let flags = u32::from(info.is_dir) | (u32::from(info.read_only) << 1);
+                        unsafe {
+                            (arg2 as *mut u32).write_unaligned(info.size as u32);
+                            ((arg2 + 4) as *mut u32).write_unaligned(flags);
+                        }
+                        0
+                    }
+                }
+            }
+        }
+
+        // `access(yol, mode)` -- yalnizca "var mi?" sorusu.
+        //
+        // `mode` yok sayilir ve bu bilincli: `R_OK`/`W_OK`/`X_OK` izin
+        // bitlerini sorar, TCMKFS'te izin biti yok. Var olmayan bir
+        // ayrimi varmis gibi cevaplamaktansa varligi bildiriyoruz --
+        // `W_OK` icin dogru cevabi yine de veriyoruz, cunku RAMFS
+        // gercekten yazilamaz.
+        SYS_ACCESS => {
+            let mut storage = [0u8; PATH_MAX];
+            match stat_user_path(arg1, &mut storage) {
+                None => -EFAULT,
+                Some(Err(e)) => errno_of(e),
+                // W_OK (2) istendiyse salt okunur bir yol icin EACCES.
+                Some(Ok(info)) if arg2 & 2 != 0 && info.read_only => -EACCES,
+                Some(Ok(_)) => 0,
+            }
+        }
+
+        // `time(tloc)` -- 1970'ten beri gecen saniye.
+        //
+        // Bu cagriya kadar POSIX tarafinda **hicbir saat yoktu**: bir ELF
+        // "saat kac?" diye soramiyordu, oysa ayni cekirdekte kosan bir PE
+        // `NtQuerySystemTime` ile sorabiliyordu. Asimetri kaynakta degil
+        // yalnizca ceviri katmanindaydi -- RTC surucusu bastan beri
+        // oradaydi.
+        SYS_TIME => {
+            let now = crate::level0a::drivers::rtc::unix_time() as usize;
+            if arg1 != 0 {
+                if !write_user_word(arg1, now) {
+                    return_errno(frame, -EFAULT);
+                    return;
+                }
+            }
+            frame.set_return(now);
+            return;
+        }
+
+        // `clock_gettime(clk_id, timespec*)` -- saniye + nanosaniye.
+        //
+        // Iki saat var ve **farklari gercek**:
+        //
+        //   CLOCK_REALTIME   RTC'den; duvar saati, geri gidebilir
+        //   CLOCK_MONOTONIC  PIT tikinden; acilistan beri, geri gitmez
+        //
+        // Sure olcen kod ikincisini kullanmali. TCMK'de cozunurluk 10 ms
+        // (PIT 100 Hz), yani nanosaniye alani dolduruluyor ama o kadar
+        // ince degil -- yalan soylememek icin burada yaziyor.
+        //
+        // `struct timespec` iki **kelime**: i386'da 8, x86_64'te 16 bayt.
+        // Sabit bir boyut varsaymak, iki mimariden birinde yigini
+        // tasardi.
+        SYS_CLOCK_GETTIME => {
+            let width = core::mem::size_of::<usize>();
+            let (seconds, nanoseconds) = match arg1 {
+                CLOCK_MONOTONIC => {
+                    let ticks = crate::level0a::pit::ticks() as usize;
+                    (ticks / 100, (ticks % 100) * 10_000_000)
+                }
+                _ => (crate::level0a::drivers::rtc::unix_time() as usize, 0usize),
+            };
+            if !write_user_word(arg2, seconds) || !write_user_word(arg2 + width, nanoseconds) {
+                -EFAULT
+            } else {
+                0
+            }
+        }
+
+        // `fsync(fd)` -- bekleyen yazmalari diske indirir.
+        //
+        // Kabugun `sync` komutu bunu zaten yapabiliyordu; eksik olan bir
+        // **uygulamanin** ayni seyi isteyebilmesiydi. Bir metin
+        // duzenleyicinin "kaydettim" demeden once cagirmasi gereken sey
+        // budur.
+        SYS_FSYNC => match kernel_api::fsync(arg1 as u32) {
+            Ok(()) => 0,
+            Err(e) => errno_of(e),
+        },
+
+        // `uname(buf)` -- sistemin kendini tanitmasi.
+        //
+        // Yapi **gercek `struct utsname`**: alti alan, her biri 65 bayt,
+        // toplam 390. Kisaltmak cazipti ama olmazdi: bu yapi glibc
+        // basliklarinda sabittir ve alanlara ofsetle erisilir, yani
+        // sadelestirilmis bir kayit ikili uyumu bozardi. (`stat`te tam
+        // tersini yaptik -- cunku orada alanlarin **karsiligi** yoktu;
+        // burada karsiligi var, yalnizca degerler TCMK'nin.)
+        SYS_UNAME => {
+            const FIELD: usize = 65;
+            const FIELDS: [&str; 6] = [
+                "TCMK",
+                "tcmk",
+                // release: cekirdegin surumu.
+                "0.1.0",
+                "The Cursed Moon Kernel (Rust)",
+                #[cfg(target_arch = "x86_64")]
+                "x86_64",
+                #[cfg(target_arch = "x86")]
+                "i686",
+                // domainname: Linux'un GNU genislemesi, bos.
+                "(none)",
+            ];
+            if !mmu::is_user_accessible(arg1)
+                || !mmu::is_user_accessible(arg1 + FIELD * FIELDS.len() - 1)
+            {
+                -EFAULT
+            } else {
+                for (i, text) in FIELDS.iter().enumerate() {
+                    let base = arg1 + i * FIELD;
+                    unsafe {
+                        core::ptr::write_bytes(base as *mut u8, 0, FIELD);
+                        let taken = text.len().min(FIELD - 1);
+                        core::ptr::copy_nonoverlapping(
+                            text.as_ptr(),
+                            base as *mut u8,
+                            taken,
+                        );
+                    }
+                }
+                0
+            }
+        }
 
         // `getdents(fd, buf, count)` -- acik bir dizinden girdi paketleri
         // okur; yazilan bayt sayisini, dizin bittiginde `0` doner.

@@ -44,6 +44,12 @@ mod i386_numbers {
     pub const SYS_UNLINK: usize = 10;
     pub const SYS_RENAME: usize = 38;
     pub const SYS_CHDIR: usize = 12;
+    pub const SYS_STAT: usize = 195;
+    pub const SYS_ACCESS: usize = 33;
+    pub const SYS_TIME: usize = 13;
+    pub const SYS_CLOCK_GETTIME: usize = 265;
+    pub const SYS_UNAME: usize = 122;
+    pub const SYS_FSYNC: usize = 118;
     pub const SYS_GETCWD: usize = 183;
     pub const SYS_WAITPID: usize = 7;
     pub const SYS_PIPE: usize = 42;
@@ -82,6 +88,12 @@ mod x86_64_numbers {
     pub const SYS_UNLINK: usize = 87;
     pub const SYS_RENAME: usize = 82;
     pub const SYS_CHDIR: usize = 80;
+    pub const SYS_STAT: usize = 4;
+    pub const SYS_ACCESS: usize = 21;
+    pub const SYS_TIME: usize = 201;
+    pub const SYS_CLOCK_GETTIME: usize = 228;
+    pub const SYS_UNAME: usize = 63;
+    pub const SYS_FSYNC: usize = 74;
     pub const SYS_GETCWD: usize = 79;
     pub const SYS_BRK: usize = 12;
     pub const SYS_PIPE: usize = 22;
@@ -466,6 +478,146 @@ impl Drop for ReadDir<'_> {
 /// `path` NUL sonlandirmali gecerli bir dizi olmalidir.
 pub unsafe fn chdir(path: *const u8) -> isize {
     syscall1(SYS_CHDIR, path as usize) as isize
+}
+
+/// Bir yol hakkinda `stat`in verdigi her sey.
+///
+/// Gercek `struct stat`in yirmi alani var; burada uc tane, cunku
+/// TCMKFS'te digerlerinin karsiligi yok. Sifir dolu alanlar tasimak
+/// olmayan bir bilgiyi varmis gibi gostermek olurdu.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct FileInfo {
+    pub size: usize,
+    pub is_dir: bool,
+    /// RAMFS: dosya duruyor ama cekirdek imajinin parcasi, degistirilemez.
+    pub read_only: bool,
+}
+
+/// POSIX `stat`: yola gore bilgi, **acmadan**.
+///
+/// Bu cagriya kadar "bu yol var mi?" sorusunun tek cevabi acmakti --
+/// dizinlerde o bile calismiyordu, ve acmanin yan etkisi var
+/// (tanimlayici tuketiyor).
+///
+/// Kayit bicimi `getdents`teki gibi TCMK'ye ozgu: iki `u32`.
+pub fn stat(path: &str) -> Option<FileInfo> {
+    let mut name = [0u8; 128];
+    if path.len() >= name.len() {
+        return None;
+    }
+    name[..path.len()].copy_from_slice(path.as_bytes());
+
+    let mut record = [0u32; 2];
+    let result = unsafe {
+        syscall2(SYS_STAT, name.as_ptr() as usize, record.as_mut_ptr() as usize) as isize
+    };
+    if result != 0 {
+        return None;
+    }
+    Some(FileInfo {
+        size: record[0] as usize,
+        is_dir: record[1] & 1 != 0,
+        read_only: record[1] & 2 != 0,
+    })
+}
+
+/// `access` icin mod bitleri. `R_OK`/`X_OK` TCMK'de her zaman gecer --
+/// izin biti yok; `W_OK` gercek bir cevap verir, cunku RAMFS gercekten
+/// yazilamaz.
+pub const F_OK: usize = 0;
+pub const X_OK: usize = 1;
+pub const W_OK: usize = 2;
+pub const R_OK: usize = 4;
+
+/// POSIX `access`: "var mi (ve yazilabilir mi)?"
+pub fn access(path: &str, mode: usize) -> bool {
+    let mut name = [0u8; 128];
+    if path.len() >= name.len() {
+        return false;
+    }
+    name[..path.len()].copy_from_slice(path.as_bytes());
+    unsafe { syscall2(SYS_ACCESS, name.as_ptr() as usize, mode) as isize == 0 }
+}
+
+/// POSIX `time`: 1970'ten beri gecen saniye.
+///
+/// Bu cagriya kadar POSIX tarafinda **hicbir saat yoktu**: ayni
+/// cekirdekte kosan bir PE `GetSystemTimeAsFileTime` ile saati
+/// sorabiliyor, bir ELF soramiyordu.
+pub fn time() -> usize {
+    unsafe { syscall1(SYS_TIME, 0) }
+}
+
+/// `clock_gettime` saat kimlikleri.
+pub const CLOCK_REALTIME: usize = 0;
+/// Acilistan beri gecen sure. **Geri gitmez** -- sure olcen kod bunu
+/// kullanmali, duvar saati RTC ile birlikte kayabilir.
+pub const CLOCK_MONOTONIC: usize = 1;
+
+/// POSIX `clock_gettime`: `(saniye, nanosaniye)`.
+///
+/// Cozunurluk 10 ms (PIT 100 Hz); nanosaniye alani dolduruluyor ama o
+/// kadar ince degil.
+pub fn clock_gettime(clock: usize) -> (usize, usize) {
+    let mut spec = [0usize; 2];
+    unsafe { syscall2(SYS_CLOCK_GETTIME, clock, spec.as_mut_ptr() as usize) };
+    (spec[0], spec[1])
+}
+
+/// `uname` alan boyu -- glibc'nin `_UTSNAME_LENGTH`i.
+pub const UTSNAME_FIELD: usize = 65;
+
+/// POSIX `uname`: sistemin kendini tanitmasi.
+///
+/// Yapi gercek `struct utsname`: alti alan, her biri 65 bayt. Alanlari
+/// ofsetle okuyan derlenmis kodun beklentisi bu, o yuzden
+/// sadelestirilmedi.
+pub struct UtsName {
+    pub raw: [u8; UTSNAME_FIELD * 6],
+}
+
+impl UtsName {
+    fn field(&self, index: usize) -> &str {
+        let base = index * UTSNAME_FIELD;
+        let slice = &self.raw[base..base + UTSNAME_FIELD];
+        let len = slice.iter().position(|b| *b == 0).unwrap_or(UTSNAME_FIELD);
+        core::str::from_utf8(&slice[..len]).unwrap_or("?")
+    }
+
+    pub fn sysname(&self) -> &str {
+        self.field(0)
+    }
+    pub fn nodename(&self) -> &str {
+        self.field(1)
+    }
+    pub fn release(&self) -> &str {
+        self.field(2)
+    }
+    pub fn version(&self) -> &str {
+        self.field(3)
+    }
+    pub fn machine(&self) -> &str {
+        self.field(4)
+    }
+}
+
+/// Sistemi tanitan yapiyi doldurur.
+pub fn uname() -> Option<UtsName> {
+    let mut info = UtsName {
+        raw: [0; UTSNAME_FIELD * 6],
+    };
+    if unsafe { syscall1(SYS_UNAME, info.raw.as_mut_ptr() as usize) as isize } != 0 {
+        return None;
+    }
+    Some(info)
+}
+
+/// POSIX `fsync`: bekleyen yazmalari diske indirir.
+///
+/// Kabugun `sync` komutu bunu zaten yapabiliyordu; eksik olan bir
+/// uygulamanin ayni seyi isteyebilmesiydi.
+pub fn fsync(fd: usize) -> isize {
+    unsafe { syscall1(SYS_FSYNC, fd) as isize }
 }
 
 /// Surecin ortamindaki bir degiskeni degistirir.

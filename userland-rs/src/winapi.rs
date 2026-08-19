@@ -175,7 +175,106 @@ extern "system" {
     /// orada ortam surecin kendi belleginde durur ve `setenv` onu
     /// dogrudan duzenler.
     pub fn SetEnvironmentVariableA(name: *const u8, value: *const u8) -> Bool;
+
+    /// Bir yolun ozelliklerini **donus degerinde** verir.
+    ///
+    /// POSIX'in `stat`i ile ayni cekirdek cagrisina iner; ayrisan
+    /// yalnizca cevabin bicimi: orada bilgi tampona yazilir ve donus
+    /// 0/-errno'dur, burada bilgi bir bayrak kumesi olarak doner ve hata
+    /// `0` degil [`INVALID_FILE_ATTRIBUTES`]tir. Sifir hata olamazdi --
+    /// "hicbir ozellik yok" gecerli bir durum sayilabilirdi.
+    pub fn GetFileAttributesA(file_name: *const u8) -> Dword;
+
+    /// Sistem saatini `FILETIME` olarak verir.
+    ///
+    /// POSIX `time` ile ayni saati okur; ayrisan **cagin baslangici** ve
+    /// **birim**: orada 1970'ten beri saniye, burada 1601'den beri 100
+    /// nanosaniyelik aralik.
+    pub fn GetSystemTimeAsFileTime(system_time_as_file_time: *mut FileTime) -> Bool;
+
+    /// Sistem saatini **bolunmus** olarak verir (yil/ay/gun/saat...).
+    ///
+    /// Ayrim ogretici: POSIX ham sayiyi verir ve takvime bolmeyi cagirana
+    /// birakir (`localtime` libc'dedir); Win32'de bolunmus hali
+    /// cekirdegin sozlesmesinin parcasidir.
+    pub fn GetSystemTime(system_time: *mut SystemTime) -> Bool;
+
+    /// Bekleyen yazmalari diske indirir. POSIX `fsync` ile ayni cekirdek
+    /// cagrisina iner.
+    pub fn FlushFileBuffers(file: Handle) -> Bool;
+
+    /// Isletim sisteminin surumu.
+    ///
+    /// POSIX'in `uname`i ile ayni soruyu sorar, ama cevabin **turu**
+    /// farkli: orada alti dize, burada uc sayi + bir servis paketi
+    /// dizesi. Yani surum karsilastirmasi POSIX'te metin isi, Win32'de
+    /// sayi isi.
+    ///
+    /// `dwOSVersionInfoSize` cagiran tarafindan doldurulmalidir --
+    /// cekirdek onu dogrular.
+    pub fn GetVersionExA(version_information: *mut OsVersionInfoA) -> Bool;
 }
+
+/// `SYSTEMTIME` -- Windows'un bolunmus zaman yapisi (sekiz `WORD`).
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct SystemTime {
+    pub year: u16,
+    pub month: u16,
+    pub day_of_week: u16,
+    pub day: u16,
+    pub hour: u16,
+    pub minute: u16,
+    pub second: u16,
+    pub milliseconds: u16,
+}
+
+/// `OSVERSIONINFOA` -- 148 bayt, `szCSDVersion` +20'de.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct OsVersionInfoA {
+    pub os_version_info_size: Dword,
+    pub major_version: Dword,
+    pub minor_version: Dword,
+    pub build_number: Dword,
+    pub platform_id: Dword,
+    pub csd_version: [u8; 128],
+}
+
+impl OsVersionInfoA {
+    /// Cagiranin yapmasi gereken hazirlik: boyut alanini doldurmak.
+    pub const fn new() -> Self {
+        OsVersionInfoA {
+            os_version_info_size: 148,
+            major_version: 0,
+            minor_version: 0,
+            build_number: 0,
+            platform_id: 0,
+            csd_version: [0; 128],
+        }
+    }
+
+    /// Servis paketi dizesi (NUL'a kadar).
+    pub fn csd(&self) -> &str {
+        let len = self
+            .csd_version
+            .iter()
+            .position(|b| *b == 0)
+            .unwrap_or(self.csd_version.len());
+        core::str::from_utf8(&self.csd_version[..len]).unwrap_or("?")
+    }
+}
+
+/// `dwFileAttributes` bayraklari (Windows ile ayni sayilar).
+///
+/// Iki yerde gorunuyorlar: `FindFirstFileA` her girdi icin
+/// [`Win32FindData`]ya yaziyor, `GetFileAttributesA` ayni kumeyi
+/// **donus degeri** olarak veriyor.
+pub const FILE_ATTRIBUTE_READONLY: Dword = 0x0000_0001;
+pub const FILE_ATTRIBUTE_DIRECTORY: Dword = 0x0000_0010;
+pub const FILE_ATTRIBUTE_NORMAL: Dword = 0x0000_0080;
+/// Hata donusu -- tum bitler bir.
+pub const INVALID_FILE_ATTRIBUTES: Dword = 0xFFFF_FFFF;
 
 // --- `GetLastError` kodlari (Windows ile ayni sayilar) ----------------
 pub const ERROR_SUCCESS: Dword = 0;
@@ -275,10 +374,6 @@ impl Win32FindData {
         core::str::from_utf8(&self.file_name[..end]).unwrap_or("?")
     }
 }
-
-/// `dwFileAttributes` degerleri.
-pub const FILE_ATTRIBUTE_DIRECTORY: Dword = 0x10;
-pub const FILE_ATTRIBUTE_NORMAL: Dword = 0x80;
 
 /// `SetFilePointer` -- `dwMoveMethod`. Sayilar POSIX'in `SEEK_*`
 /// degerleriyle ayni.

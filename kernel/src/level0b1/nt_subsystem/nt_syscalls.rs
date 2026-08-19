@@ -82,6 +82,11 @@ pub const NT_GET_CURRENT_DIRECTORY: u32 = 0x301B;
 pub const NT_GET_COMMAND_LINE_A: u32 = 0x301C;
 pub const NT_GET_ENVIRONMENT_VARIABLE_A: u32 = 0x301D;
 pub const NT_SET_ENVIRONMENT_VARIABLE_A: u32 = 0x301E;
+pub const NT_GET_FILE_ATTRIBUTES_A: u32 = 0x301F;
+pub const NT_GET_SYSTEM_TIME_AS_FILE_TIME: u32 = 0x3020;
+pub const NT_GET_SYSTEM_TIME: u32 = 0x3021;
+pub const NT_FLUSH_FILE_BUFFERS: u32 = 0x3022;
+pub const NT_GET_VERSION_EX_A: u32 = 0x3023;
 
 pub const NT_USER_CREATE_WINDOW_W32: u32 = 0x3010;
 pub const NT_GDI_GET_BITS_W32: u32 = 0x3011;
@@ -142,6 +147,20 @@ const ERROR_NOT_SUPPORTED: u32 = 50;
 const ERROR_DISK_FULL: u32 = 112;
 const ERROR_DIR_NOT_EMPTY: u32 = 145;
 const ERROR_ALREADY_EXISTS: u32 = 183;
+// --- `dwFileAttributes` degerleri (Windows ile ayni sayilar) ---------
+//
+// Iki cagri paylasiyor: `FindFirstFileA` her girdi icin bu bayraklari
+// `WIN32_FIND_DATAA`ya yaziyor, `GetFileAttributesA` ayni kumeyi
+// **donus degeri** olarak veriyor.
+/// Salt okunur -- TCMK'de RAMFS (cekirdek imajinin parcasi).
+const FILE_ATTRIBUTE_READONLY: u32 = 0x0000_0001;
+const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x0000_0010;
+/// Baska hicbir bayrak yoksa **bu** donmeli; sifir gecerli bir cevap
+/// degildir.
+const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
+/// `GetFileAttributesA`nin hata donusu -- `0` degil, tum bitler bir.
+const INVALID_FILE_ATTRIBUTES: usize = 0xFFFF_FFFF;
+
 /// Cagriya verilen parametre gecersiz (bos ad, okunamayan isaretci).
 const ERROR_INVALID_PARAMETER: u32 = 87;
 /// Adi verilen ortam degiskeni yok.
@@ -843,6 +862,202 @@ fn dispatch_win32_api(frame: &mut SyscallFrame) {
             }
         }
 
+        // GetFileAttributesA(lpFileName) -> DWORD
+        //
+        // POSIX'in `stat`i ile **ayni** cekirdek cagrisina iner; ayrisan
+        // yalnizca cevabin bicimi, ve ayrim ogretici:
+        //
+        //   POSIX  stat(yol, buf) -> 0 / -errno, bilgi TAMPONA yazilir
+        //   Win32  GetFileAttributesA(yol) -> bilgi DONUS DEGERINDE,
+        //          bir bayrak kumesi olarak; hata 0 degil 0xFFFFFFFF
+        //
+        // Sifirin hata olarak kullanilamamasinin sebebi var: sifir
+        // "hicbir ozellik yok" demek olurdu ve o gecerli bir durum
+        // sayilabilirdi. Windows bu yuzden `INVALID_FILE_ATTRIBUTES`i
+        // tum bitler bir olarak secmis; TCMK de oyle.
+        NT_GET_FILE_ATTRIBUTES_A => {
+            let mut storage = [0u8; PATH_MAX];
+            let path = match arg_ptr(args, 0)
+                .and_then(|p| unsafe { copy_user_cstr(p, &mut storage) })
+                .map(|p| p.len())
+            {
+                Some(length) => Some(normalize_win_path(&mut storage, length)),
+                None => None,
+            };
+            match path.map(kernel_api::stat) {
+                Some(Ok(info)) => {
+                    let mut attributes = 0u32;
+                    if info.is_dir {
+                        attributes |= FILE_ATTRIBUTE_DIRECTORY;
+                    }
+                    if info.read_only {
+                        attributes |= FILE_ATTRIBUTE_READONLY;
+                    }
+                    if attributes == 0 {
+                        attributes = FILE_ATTRIBUTE_NORMAL;
+                    }
+                    attributes as usize
+                }
+                Some(Err(e)) => {
+                    set_last_error(win32_error_of(e));
+                    INVALID_FILE_ATTRIBUTES
+                }
+                None => {
+                    set_last_error(ERROR_INVALID_PARAMETER);
+                    INVALID_FILE_ATTRIBUTES
+                }
+            }
+        }
+
+        // GetSystemTimeAsFileTime(lpSystemTimeAsFileTime)
+        //
+        // Ayni saati POSIX `time`/`clock_gettime` de okuyor; ayrisan
+        // **cagin baslangici** ve **birim**:
+        //
+        //   POSIX  1970-01-01'den beri SANIYE
+        //   Win32  1601-01-01'den beri 100 NANOSANIYELIK ARALIK
+        //
+        // Cevrim `filetime_of` icinde ve tek yerde; iki taraftan birine
+        // otekinin cagini dayatmak, o tarafta derlenmis her programin
+        // tarih hesabini kaydirirdi.
+        NT_GET_SYSTEM_TIME_AS_FILE_TIME => {
+            let filetime = filetime_of(crate::level0a::drivers::rtc::unix_time());
+            match arg_ptr(args, 0) {
+                Some(target) if target != 0 => {
+                    if !mmu::is_user_accessible(target) || !mmu::is_user_accessible(target + 7) {
+                        WIN32_FALSE
+                    } else {
+                        // Tek bir `u64` degil iki `DWORD`: `FILETIME`
+                        // Windows'ta da oyle ve hizalama farki gercek
+                        // (bkz. `Filetime`).
+                        unsafe {
+                            (target as *mut u32).write_unaligned(filetime as u32);
+                            ((target + 4) as *mut u32).write_unaligned((filetime >> 32) as u32);
+                        }
+                        WIN32_TRUE
+                    }
+                }
+                _ => WIN32_FALSE,
+            }
+        }
+
+        // GetSystemTime(lpSystemTime) -> SYSTEMTIME
+        //
+        // Buradaki ayrim daha da ogretici: POSIX **ham sayiyi** verir ve
+        // yil/ay/gune bolmeyi cagirana birakir (`localtime` libc'dedir).
+        // Win32 bolunmus halini dogrudan verir -- yani takvim bilgisi
+        // cekirdegin sozlesmesinin parcasidir.
+        //
+        // `SYSTEMTIME` sekiz `WORD`: yil, ay, haftagunu, gun, saat,
+        // dakika, saniye, milisaniye.
+        NT_GET_SYSTEM_TIME => {
+            let now = crate::level0a::drivers::rtc::now();
+            match (arg_ptr(args, 0), now) {
+                (Some(target), Some(time)) if target != 0 => {
+                    if !mmu::is_user_accessible(target) || !mmu::is_user_accessible(target + 15) {
+                        WIN32_FALSE
+                    } else {
+                        let fields = [
+                            time.year,
+                            time.month as u16,
+                            // Haftanin gunu RTC'de yok; Windows'ta bu alan
+                            // her zaman doludur, o yuzden tarihten
+                            // hesaplaniyor (0 = Pazar).
+                            day_of_week(time.year, time.month, time.day),
+                            time.day as u16,
+                            time.hour as u16,
+                            time.minute as u16,
+                            time.second as u16,
+                            0,
+                        ];
+                        for (i, value) in fields.iter().enumerate() {
+                            unsafe { ((target + i * 2) as *mut u16).write_unaligned(*value) };
+                        }
+                        WIN32_TRUE
+                    }
+                }
+                _ => WIN32_FALSE,
+            }
+        }
+
+        // FlushFileBuffers(hFile) -> BOOL
+        //
+        // POSIX `fsync` ile ayni cekirdek cagrisi. Ikisi de tutamac
+        // aliyor, ikisi de dosya sistemi genelinde calisiyor -- TCMKFS'te
+        // dosya basina tampon yok, tek bir ortak tablo var.
+        NT_FLUSH_FILE_BUFFERS => match arg(args, 0) {
+            Some(handle) => match kernel_api::fsync(handle) {
+                Ok(()) => WIN32_TRUE,
+                Err(e) => {
+                    set_last_error(win32_error_of(e));
+                    WIN32_FALSE
+                }
+            },
+            None => {
+                set_last_error(ERROR_INVALID_HANDLE);
+                WIN32_FALSE
+            }
+        },
+
+        // GetVersionExA(lpVersionInformation) -> BOOL
+        //
+        // POSIX'in `uname`i ile ayni soruyu soruyor -- "sen kimsin?" --
+        // ama **cevabin turu** farkli:
+        //
+        //   POSIX  alti DIZE: sysname, nodename, release, version, machine
+        //   Win32  uc SAYI (major/minor/build) + platform kimligi + bir
+        //          servis paketi dizesi
+        //
+        // Yani POSIX'te surum karsilastirmasi metin isi, Win32'de sayi
+        // isi. Bir Windows programi `dwMajorVersion >= 5` diye yazar;
+        // ayni sey `uname`de dizeyi ayristirmakla yapilir.
+        //
+        // `OSVERSIONINFOA`: dwOSVersionInfoSize, dwMajorVersion,
+        // dwMinorVersion, dwBuildNumber, dwPlatformId, szCSDVersion[128].
+        NT_GET_VERSION_EX_A => {
+            const CSD_OFFSET: usize = 20;
+            const CSD_LEN: usize = 128;
+            const TOTAL: usize = CSD_OFFSET + CSD_LEN;
+            /// `VER_PLATFORM_WIN32_NT` -- Windows'un NT soyu.
+            const VER_PLATFORM_WIN32_NT: u32 = 2;
+
+            match arg_ptr(args, 0) {
+                Some(target)
+                    if target != 0
+                        && mmu::is_user_accessible(target)
+                        && mmu::is_user_accessible(target + TOTAL - 1) =>
+                {
+                    // Cagiran ilk alani doldurup gelir (yapinin boyu);
+                    // Windows onu **dogrular**. Sifir gelmesi, cagiranin
+                    // yapiyi hic kurmadigi anlamina gelir.
+                    let declared = unsafe { (target as *const u32).read_unaligned() };
+                    if declared == 0 {
+                        set_last_error(ERROR_INVALID_PARAMETER);
+                        WIN32_FALSE
+                    } else {
+                        let csd = b"TCMK\0";
+                        unsafe {
+                            ((target + 4) as *mut u32).write_unaligned(0);
+                            ((target + 8) as *mut u32).write_unaligned(1);
+                            ((target + 12) as *mut u32).write_unaligned(0);
+                            ((target + 16) as *mut u32).write_unaligned(VER_PLATFORM_WIN32_NT);
+                            core::ptr::write_bytes((target + CSD_OFFSET) as *mut u8, 0, CSD_LEN);
+                            core::ptr::copy_nonoverlapping(
+                                csd.as_ptr(),
+                                (target + CSD_OFFSET) as *mut u8,
+                                csd.len(),
+                            );
+                        }
+                        WIN32_TRUE
+                    }
+                }
+                _ => {
+                    set_last_error(ERROR_INVALID_PARAMETER);
+                    WIN32_FALSE
+                }
+            }
+        }
+
         // --- TCMKGUI.dll: pencere cagrilari ---
         NT_USER_CREATE_WINDOW_W32 => {
             // TcmkCreateWindow(lpTitle, x, y, cx, cy) -> HWND
@@ -1071,9 +1286,20 @@ fn filetime_of(unix: u32) -> u64 {
     }
     (unix as u64 + FILETIME_EPOCH_DELTA) * 10_000_000
 }
-/// `dwFileAttributes` degerleri (Windows ile ayni sayilar).
-const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
-const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
+/// Haftanin gunu (0 = Pazar) -- Sakamoto'nun tablosu.
+///
+/// RTC bu bilgiyi vermiyor (CMOS'un "gun" registeri guvenilmez), ama
+/// `SYSTEMTIME`in alani var ve Windows'ta her zaman dolu. Bos birakmak,
+/// takvim cizen bir programi sessizce yanlis gune goturur.
+fn day_of_week(year: u16, month: u8, day: u8) -> u16 {
+    const OFFSETS: [u16; 12] = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
+    let mut y = year;
+    if month < 3 {
+        y -= 1;
+    }
+    let index = (month.max(1).min(12) - 1) as usize;
+    ((y + y / 4 - y / 100 + y / 400 + OFFSETS[index] + day as u16) % 7) as u16
+}
 
 /// Bir dizin girdisini kullanicinin `WIN32_FIND_DATAA` yapisina yazar.
 ///

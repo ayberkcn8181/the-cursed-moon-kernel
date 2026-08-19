@@ -34,3 +34,8 @@ GetCurrentDirectoryA@8 @21
 GetCommandLineA@0 @22
 GetEnvironmentVariableA@12 @23
 SetEnvironmentVariableA@8 @24
+GetFileAttributesA@4 @25
+GetSystemTimeAsFileTime@4 @26
+GetSystemTime@4 @27
+FlushFileBuffers@4 @28
+GetVersionExA@4 @29

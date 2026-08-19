@@ -126,6 +126,7 @@ static KNOWN_APPS: &[(&str, &str, &str)] = &[
     ("heir", "/bin/heir", "heir"),
     ("nested", "/bin/nested", "nested"),
     ("bequest", "/bin/bequest", "bequest"),
+    ("probe", "/bin/probe", "probe"),
     // Windows ikilisi: yol .exe ile biter, cekirdek bicimi magic'ten
     // anlar (bkz. vfs::format) ve PE yukleyicisine yonlendirir. Yol iki
     // mimaride de aynidir; VFS'te duran ikilinin PE32 mi PE32+ mi oldugu
@@ -134,6 +135,7 @@ static KNOWN_APPS: &[(&str, &str, &str)] = &[
     ("winpad", "/bin/winpad.exe", "winpad"),
     ("winfiles", "/bin/winfiles.exe", "winfiles"),
     ("winenv", "/bin/winenv.exe", "winenv"),
+    ("winprobe", "/bin/winprobe.exe", "winprobe"),
 ];
 
 /// Kabuktan gelen adi tam yola ve gorev adina cevirir.

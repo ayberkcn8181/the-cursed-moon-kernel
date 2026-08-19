@@ -123,12 +123,18 @@ static NESTED_ELF: &[u8] = include_bytes!("../../userland/nested.elf");
 /// Ortamin fork/execve ile devri.
 #[cfg(target_arch = "x86")]
 static BEQUEST_ELF: &[u8] = include_bytes!("../../userland/bequest.elf");
+/// stat/access/uname/saat -- POSIX'in "sorma" cagrilari.
+#[cfg(target_arch = "x86")]
+static PROBE_ELF: &[u8] = include_bytes!("../../userland/probe.elf");
 /// FindFirstFileA gosterimi -- ayni dizinler, Win32 yuzu.
 #[cfg(target_arch = "x86")]
 static WINFILES_EXE: &[u8] = include_bytes!("../../userland/winfiles.exe");
 /// Win32'nin ortam sozlesmesi (donus boyu, NULL ile silme).
 #[cfg(target_arch = "x86")]
 static WINENV_EXE: &[u8] = include_bytes!("../../userland/winenv.exe");
+/// GetFileAttributesA/GetVersionExA/GetSystemTime -- Win32 ikizleri.
+#[cfg(target_arch = "x86")]
+static WINPROBE_EXE: &[u8] = include_bytes!("../../userland/winprobe.exe");
 
 /// Linux (ELF64, x86_64) kullanici programi -- `tools/gen_hello_elf64.py`.
 /// Elle kodlanmis en kucuk ELF64: yukleyicinin dar yolunu sinar.
@@ -182,6 +188,8 @@ static HEIR64: &[u8] = include_bytes!("../../userland/heir.elf64");
 static NESTED64: &[u8] = include_bytes!("../../userland/nested.elf64");
 #[cfg(target_arch = "x86_64")]
 static BEQUEST64: &[u8] = include_bytes!("../../userland/bequest.elf64");
+#[cfg(target_arch = "x86_64")]
+static PROBE64: &[u8] = include_bytes!("../../userland/probe.elf64");
 
 /// **Windows (PE32+) uygulamalari** -- i386'dakilerle ayni kaynak, ayni
 /// ithal kutuphaneleri; degisen yalnizca hedef. Taban 0x140000000
@@ -195,6 +203,8 @@ static WINPAD_EXE64: &[u8] = include_bytes!("../../userland/winpad.exe64");
 static WINFILES_EXE64: &[u8] = include_bytes!("../../userland/winfiles.exe64");
 #[cfg(target_arch = "x86_64")]
 static WINENV_EXE64: &[u8] = include_bytes!("../../userland/winenv.exe64");
+#[cfg(target_arch = "x86_64")]
+static WINPROBE_EXE64: &[u8] = include_bytes!("../../userland/winprobe.exe64");
 
 /// Kullanici programlarinin VFS uzerinden okudugu test dosyasi.
 static BOOT_MSG: &[u8] = b"/boot/msg.txt: VFS uzerinden okundu (RAMFS).\n";
@@ -227,10 +237,12 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/heir", HEIR_ELF),
     ("/bin/nested", NESTED_ELF),
     ("/bin/bequest", BEQUEST_ELF),
+    ("/bin/probe", PROBE_ELF),
     ("/bin/winclock.exe", WINCLOCK_EXE),
     ("/bin/winpad.exe", WINPAD_EXE),
     ("/bin/winfiles.exe", WINFILES_EXE),
     ("/bin/winenv.exe", WINENV_EXE),
+    ("/bin/winprobe.exe", WINPROBE_EXE),
     ("/boot/msg.txt", BOOT_MSG),
 ];
 
@@ -259,10 +271,12 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/heir", HEIR64),
     ("/bin/nested", NESTED64),
     ("/bin/bequest", BEQUEST64),
+    ("/bin/probe", PROBE64),
     ("/bin/winclock.exe", WINCLOCK_EXE64),
     ("/bin/winpad.exe", WINPAD_EXE64),
     ("/bin/winfiles.exe", WINFILES_EXE64),
     ("/bin/winenv.exe", WINENV_EXE64),
+    ("/bin/winprobe.exe", WINPROBE_EXE64),
     ("/boot/msg.txt", BOOT_MSG),
 ];
 
