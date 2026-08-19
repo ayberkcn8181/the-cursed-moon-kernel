@@ -3,7 +3,7 @@
 //! girdileri Faz 3'teki kullanici-modu gecisi icin simdiden hazirlanir.
 
 use core::arch::asm;
-use core::mem::size_of;
+use core::mem::{size_of, size_of_val};
 
 pub const KERNEL_CODE_SELECTOR: u16 = 0x08;
 #[allow(dead_code)] // load() icinde 0x10 olarak sabit gomulu, bkz. asagidaki not
@@ -52,14 +52,56 @@ const FLAGS_32BIT_4K: u8 = 0b1100; // G=1 (4 KiB granularity), D/B=1 (32-bit)
 /// TSS secicisi (GDT index 5).
 pub const TSS_SELECTOR: u16 = 0x28;
 
-static mut GDT: [GdtEntry; 6] = [
+/// **FS** icin is-parcacigi tanimlayicisi (index 6, RPL 3).
+///
+/// i386'da is-parcacigi verisine segment **tabani** uzerinden erisilir:
+/// bir GDT girdisinin tabani o bloga isaret eder, program da o seciciyi
+/// bir segment registerina yukler. Long mode'da bu mekanizmanin
+/// tamami kaldirilmistir -- kalan tek istisna FS/GS tabanlaridir ve
+/// onlar da artik MSR'den gelir (bkz. `core::tls`).
+pub const TLS_FS_SELECTOR: u16 = 0x33;
+/// **GS** icin is-parcacigi tanimlayicisi (index 7, RPL 3).
+pub const TLS_GS_SELECTOR: u16 = 0x3B;
+
+static mut GDT: [GdtEntry; 8] = [
     GdtEntry::null(),                                   // 0x00 null
     GdtEntry::new(0, 0xFFFFF, 0x9A, FLAGS_32BIT_4K),     // 0x08 kernel code (ring0)
     GdtEntry::new(0, 0xFFFFF, 0x92, FLAGS_32BIT_4K),     // 0x10 kernel data (ring0)
     GdtEntry::new(0, 0xFFFFF, 0xFA, FLAGS_32BIT_4K),     // 0x18 user code (ring3)
     GdtEntry::new(0, 0xFFFFF, 0xF2, FLAGS_32BIT_4K),     // 0x20 user data (ring3)
     GdtEntry::null(),                                   // 0x28 TSS (init()'te doldurulur)
+    // Tabanlari 0 baslar; bu haliyle 0x20'deki kullanici verisiyle
+    // **birebir ayni** davranirlar. Yani is-parcacigi kullanmayan bir
+    // surec icin bu girdiler gorunmezdir.
+    GdtEntry::new(0, 0xFFFFF, 0xF2, FLAGS_32BIT_4K),     // 0x30 TLS (FS)
+    GdtEntry::new(0, 0xFFFFF, 0xF2, FLAGS_32BIT_4K),     // 0x38 TLS (GS)
 ];
+
+/// Iki is-parcacigi tanimlayicisinin tabanini degistirir ve registerlari
+/// **yeniden yukler**.
+///
+/// Yeniden yukleme sart ve sebebi donanimda: x86 bir segment registeri
+/// yuklendiginde tanimlayiciyi **gizli bir kayitta onbelleklere alir**.
+/// GDT girdisini degistirmek o onbellegi tazelemez; taze taban ancak
+/// register yeniden yuklendiginde gecerli olur.
+///
+/// Cekirdek kodu FS/GS kullanmadigi icin burada yuklemek guvenli, ve
+/// gorev degisiminde yapildigi icin Ring 3'e donen surec dogru tabani
+/// gorur.
+pub fn set_tls_bases(fs: u32, gs: u32) {
+    unsafe {
+        let gdt = core::ptr::addr_of_mut!(GDT) as *mut GdtEntry;
+        (*gdt.add(6)) = GdtEntry::new(fs, 0xFFFFF, 0xF2, FLAGS_32BIT_4K);
+        (*gdt.add(7)) = GdtEntry::new(gs, 0xFFFFF, 0xF2, FLAGS_32BIT_4K);
+        asm!(
+            "mov fs, {fs:x}",
+            "mov gs, {gs:x}",
+            fs = in(reg) TLS_FS_SELECTOR,
+            gs = in(reg) TLS_GS_SELECTOR,
+            options(nostack, preserves_flags)
+        );
+    }
+}
 
 /// i386 Gorev Durum Segmenti. Faz 3'te tek amaci `esp0`/`ss0`'dir:
 /// Ring 3'ten bir kesme (int 0x80) geldiginde CPU otomatik olarak buradaki
@@ -136,7 +178,11 @@ static mut TSS: Tss = Tss::empty();
 pub fn init() {
     unsafe {
         let ptr = GdtPointer {
-            limit: (size_of::<[GdtEntry; 6]>() - 1) as u16,
+            // Sinir **diziden** turetiliyor: elle yazilmis bir sayi,
+            // tabloya girdi eklendiginde sessizce eskir ve yeni seciciyi
+            // yuklemek genel koruma hatasi verir. (Bir kez oldu: TLS
+            // girdileri eklendiginde sinir 6 girdide kalmisti.)
+            limit: (size_of_val(&*core::ptr::addr_of!(GDT)) - 1) as u16,
             base: core::ptr::addr_of!(GDT) as u32,
         };
         load(&ptr);
@@ -163,7 +209,7 @@ pub unsafe fn install_tss(kernel_stack_top: usize) {
 
     // GDT yeniden yuklenmeli ki yeni girdi gorulsun, sonra TSS yuklenir.
     let ptr = GdtPointer {
-        limit: (size_of::<[GdtEntry; 6]>() - 1) as u16,
+        limit: (size_of_val(&*core::ptr::addr_of!(GDT)) - 1) as u16,
         base: core::ptr::addr_of!(GDT) as u32,
     };
     asm!("lgdt [{0}]", in(reg) &ptr, options(nostack));

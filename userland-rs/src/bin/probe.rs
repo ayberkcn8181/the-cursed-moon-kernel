@@ -24,7 +24,15 @@
 //!                             Linux numarasiyla CIKABILMELI
 //!   J  ftruncate           -> kucultme VE buyutme; buyuyen bolge SIFIR
 //!   K  O_TRUNC             -> acilista bosaltmali
+//!   L  TLS tabani          -> segment onekiyle okunan deger dogru mu?
+//!   M  TLS gorev basina mi -> cocuk kendi tabanini kurunca ebeveynin
+//!                             tabani DEGISMEMELI
 //! ```
+//!
+//! L ve M bu cagriya kadar **imkansizdi**: FS/GS tabanlari her zaman
+//! sifirdi. Kendi userland'imiz icin sorun degildi (TLS kullanmiyoruz),
+//! ama derlenmis gercek bir Linux ikilisi icin yapisal bir engel --
+//! glibc'nin ilk isi TLS blogunu kurmaktir.
 //!
 //! J ve K **disk ister** (RAMFS salt okunur). Disk bagli degilse ikisi
 //! de "atlandi" olarak bildiriliyor -- gecmis gibi gostermek, calismayan
@@ -91,7 +99,7 @@ fn result(check: &Check) -> &'static str {
 fn main() {
     use core::fmt::Write;
     let mut out = Stdout;
-    let mut checks = [EMPTY; 11];
+    let mut checks = [EMPTY; 13];
 
     // --- A: RAMFS dosyasi ---
     let file = sys::stat("/bin/browse");
@@ -350,6 +358,76 @@ fn main() {
         };
     }
 
+    // --- L: is-parcacigi tabani ---
+    //
+    // Blok programin kendi belleginde; cekirdege verilen tek sey adresi.
+    // Okuma segment onekiyle yapiliyor (i386'da `gs:`, x86_64'te `fs:`)
+    // -- yani deger dogru gelirse taban gercekten donanima yazilmis
+    // demektir.
+    unsafe {
+        TLS_BLOCK[0] = 0x5CA1AB1E;
+        TLS_BLOCK[1] = 0xF00DBEEF;
+    }
+    let base = core::ptr::addr_of!(TLS_BLOCK) as usize;
+    let installed = tcmk::tls::set(base);
+    let first = if installed { tcmk::tls::read(0) } else { 0 };
+    let second = if installed {
+        tcmk::tls::read(core::mem::size_of::<usize>())
+    } else {
+        0
+    };
+    let l = installed && first == 0x5CA1AB1E && second == 0xF00DBEEF;
+    checks[11] = Check {
+        name: "L TLS tabani",
+        detail: if !installed {
+            "taban kurulamadi"
+        } else if l {
+            "segment onekiyle dogru okundu"
+        } else {
+            "okunan deger YANLIS"
+        },
+        passed: l,
+        skipped: false,
+    };
+
+    // --- M: taban gorev basina mi? ---
+    //
+    // Cocuk kendi blogunu kuruyor. Global tek bir taban olsaydi
+    // ebeveynin okumasi cocugunkine kayardi -- gorev degisimi de araya
+    // giriyor, cunku cocuk uyuyup ebeveyni bekletiyor.
+    let child = sys::fork();
+    if child == 0 {
+        unsafe {
+            OTHER_BLOCK[0] = 0x0DDBA11;
+        }
+        let mine = core::ptr::addr_of!(OTHER_BLOCK) as usize;
+        let ok = tcmk::tls::set(mine) && tcmk::tls::read(0) == 0x0DDBA11;
+        sys::sleep_ms(200);
+        sys::exit(if ok { 1 } else { 0 });
+    }
+    let mut status = 0u32;
+    let mut child_ok = false;
+    if child > 0 {
+        sys::waitpid(child as usize, &mut status, 0);
+        child_ok = sys::exit_status(status) == 1;
+    }
+    // Ebeveyn kendi tabanini hala goruyor mu?
+    let parent_intact = tcmk::tls::read(0) == 0x5CA1AB1E;
+    checks[12] = Check {
+        name: "M TLS gorev basina",
+        detail: if child <= 0 {
+            "fork basarisiz"
+        } else if !child_ok {
+            "cocuk kendi tabanini kuramadi"
+        } else if parent_intact {
+            "cocugun tabani ebeveyne sizmadi"
+        } else {
+            "EBEVEYNIN tabani degisti"
+        },
+        passed: child_ok && parent_intact,
+        skipped: false,
+    };
+
     for check in &checks {
         let _ = writeln!(
             out,
@@ -366,7 +444,7 @@ fn main() {
         millis(after)
     );
 
-    let mut win = match Window::open("probe -- POSIX sorma ve kesme cagrilari", 230, 120, 440, 250) {
+    let mut win = match Window::open("probe -- POSIX yuzeyi", 220, 110, 440, 275) {
         Some(w) => w,
         None => return,
     };
@@ -379,11 +457,19 @@ fn main() {
     }
 }
 
+/// Sinavlarin kullandigi is-parcacigi bloklari.
+///
+/// `static mut`: adresleri sabit olmali, cunku cekirdege **taban** olarak
+/// veriliyorlar ve yigin cercevesi bitince gecersiz kalan bir adres
+/// vermek, sonraki her okumayi cope cevirirdi.
+static mut TLS_BLOCK: [usize; 4] = [0; 4];
+static mut OTHER_BLOCK: [usize; 4] = [0; 4];
+
 fn millis(spec: (usize, usize)) -> usize {
     spec.0 * 1000 + spec.1 / 1_000_000
 }
 
-fn draw(win: &mut Window, checks: &[Check; 11], system: &Option<sys::UtsName>) {
+fn draw(win: &mut Window, checks: &[Check; 13], system: &Option<sys::UtsName>) {
     let (w, h) = (win.width(), win.height());
     win.clear(BG);
     win.fill(0, 0, w, 22, PANEL);

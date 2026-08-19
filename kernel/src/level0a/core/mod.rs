@@ -10,6 +10,7 @@ pub mod kmalloc;
 pub mod pipe;
 pub mod scheduler;
 pub mod tcmkfs;
+pub mod tls;
 pub mod vfs;
 
 #[cfg(target_arch = "x86")]

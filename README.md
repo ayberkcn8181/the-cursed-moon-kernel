@@ -59,6 +59,7 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 9h | **Gercek Linux numaralari**: `exit_group` `nanosleep` `sched_yield` `writev` `getppid` | ✅ (i386 + x86_64) |
 | 5g | **Kesme**: `ftruncate` `O_TRUNC` + `SetEndOfFile` `CREATE_ALWAYS` | ✅ (i386; x86_64'te disk yok) |
 | 9i | **`readv`**, **`getuid`/`geteuid`** ailesi, **`GetModuleFileNameA`** | ✅ (i386 + x86_64, ELF + PE) |
+| 9j | **Is-parcacigi tabani**: `set_thread_area` (i386) / `arch_prctl` (x86_64) | ✅ (i386 + x86_64) |
 | — | **Klavye: shift + caps lock** (US duzeni, buyuk harf ve noktalama) | ✅ (i386 + x86_64) |
 | — | **Kendi onyukleyicisi** + diske kurulum (`install`) | ✅ (i386) |
 | 8 | **`execve`** (surec kendi yerine program yukler) | ✅ (i386 + x86_64) |
@@ -2466,6 +2467,92 @@ i386 (disk bagli)                    x86_64 (yalnizca ISO)
 "bosaltildi" gorunurdu ve sinav hicbir sey olcmeden gecerdi.
 
 ![probe](docs/screenshot-probe.png)
+
+## Is-parcacigi yerel deposu: ayni donanim, capraz secimler
+
+FS/GS tabanlari TCMK'de her zaman **sifirdi** ve hicbir program onlari
+degistiremiyordu. Kendi userland'imiz icin sorun degildi -- TLS
+kullanmiyor -- ama derleyicinin urettigi gercek bir Linux ikilisi icin
+yapisal bir engel: glibc'nin ilk isi TLS blogunu kurmaktir ve yigin
+koruyucusu (`stack protector`) **her fonksiyon girisinde** o blogu okur.
+Taban sifir kalirsa program ilk fonksiyonunda coker.
+
+### Iki isletim sistemi, iki register -- ve ikisi de ters
+
+Ayni donanim mekanizmasi (segment tabani) iki dunyada da kullaniliyor
+ama secilen registerlar **capraz**:
+
+```text
+            i386            x86_64
+  Linux     GS              FS
+  Windows   FS (TEB)        GS (TEB)
+```
+
+Yani bir mimaride Linux'un kullandigi registeri oteki mimaride Windows
+kullaniyor. TCMK ikisini birden tasimak zorunda, o yuzden gorev basina
+**iki** taban tutuluyor (`level0a/core/tls.rs`).
+
+### Mimariler mekanizmayi ayri cozuyor
+
+```text
+  i386     set_thread_area(user_desc*)   bir GDT TANIMLAYICISI ister;
+           cekirdek girdi ayirir ve numarasini geri yazar, program
+           seciciyi kendisi GS'e yukler
+  x86_64   arch_prctl(ARCH_SET_FS, adr)  long mode segmentasyonu
+           KALDIRDI; kalan tek istisna FS/GS tabanlari ve onlar birer MSR
+```
+
+Isim farki keyfi degil, donanimdan geliyor: i386'da ortada bir
+tanimlayici var ve secici yuklemek programin isi; x86_64'te tanimlayici
+da yok, secici de.
+
+Bu ayrim gorunmez bir tuzak da tasiyor. x86 bir segment registeri
+yuklendiginde tanimlayiciyi **gizli bir kayitta onbellekler**; GDT
+girdisini degistirmek o onbellegi tazelemez. Yani i386'da taban
+degisikligi ancak register **yeniden yuklendiginde** gecerli olur --
+`set_tls_bases` bu yuzden hem tabloyu yaziyor hem registerlari yeniden
+yukluyor. x86_64'te `wrmsr` aninda gecerli, boyle bir adim yok.
+
+### Olcum bir hatayi hemen buldu
+
+Ilk kosuda sistem daha kabuga gelmeden **genel koruma hatasiyla** dustu:
+
+```text
+[LEVEL-0b2] ISTISNA #13 (general-protection) -- Ring 0 kaynakli
+            hata_kodu=0x30
+```
+
+Hata kodu selektorun kendisiydi: `0x30`, yeni eklenen TLS girdisi. GDT
+tablosuna iki girdi eklenmisti ama `lgdt`ye verilen **sinir** hala elle
+yazilmis `size_of::<[GdtEntry; 6]>()` idi. Sinir artik diziden
+turetiliyor, yani bir sonraki girdi eklendiginde sessizce eskimeyecek.
+
+### Sinavlar
+
+```text
+[probe] L TLS tabani:       gecti (segment onekiyle dogru okundu)
+[probe] M TLS gorev basina: gecti (cocugun tabani ebeveyne sizmadi)
+```
+
+L, blogu programin kendi belleginde tutup cekirdege yalnizca **adresini**
+veriyor; okuma segment onekiyle yapiliyor (`gs:` / `fs:`), yani deger
+dogru gelirse taban gercekten donanima yazilmis demektir.
+
+M asil olcum: cocuk `fork`tan sonra **kendi** blogunu kuruyor ve
+uyuyor -- yani araya gorev degisimi giriyor. Global tek bir taban olsaydi
+ebeveynin okumasi cocugunkine kayardi. Iki mimaride de gecti.
+
+### Bilerek yapilmayanlar
+
+* **Win32 TEB henuz yok.** Altyapi hazir (FS/GS tabanlari gorev basina),
+  ama Windows tarafinda o tabanin gosterdigi yerde cekirdegin kurdugu bir
+  **TEB** yapisi olmali; `fs:[0x18]` (32-bit) ve `gs:[0x30]` (64-bit)
+  kendi adresini verir. Sirada o var.
+* **Is-parcacigi yok**, yalnizca tabanlar var: TCMK'de bir gorev = bir
+  surec = bir akis.
+* **`set_thread_area` tek girdi ayiriyor**: Linux uc TLS girdisi tutar
+  (GDT 6-8), TCMK bir tane -- ikinci bir istek ayni girdiyi yeniden
+  yazar.
 
 ## Ayni yetenek, gercek numara
 

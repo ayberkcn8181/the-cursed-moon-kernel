@@ -103,6 +103,9 @@ pub unsafe fn fork(frame: &SyscallFrame) -> Result<usize, ForkError> {
     // ...ve ebeveynin ortamiyla. Kopya oldugu icin cocugun `setenv`i
     // ebeveyne yansimaz -- gercek `fork` davranisi.
     crate::level0a::core::env::clone_into(child, parent);
+    // Is-parcacigi tabanlari da: adres uzayi kopyalandigi icin ayni
+    // sanal adres cocukta da gecerli.
+    crate::level0a::core::tls::clone_into(child, parent);
 
     scheduler::set_address_space(child, child_space);
 

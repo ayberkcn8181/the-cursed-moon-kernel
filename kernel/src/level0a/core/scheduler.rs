@@ -614,6 +614,12 @@ pub fn yield_now() {
             crate::level0a::core::mmu::kernel_cr3()
         });
 
+        // Is-parcacigi tabanlari goreve ait: FS/GS her degisimde yeniden
+        // yaziliyor. i386'da bu tanimlayiciyi tazelemek **ve** registeri
+        // yeniden yuklemek demek (gizli onbellek yuzunden); x86_64'te
+        // yalnizca iki `wrmsr`.
+        crate::level0a::core::tls::activate(next_index);
+
         let old_sp_slot = core::ptr::addr_of_mut!((*tasks.add(current_index)).stack_pointer);
         let new_sp = (*tasks.add(next_index)).stack_pointer;
         arch_context_switch(old_sp_slot, new_sp);

@@ -286,6 +286,11 @@ unsafe fn build_start_stack(
 ) -> usize {
     let task = scheduler::current_id();
     COMMAND_LINE[task % scheduler::MAX_TASKS].store(0, core::sync::atomic::Ordering::Relaxed);
+    // Yeni imaj: is-parcacigi tabanlari sifirlanir. `cwd`/ortamdan
+    // farkli olarak burada **korumak yanlis** olurdu -- eski imajin TLS
+    // blogu birakildi, tabani tutmak serbest kalmis bellege isaret eden
+    // bir segment birakmak demek.
+    crate::level0a::core::tls::reset(task);
     // Imajin yolu her iki ABI'de de gerekli ama **farkli sekilde**:
     // POSIX'te `argv[0]` olarak yigina konuyor, Win32'de
     // `GetModuleFileNameA` ile sorulunca dondurulmesi gerekiyor. Bir

@@ -104,6 +104,8 @@ mod i386_numbers {
     pub const SYS_GETGID: u32 = 200;
     pub const SYS_GETEUID: u32 = 201;
     pub const SYS_GETEGID: u32 = 202;
+    /// i386'da is-parcacigi tabani bir **GDT tanimlayicisi** ister.
+    pub const SYS_SET_THREAD_AREA: u32 = 243;
     pub const SYS_BRK: u32 = 45;
     pub const SYS_GETPID: u32 = 20;
     pub const SYS_KILL: u32 = 37;
@@ -163,6 +165,8 @@ mod x86_64_numbers {
     pub const SYS_GETGID: u32 = 104;
     pub const SYS_GETEUID: u32 = 107;
     pub const SYS_GETEGID: u32 = 108;
+    /// x86_64'te tanimlayici yok; taban dogrudan MSR'ye yaziliyor.
+    pub const SYS_ARCH_PRCTL: u32 = 158;
     pub const SYS_BRK: u32 = 12;
     pub const SYS_PIPE: u32 = 22;
     pub const SYS_FORK: u32 = 57;
@@ -1103,6 +1107,78 @@ pub fn dispatch(frame: &mut SyscallFrame) {
         // Cagrilarin var olmasi yine de gerekli: gercek programlar
         // erkenden `geteuid` cagirir ve `ENOSYS` gormeyi beklemez.
         SYS_GETUID | SYS_GETEUID | SYS_GETGID | SYS_GETEGID => 0,
+
+        // --- Is-parcacigi yerel deposu -------------------------------
+        //
+        // Ayni amac, iki mimaride **iki ayri cagri** -- ve isim farki
+        // donanimdan geliyor:
+        //
+        //   i386     set_thread_area(user_desc*)  bir GDT tanimlayicisi
+        //            ister; cekirdek bir girdi ayirir ve numarasini geri
+        //            yazar, program da onu bir segment registerina yukler.
+        //
+        //   x86_64   arch_prctl(kod, adres)       long mode segmentasyonu
+        //            kaldirdi; taban dogrudan bir MSR. Tanimlayici da yok,
+        //            secici de.
+        //
+        // TCMK ikisini de gercek bicimleriyle destekliyor, cunku
+        // derlenmis bir ikili hangi mimaride ise onu cagirir.
+        #[cfg(target_arch = "x86")]
+        SYS_SET_THREAD_AREA => {
+            // `struct user_desc`: entry_number, base_addr, limit, ...
+            // Yalnizca ilk iki alan okunuyor; limit ve bayraklar TCMK'de
+            // sabit (duz 4 GiB, ring 3 verisi).
+            //
+            // `entry_number` -1 gelirse "sen bir tane ayir" demektir ve
+            // cekirdek ayirdigini **geri yazar** -- program o numaradan
+            // seciciyi hesaplar: (numara << 3) | 3.
+            if !mmu::is_user_accessible(arg1) || !mmu::is_user_accessible(arg1 + 7) {
+                -EFAULT
+            } else {
+                let base = unsafe { ((arg1 + 4) as *const u32).read_unaligned() } as usize;
+                let task = crate::level0a::core::scheduler::current_id();
+                // Linux'ta GS is-parcacigi registeridir (Windows'ta FS --
+                // ayni mimaride, ters secim; bkz. `core::tls`).
+                crate::level0a::core::tls::set_gs(task, base);
+                unsafe {
+                    (arg1 as *mut u32)
+                        .write_unaligned(u32::from(crate::level0a::gdt::TLS_GS_SELECTOR >> 3));
+                }
+                0
+            }
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        SYS_ARCH_PRCTL => {
+            const ARCH_SET_FS: usize = 0x1002;
+            const ARCH_GET_FS: usize = 0x1003;
+            const ARCH_SET_GS: usize = 0x1001;
+            const ARCH_GET_GS: usize = 0x1004;
+            let task = crate::level0a::core::scheduler::current_id();
+            match arg1 {
+                ARCH_SET_FS => {
+                    crate::level0a::core::tls::set_fs(task, arg2);
+                    0
+                }
+                ARCH_SET_GS => {
+                    crate::level0a::core::tls::set_gs(task, arg2);
+                    0
+                }
+                ARCH_GET_FS | ARCH_GET_GS => {
+                    let base = if arg1 == ARCH_GET_FS {
+                        crate::level0a::core::tls::fs_of(task)
+                    } else {
+                        crate::level0a::core::tls::gs_of(task)
+                    };
+                    if write_user_word(arg2, base) {
+                        0
+                    } else {
+                        -EFAULT
+                    }
+                }
+                _ => -EINVAL,
+            }
+        }
 
         // `ftruncate(fd, uzunluk)` -- dosyayi verilen boya getirir.
         //

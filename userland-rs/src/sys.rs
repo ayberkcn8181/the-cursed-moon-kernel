@@ -57,6 +57,7 @@ mod i386_numbers {
     pub const SYS_FTRUNCATE: usize = 93;
     pub const SYS_READV: usize = 145;
     pub const SYS_GETEUID: usize = 201;
+    pub const SYS_SET_THREAD_AREA: usize = 243;
     pub const SYS_GETCWD: usize = 183;
     pub const SYS_WAITPID: usize = 7;
     pub const SYS_PIPE: usize = 42;
@@ -108,6 +109,7 @@ mod x86_64_numbers {
     pub const SYS_FTRUNCATE: usize = 77;
     pub const SYS_READV: usize = 19;
     pub const SYS_GETEUID: usize = 107;
+    pub const SYS_ARCH_PRCTL: usize = 158;
     pub const SYS_GETCWD: usize = 79;
     pub const SYS_BRK: usize = 12;
     pub const SYS_PIPE: usize = 22;

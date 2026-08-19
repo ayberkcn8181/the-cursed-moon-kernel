@@ -66,6 +66,8 @@ pub mod io;
 pub mod signal;
 #[cfg(not(target_os = "windows"))]
 pub mod sys;
+#[cfg(not(target_os = "windows"))]
+pub mod tls;
 
 // --- Windows/NT tarafi (PE ikilisi) ---
 #[cfg(target_os = "windows")]

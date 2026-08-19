@@ -38,7 +38,12 @@ arch_enter_user_mode:
     mov bx, 0x23
     mov ds, bx
     mov es, bx
+    /* FS/GS is-parcacigi tanimlayicilarini gosterir (0x33 / 0x3B).
+       Tabanlari sifirken 0x23 ile ayni davranirlar, yani TLS
+       kullanmayan surec farki gormez (bkz. gdt::i386). */
+    mov bx, 0x33
     mov fs, bx
+    mov bx, 0x3B
     mov gs, bx
 
     push 0x23               /* SS     */
@@ -73,7 +78,12 @@ arch_enter_user_mode_regs:
     mov bx, 0x23
     mov ds, bx
     mov es, bx
+    /* FS/GS is-parcacigi tanimlayicilarini gosterir (0x33 / 0x3B).
+       Tabanlari sifirken 0x23 ile ayni davranirlar, yani TLS
+       kullanmayan surec farki gormez (bkz. gdt::i386). */
+    mov bx, 0x33
     mov fs, bx
+    mov bx, 0x3B
     mov gs, bx
 
     /* iret cercevesi: SS, ESP, EFLAGS, CS, EIP */
@@ -103,7 +113,12 @@ arch_return_from_user:
     mov bx, 0x10
     mov ds, bx
     mov es, bx
+    /* FS/GS is-parcacigi tanimlayicilarini gosterir (0x33 / 0x3B).
+       Tabanlari sifirken 0x23 ile ayni davranirlar, yani TLS
+       kullanmayan surec farki gormez (bkz. gdt::i386). */
+    mov bx, 0x33
     mov fs, bx
+    mov bx, 0x3B
     mov gs, bx
 
     popfd
