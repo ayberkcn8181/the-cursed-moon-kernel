@@ -279,6 +279,20 @@ static KERNEL32: &[Export] = &[
         service: nt::NT_GET_CURRENT_THREAD_ID,
         stack_bytes: 0,
     },
+    Export {
+        name: "SetEndOfFile",
+        ordinal: 32,
+        service: nt::NT_SET_END_OF_FILE,
+        // hFile
+        stack_bytes: 4,
+    },
+    Export {
+        name: "GetModuleFileNameA",
+        ordinal: 33,
+        service: nt::NT_GET_MODULE_FILE_NAME_A,
+        // hModule, lpFilename, nSize
+        stack_bytes: 12,
+    },
 ];
 
 /// `TCMKGUI.dll` -- win32k cagrilarinin kullanici modundaki yuzu.

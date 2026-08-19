@@ -57,6 +57,8 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 9f | **Saat**: `time`/`clock_gettime` + `GetSystemTime(AsFileTime)` | ✅ (i386 + x86_64, ELF + PE) |
 | 9g | **`uname`** + `GetVersionExA`, **`fsync`** + `FlushFileBuffers` | ✅ (i386 + x86_64, ELF + PE) |
 | 9h | **Gercek Linux numaralari**: `exit_group` `nanosleep` `sched_yield` `writev` `getppid` | ✅ (i386 + x86_64) |
+| 5g | **Kesme**: `ftruncate` `O_TRUNC` + `SetEndOfFile` `CREATE_ALWAYS` | ✅ (i386; x86_64'te disk yok) |
+| 9i | **`readv`**, **`getuid`/`geteuid`** ailesi, **`GetModuleFileNameA`** | ✅ (i386 + x86_64, ELF + PE) |
 | — | **Klavye: shift + caps lock** (US duzeni, buyuk harf ve noktalama) | ✅ (i386 + x86_64) |
 | — | **Kendi onyukleyicisi** + diske kurulum (`install`) | ✅ (i386) |
 | 8 | **`execve`** (surec kendi yerine program yukler) | ✅ (i386 + x86_64) |
@@ -2388,6 +2390,83 @@ Iki sinav ozellikle **olumsuz** tarafi olcuyor, cunku asil kanit orada:
 On bes sinav da iki mimaride geciyor (i386/ELF32+PE32,
 x86_64/ELF64+PE32+).
 
+## Dosyayi kucultmek: `ftruncate`, `O_TRUNC`, `SetEndOfFile`
+
+Yazma yolunda uzun suredir tek yonlu bir bosluk vardi: bir dosya
+**buyuyebiliyor ama kuculemiyordu**. `write` yalnizca uzatiyor,
+`write_all` ise sil-ve-yeniden-yarat yapiyordu -- ki o da `fd` uzerinden
+calisan bir cagriya donusturulemez.
+
+Sonucu somut: uzun bir metnin uzerine kisa bir metin yazan bir
+duzenleyici, dosyanin kuyrugunda **eski icerigi birakiyordu**. Kaydetme
+"basarili" donuyordu, yani hata sessizdi.
+
+Uc kapi da ayni `tcmkfs::truncate`e iniyor:
+
+```text
+  POSIX  ftruncate(fd, uzunluk)     uzunluk PARAMETRE
+         open(yol, O_TRUNC)         acilista bosalt
+  Win32  SetEndOfFile(hFile)        uzunluk DOSYA IMLECI
+         CreateFileA(CREATE_ALWAYS) acilista bosalt
+```
+
+Ikinci satirdaki fark tasarimsal: Win32'de once `SetFilePointer` ile
+konumlanilir, sonra "buraya kadar" denir. Iki cagrili bir kalip, ama
+imleci zaten tasiyan bir yazma dongusunde daha dogal.
+
+Buyutme yonu de calisiyor ve POSIX orada buyuyen bolgenin **sifir
+okunmasini** sart kosar. Yeni tahsis edilen bloklar daha once baska bir
+dosyaya ait olabilir; sifirlamadan birakmak bir dosya sistemi
+hatasindan once bir **gizlilik** hatasi olurdu. `probe` J bunu dogrudan
+sinar: tampon `0xAA` ile doldurulup okunuyor ve kuyrugun gercekten sifir
+geldigi kontrol ediliyor.
+
+### Olcum iki gercek hata buldu
+
+Sinavlar ilk kosuda **dorde dort kaldi** ve sebep kesme kodunda degildi.
+
+**Bir: VFS dugum tablosu doluydu.** Acilista tam 32/32 dugum kayitliydi
+-- gomulu program sayisi arttikca sinira dayanmisti. Diskte hicbir yeni
+dosya yaratilamiyordu ve gorunen tek belirti `ENOENT`ti: "dosya yok"
+diyen bir hata, aslinda "**yer** yok" derken. Sinir 64'e cikarildi ve
+daha onemlisi doluluk her acilista yaziliyor:
+
+```text
+[LEVEL-0a] vfs: 32/64 dugum kullanildi
+```
+
+Bir sonraki dolusta sebep ekranda olacak.
+
+**Iki: `CreateFileA` Windows yollarini cevirmiyordu.** `GetFileAttributesA`,
+`FindFirstFileA`, `DeleteFileA` hepsi `normalize_win_path`ten geciyordu
+ama `CreateFileA` gecmiyordu. `C:\tmp\not.txt` goreli bir ad sayilip
+**koke** yaziliyor, sonra ayni adi normalize ederek arayan cagri onu
+bulamiyordu. Yani dosya yaratiliyor ve aninda kayboluyordu.
+
+Yillardir gorunmemesinin sebebi basit: TCMK'nin kendi PE uygulamalari
+(`winpad`, `winfiles`) POSIX tarzi yollar veriyordu. Bir olcum ilk kez
+gercek bir `C:\...` yolu deneyince ortaya cikti.
+
+### Olcum
+
+`probe` on bir, `winprobe` sekiz sinav yapiyor. Kesme sinavlari **disk
+ister** (RAMFS salt okunur); disk yoksa "gecti" degil **"atlandi"**
+bildiriliyor -- calismayan bir yetenegi calisiyor sanmak, sinavin
+kendisini degersiz kilardi.
+
+```text
+i386 (disk bagli)                    x86_64 (yalnizca ISO)
+[probe] J ftruncate:    gecti        [probe] J ftruncate:    atlandi
+[probe] K O_TRUNC:      gecti        [probe] K O_TRUNC:      atlandi
+[winprobe] G SetEndOfFile:  gecti    [winprobe] G SetEndOfFile:  atlandi
+[winprobe] H CREATE_ALWAYS: gecti    [winprobe] H CREATE_ALWAYS: atlandi
+```
+
+`winprobe` H'nin on kosulu da acikca sinaniyor: dosya zaten bossa
+"bosaltildi" gorunurdu ve sinav hicbir sey olcmeden gecerdi.
+
+![probe](docs/screenshot-probe.png)
+
 ## Ayni yetenek, gercek numara
 
 `probe`in G ve I sinavlari baska bir seyi olcuyor, ve o sey bu projenin
@@ -2439,12 +2518,8 @@ uydurmak, is parcacigi varmis gibi gorunmek olurdu.
   siniyor -- iki ABI'nin de sozlesmesi oyle.
 * **`GetLocalTime` yok**: saat dilimi kavrami yok, `GetSystemTime` ile
   ayni seyi dondururdu.
-* **`ftruncate`/`SetEndOfFile` yok.** TCMKFS'te dosyayi kisaltmak blok
-  zincirini kesip kuyrugu serbest birakmayi gerektiriyor; `write_all`
-  bunu sil-ve-yeniden-yarat ile yapiyor ama bu `fd` uzerinden isleyen bir
-  `ftruncate` icin yeterli degil.
-* **`readv` yok**: `writev`in esi, ama okuma yolunda ayni baski yok --
-  glibc stdio okumayi tek tamponla yapiyor.
+* **`truncate(yol, boy)` yok** -- yalnizca `fd` uzerinden calisan
+  `ftruncate` var. Yol alan surumu icin dosyayi acip kapatmak yeterli.
 * **`arch_prctl`/`set_tid_address` yok**: gercek bir glibc ikilisinin
   TLS kurmasi icin gerekli olurdu; TCMK'nin kendi userland'i TLS
   kullanmiyor.

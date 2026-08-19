@@ -34,6 +34,8 @@ pub const GENERIC_WRITE: Dword = 0x4000_0000;
 pub const CREATE_NEW: Dword = 1;
 pub const CREATE_ALWAYS: Dword = 2;
 pub const OPEN_EXISTING: Dword = 3;
+/// Var olan dosyayi acar ve **bosaltir**; yoksa hata.
+pub const TRUNCATE_EXISTING: Dword = 5;
 
 #[link(name = "kernel32")]
 extern "system" {
@@ -222,6 +224,25 @@ extern "system" {
     /// yani bu cagri surec kimligiyle **ayni** sayiyi dondurur. Ayri bir
     /// sayi uydurmak, is parcacigi varmis gibi gorunmek olurdu.
     pub fn GetCurrentThreadId() -> Dword;
+
+    /// Dosyayi **imlecin bulundugu yerde** biter hale getirir.
+    ///
+    /// POSIX `ftruncate` ile ayni cekirdek cagrisina iner ama uzunlugu
+    /// baska yerden alir: orada parametre, burada dosya imleci. Yani
+    /// Win32'de once [`SetFilePointer`] ile konumlanilir, sonra "buraya
+    /// kadar" denir.
+    pub fn SetEndOfFile(file: Handle) -> Bool;
+
+    /// Calisan modulun (surecin) dosya yolu.
+    ///
+    /// POSIX'te karsiligi **yok**: orada programin yolu `argv[0]`dir ve
+    /// kullanicinin yigininda durur. Windows'ta cevap cekirdegin bildigi
+    /// yoldur; bir program kendi dizinini bununla bulur.
+    ///
+    /// Tampon yetmezse dize **kirpilir** ve `nSize` doner (gereken boy
+    /// degil) -- `GetCurrentDirectoryA`dan farkli, ve bu Windows'un
+    /// kendi tutarsizligi.
+    pub fn GetModuleFileNameA(module: Handle, filename: *mut u8, size: Dword) -> Dword;
 }
 
 /// `SYSTEMTIME` -- Windows'un bolunmus zaman yapisi (sekiz `WORD`).

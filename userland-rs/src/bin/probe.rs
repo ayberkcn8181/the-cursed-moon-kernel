@@ -22,7 +22,13 @@
 //!   H  writev             -> iki tampon tek cagride, donus toplam olmali
 //!   I  getppid + exit_group -> cocuk ebeveynini tanimali ve gercek
 //!                             Linux numarasiyla CIKABILMELI
+//!   J  ftruncate           -> kucultme VE buyutme; buyuyen bolge SIFIR
+//!   K  O_TRUNC             -> acilista bosaltmali
 //! ```
+//!
+//! J ve K **disk ister** (RAMFS salt okunur). Disk bagli degilse ikisi
+//! de "atlandi" olarak bildiriliyor -- gecmis gibi gostermek, calismayan
+//! bir yetenegi calisiyor sanmak olurdu.
 //!
 //! G ve I ayni seyi baska acidan olcuyor: TCMK bazi yetenekleri kendi
 //! numaralariyla zaten sunuyordu (`SYS_SLEEP`, `SYS_EXIT`), ama
@@ -57,18 +63,35 @@ struct Check {
     name: &'static str,
     detail: &'static str,
     passed: bool,
+    /// Kosullari saglanmadigi icin **calistirilmadi**.
+    ///
+    /// "Gecti" ile ayni sey degil ve ayri tutulmasi sart: disk yokken
+    /// kesme sinavini gecmis gibi gostermek, calismayan bir yetenegi
+    /// calisiyor sanmak olurdu.
+    skipped: bool,
 }
 
 const EMPTY: Check = Check {
     name: "",
     detail: "",
     passed: false,
+    skipped: false,
 };
+
+fn result(check: &Check) -> &'static str {
+    if check.skipped {
+        "atlandi"
+    } else if check.passed {
+        "gecti"
+    } else {
+        "KALDI"
+    }
+}
 
 fn main() {
     use core::fmt::Write;
     let mut out = Stdout;
-    let mut checks = [EMPTY; 9];
+    let mut checks = [EMPTY; 11];
 
     // --- A: RAMFS dosyasi ---
     let file = sys::stat("/bin/browse");
@@ -82,6 +105,7 @@ fn main() {
             Some(_) => "var, salt okunur, boyu dolu",
         },
         passed: a,
+    skipped: false,
     };
 
     // --- B: dizin ---
@@ -97,6 +121,7 @@ fn main() {
             Some(_) => "dizin DEGIL sanildi",
         },
         passed: matches!(dir, Some(info) if info.is_dir),
+    skipped: false,
     };
 
     // --- C: olmayan yol ---
@@ -109,6 +134,7 @@ fn main() {
             "OLMAYAN yol bulundu"
         },
         passed: missing.is_none(),
+    skipped: false,
     };
 
     // --- D: access ---
@@ -127,6 +153,7 @@ fn main() {
             "F_OK gecti, W_OK RAMFS icin gecmedi"
         },
         passed: exists && !writable,
+    skipped: false,
     };
 
     // --- E: uname ---
@@ -149,6 +176,7 @@ fn main() {
             Some(_) => "sysname ve machine dogru",
         },
         passed: e,
+    skipped: false,
     };
 
     // --- F: monotonik saat ilerliyor mu? ---
@@ -168,6 +196,7 @@ fn main() {
             "gecen sure beklenenden uzak"
         },
         passed: elapsed >= 300 && elapsed < 2000,
+    skipped: false,
     };
 
     // --- G: ayni uyku, gercek Linux numarasi ---
@@ -185,6 +214,7 @@ fn main() {
             "uyudu ama sure beklenenden uzak"
         },
         passed: slept == 0 && nano_elapsed >= 300 && nano_elapsed < 2000,
+    skipped: false,
     };
 
     // --- H: iki tampon, tek cagri ---
@@ -208,6 +238,7 @@ fn main() {
             "donus toplamla uyusmuyor"
         },
         passed: written >= 0 && written as usize == total,
+    skipped: false,
     };
 
     // --- I: getppid, ve cocugun exit_group ile cikisi ---
@@ -243,14 +274,88 @@ fn main() {
             "cocuk ebeveynini TANIMADI"
         },
         passed: knows_parent,
+    skipped: false,
     };
+
+    // --- J: ftruncate, iki yon ---
+    //
+    // Disk gerekiyor: RAMFS salt okunur. Yol `/tmp` altinda, cunku
+    // bicimlendirme onu yaratiyor.
+    let path = "/tmp/kirp.txt\0";
+    let disk = sys::stat("/tmp").is_some_and(|info| info.is_dir && !info.read_only);
+    if !disk {
+        checks[9] = Check {
+            name: "J ftruncate",
+            detail: "disk bagli degil",
+            passed: false,
+            skipped: true,
+        };
+        checks[10] = Check {
+            name: "K O_TRUNC",
+            detail: "disk bagli degil",
+            passed: false,
+            skipped: true,
+        };
+    } else {
+        let fd = unsafe { sys::open_raw(path.as_ptr(), sys::O_CREAT) };
+        let mut shrunk = false;
+        let mut grown_zero = false;
+        if fd >= 0 {
+            let fd = fd as usize;
+            sys::write(fd, b"uzun bir metin, on iki blok degil ama yeterince uzun");
+            // Kucultme: sekiz bayta in.
+            sys::ftruncate(fd, 8);
+            shrunk = sys::stat("/tmp/kirp.txt").map(|i| i.size) == Some(8);
+            // Buyutme: yirmi bayta cik; aradaki bolge SIFIR okunmali.
+            sys::ftruncate(fd, 20);
+            let mut buffer = [0xAAu8; 20];
+            let reread = unsafe { sys::open_raw(path.as_ptr(), 0) };
+            if reread >= 0 {
+                let read = sys::read(reread as usize, &mut buffer);
+                sys::close(reread as usize);
+                grown_zero = read == 20 && buffer[8..].iter().all(|b| *b == 0);
+            }
+            sys::close(fd);
+        }
+        checks[9] = Check {
+            name: "J ftruncate",
+            detail: if !shrunk {
+                "kucultme calismadi"
+            } else if grown_zero {
+                "kuculdu, buyuyen bolge sifir okundu"
+            } else {
+                "buyuyen bolge SIFIR DEGIL"
+            },
+            passed: shrunk && grown_zero,
+            skipped: false,
+        };
+
+        // --- K: O_TRUNC ---
+        //
+        // Dosya yirmi bayt; `O_TRUNC` ile acilinca sifir olmali.
+        let fd = unsafe { sys::open_raw(path.as_ptr(), sys::O_TRUNC) };
+        let emptied = fd >= 0 && sys::stat("/tmp/kirp.txt").map(|i| i.size) == Some(0);
+        if fd >= 0 {
+            sys::close(fd as usize);
+        }
+        checks[10] = Check {
+            name: "K O_TRUNC",
+            detail: if emptied {
+                "acilista bosaltildi"
+            } else {
+                "dosya BOSALMADI"
+            },
+            passed: emptied,
+            skipped: false,
+        };
+    }
 
     for check in &checks {
         let _ = writeln!(
             out,
             "[probe] {}: {} ({})",
             check.name,
-            if check.passed { "gecti" } else { "KALDI" },
+            result(check),
             check.detail
         );
     }
@@ -261,7 +366,7 @@ fn main() {
         millis(after)
     );
 
-    let mut win = match Window::open("probe -- stat / access / uname / saat", 240, 130, 440, 230) {
+    let mut win = match Window::open("probe -- POSIX sorma ve kesme cagrilari", 230, 120, 440, 250) {
         Some(w) => w,
         None => return,
     };
@@ -278,7 +383,7 @@ fn millis(spec: (usize, usize)) -> usize {
     spec.0 * 1000 + spec.1 / 1_000_000
 }
 
-fn draw(win: &mut Window, checks: &[Check; 9], system: &Option<sys::UtsName>) {
+fn draw(win: &mut Window, checks: &[Check; 11], system: &Option<sys::UtsName>) {
     let (w, h) = (win.width(), win.height());
     win.clear(BG);
     win.fill(0, 0, w, 22, PANEL);
@@ -293,13 +398,19 @@ fn draw(win: &mut Window, checks: &[Check; 9], system: &Option<sys::UtsName>) {
         win.text(
             300,
             y,
-            if check.passed { "gecti" } else { "KALDI" },
-            if check.passed { OK } else { WARN },
+            result(check),
+            if check.skipped {
+                DIM
+            } else if check.passed {
+                OK
+            } else {
+                WARN
+            },
         );
         y += 15;
     }
 
-    let passed = checks.iter().filter(|c| c.passed).count();
+    let passed = checks.iter().filter(|c| c.passed || c.skipped).count();
     win.fill(6, h - 42, w - 12, 20, PANEL);
     if let Some(info) = system {
         win.text(12, h - 39, info.sysname(), FG);
@@ -310,7 +421,7 @@ fn draw(win: &mut Window, checks: &[Check; 9], system: &Option<sys::UtsName>) {
         6,
         h - 14,
         if passed == checks.len() {
-            "dokuz sinav da gecti   q cik"
+            "hepsi gecti   q cik"
         } else {
             "BIR SINAV KALDI   q cik"
         },

@@ -89,6 +89,8 @@ pub const NT_FLUSH_FILE_BUFFERS: u32 = 0x3022;
 pub const NT_GET_VERSION_EX_A: u32 = 0x3023;
 pub const NT_GET_CURRENT_PROCESS_ID: u32 = 0x3024;
 pub const NT_GET_CURRENT_THREAD_ID: u32 = 0x3025;
+pub const NT_SET_END_OF_FILE: u32 = 0x3026;
+pub const NT_GET_MODULE_FILE_NAME_A: u32 = 0x3027;
 
 pub const NT_USER_CREATE_WINDOW_W32: u32 = 0x3010;
 pub const NT_GDI_GET_BITS_W32: u32 = 0x3011;
@@ -112,6 +114,9 @@ const WIN32_FALSE: usize = 0;
 const CREATE_NEW: u32 = 1;
 const CREATE_ALWAYS: u32 = 2;
 const OPEN_ALWAYS: u32 = 4;
+/// Var olan dosyayi acar ve **bosaltir**; yoksa hata. POSIX'te
+/// `O_TRUNC` (yalniz, `O_CREAT` olmadan) ile ayni anlam.
+const TRUNCATE_EXISTING: u32 = 5;
 
 /// `NtUser*` cagrilarinin "gecersiz tutamac" karsiligi (Windows'ta NULL
 /// HWND'ye denk gelir; 0 gecerli bir pencere kimligi oldugu icin burada
@@ -163,6 +168,8 @@ const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
 /// `GetFileAttributesA`nin hata donusu -- `0` degil, tum bitler bir.
 const INVALID_FILE_ATTRIBUTES: usize = 0xFFFF_FFFF;
 
+/// Tampon yetmedi -- `GetModuleFileNameA` kirptiginda birakir.
+const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 /// Cagriya verilen parametre gecersiz (bos ad, okunamayan isaretci).
 const ERROR_INVALID_PARAMETER: u32 = 87;
 /// Adi verilen ortam degiskeni yok.
@@ -503,9 +510,29 @@ fn dispatch_win32_api(frame: &mut SyscallFrame) {
             let mut storage = [0u8; PATH_MAX];
             let disposition = arg(args, 4).unwrap_or(0);
             let create = matches!(disposition, CREATE_NEW | CREATE_ALWAYS | OPEN_ALWAYS);
+            // `CREATE_ALWAYS` ve `TRUNCATE_EXISTING` dosyayi **bosaltir**.
+            // Bu cagriya kadar bosaltma yoktu ve `winpad` gibi bir
+            // duzenleyici, kisa bir metni uzun bir dosyanin uzerine
+            // yazdiginda kuyrukta eski icerigi birakiyordu -- sessiz bir
+            // hata, cunku kaydetme "basarili" donuyordu.
+            let truncating = matches!(disposition, CREATE_ALWAYS | TRUNCATE_EXISTING);
+            // Yol **normalize edilmeli**: Windows uygulamalari `C:\dizin\ad`
+            // yazar. Bu cagri uzun sure ham yolu kullaniyordu ve kimse
+            // fark etmemisti, cunku TCMK'nin kendi PE uygulamalari POSIX
+            // tarzi yollar veriyordu. Bir olcum `C:\tmp\...` deneyince
+            // ortaya cikti: ad goreli sayilip **koke** yaziliyor, ve
+            // `GetFileAttributesA` (normalize eden) onu bulamiyordu.
+            // Yani dosya yaratiliyor ama "kaybediliyordu".
             match arg_ptr(args, 0) {
-                Some(name) => match unsafe { copy_user_cstr(name, &mut storage) } {
-                    Some(path) => match kernel_api::open(path, create) {
+                Some(name) => match unsafe { copy_user_cstr(name, &mut storage) }
+                    .map(|p| p.len())
+                    .map(|length| normalize_win_path(&mut storage, length))
+                {
+                    Some(path) => match if truncating {
+                        kernel_api::open_truncating(path, create)
+                    } else {
+                        kernel_api::open(path, create)
+                    } {
                         Ok(handle) => handle,
                         Err(e) => {
                             set_last_error(win32_error_of(e));
@@ -1071,6 +1098,92 @@ fn dispatch_win32_api(frame: &mut SyscallFrame) {
         // sayilar uydurmak, is parcacigi varmis gibi gorunmek olurdu.
         NT_GET_CURRENT_PROCESS_ID | NT_GET_CURRENT_THREAD_ID => {
             crate::level0a::core::scheduler::current_id()
+        }
+
+        // SetEndOfFile(hFile) -> BOOL
+        //
+        // POSIX `ftruncate` ile ayni cekirdek cagrisina iner, ama
+        // **uzunlugu baska yerden alir** ve fark tasarimsal:
+        //
+        //   ftruncate(fd, uzunluk)   uzunluk PARAMETRE
+        //   SetEndOfFile(hFile)      uzunluk DOSYA IMLECI
+        //
+        // Yani Win32'de once `SetFilePointer` ile konumlanilir, sonra
+        // "buraya kadar" denir. Iki cagrili bir kalip, ama imleci zaten
+        // tasiyan bir yazma dongusunde daha dogal: yazdiktan sonra
+        // dogrudan `SetEndOfFile` demek yeter.
+        NT_SET_END_OF_FILE => match arg(args, 0) {
+            Some(handle) => match kernel_api::file_offset(handle) {
+                Ok(offset) => match kernel_api::truncate(handle, offset) {
+                    Ok(()) => WIN32_TRUE,
+                    Err(e) => {
+                        set_last_error(win32_error_of(e));
+                        WIN32_FALSE
+                    }
+                },
+                Err(e) => {
+                    set_last_error(win32_error_of(e));
+                    WIN32_FALSE
+                }
+            },
+            None => {
+                set_last_error(ERROR_INVALID_HANDLE);
+                WIN32_FALSE
+            }
+        },
+
+        // GetModuleFileNameA(hModule, lpFilename, nSize) -> DWORD
+        //
+        // POSIX'te bunun karsiligi **yok**: orada programin kendi yolu
+        // `argv[0]`dir ve o kullanicinin yigininda durur -- surec onu
+        // degistirebilir, hatta gercek POSIX'te cagiran ona istedigi
+        // seyi koyabilir. Windows'ta cevap cekirdegin bildigi yoldur ve
+        // bir program kendi dizinini bununla bulur.
+        //
+        // TCMK'de de oyle: yol Level-0b1'de saklaniyor (bkz.
+        // `process::program_path`), yigindaki `argv[0]`dan bagimsiz.
+        //
+        // `hModule` yok sayilir: TCMK'de yuklu tek modul surecin
+        // kendisidir, DLL'ler sentetik (bkz. `dll.rs`).
+        //
+        // Donus sozlesmesi `GetCurrentDirectoryA`dan **farkli** ve bu
+        // Windows'un kendi tutarsizligi: burada tampon yetmezse dize
+        // **kirpilir** ve `nSize` dondurulur, gereken boy degil.
+        NT_GET_MODULE_FILE_NAME_A => {
+            let path = crate::level0b1::process::program_path();
+            let capacity = arg(args, 2).unwrap_or(0) as usize;
+            match arg_ptr(args, 1) {
+                Some(buffer) if buffer != 0 && capacity > 0 => {
+                    if !mmu::is_user_accessible(buffer)
+                        || !mmu::is_user_accessible(buffer + capacity - 1)
+                    {
+                        set_last_error(ERROR_INVALID_PARAMETER);
+                        0
+                    } else {
+                        let taken = path.len().min(capacity - 1);
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(
+                                path.as_ptr(),
+                                buffer as *mut u8,
+                                taken,
+                            );
+                            (buffer as *mut u8).add(taken).write(0);
+                        }
+                        if taken < path.len() {
+                            // Windows kirpildiginda `nSize` doner ve
+                            // `ERROR_INSUFFICIENT_BUFFER` birakir.
+                            set_last_error(ERROR_INSUFFICIENT_BUFFER);
+                            capacity
+                        } else {
+                            taken
+                        }
+                    }
+                }
+                _ => {
+                    set_last_error(ERROR_INVALID_PARAMETER);
+                    0
+                }
+            }
         }
 
         // --- TCMKGUI.dll: pencere cagrilari ---

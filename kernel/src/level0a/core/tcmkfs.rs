@@ -949,6 +949,86 @@ pub fn write(index: usize, offset: usize, data: &[u8]) -> Result<usize, FsError>
     Ok(done)
 }
 
+/// Dosyayi verilen uzunluga getirir (POSIX `ftruncate`).
+///
+/// Bu cagriya kadar bir dosya **kucultulemiyordu**: `write` yalnizca
+/// buyutuyor, `write_all` ise sil-ve-yeniden-yarat yapiyordu. Sonuc,
+/// uzun bir metnin uzerine kisa bir metin yazan bir duzenleyicinin
+/// dosyanin kuyrugunda eski icerigi birakmasiydi -- gorunur bir hata,
+/// ve `fd` uzerinden calisan bir `ftruncate` olmadan cozulemezdi.
+///
+/// Iki yon de destekleniyor ve **ikisi de sifirlamak zorunda**:
+///
+///   * Kucultme: fazla bloklar serbest birakilir. Serbest kalan bloklar
+///     baska bir dosyaya gidebilir, o yuzden icerikleri onemli degil.
+///   * Buyutme: POSIX buyuyen bolgenin **sifir okunmasini** sart kosar.
+///     Yeni tahsis edilen bloklar daha once baska bir dosyaya ait
+///     olabilir, yani sifirlanmadan birakmak eski verinin sizmasi
+///     olurdu -- bir dosya sistemi hatasindan once bir **gizlilik**
+///     hatasi.
+pub fn truncate(index: usize, length: usize) -> Result<(), FsError> {
+    if !mounted() {
+        return Err(FsError::NotMounted);
+    }
+    if length > MAX_FILE_SIZE {
+        return Err(FsError::FileTooLarge);
+    }
+    let inode = inode_ref(index).ok_or(FsError::NotFound)?;
+    if inode.kind != KIND_FILE {
+        return Err(FsError::NotFound);
+    }
+
+    let old = inode.size as usize;
+    let have = block_count(old);
+    let needed = block_count(length);
+
+    if length < old {
+        for i in needed..have {
+            free_block(inode.blocks[i]);
+            inode.blocks[i] = 0;
+        }
+    } else if length > old {
+        // Once tahsis (yarim birakmamak icin), sonra sifirlama.
+        for i in have..needed {
+            match alloc_block() {
+                Some(block) => inode.blocks[i] = block,
+                None => {
+                    for j in have..i {
+                        free_block(inode.blocks[j]);
+                        inode.blocks[j] = 0;
+                    }
+                    return Err(FsError::Full);
+                }
+            }
+        }
+        unsafe {
+            let scratch = core::slice::from_raw_parts_mut(
+                core::ptr::addr_of_mut!(SCRATCH) as *mut u8,
+                BLOCK_SIZE,
+            );
+            // Eski son blogun kuyrugu: blok zaten bu dosyanin, o yuzden
+            // once okunup yalnizca eski boyun otesi sifirlaniyor.
+            if old % BLOCK_SIZE != 0 && have > 0 {
+                let last = have - 1;
+                read_block(inode.blocks[last], scratch)?;
+                scratch[old % BLOCK_SIZE..].fill(0);
+                write_block(inode.blocks[last], scratch)?;
+            }
+            // Yeni bloklar bastan sona sifir.
+            scratch.fill(0);
+            for i in have..needed {
+                write_block(inode.blocks[i], scratch)?;
+            }
+        }
+    }
+
+    inode.size = length as u32;
+    inode.mtime = crate::level0a::drivers::rtc::unix_time();
+    flush_inodes()?;
+    flush_bitmap()?;
+    Ok(())
+}
+
 /// Dosyayi bastan yazar (var olan icerigi atar).
 pub fn write_all(name: &str, data: &[u8]) -> Result<usize, FsError> {
     let index = match lookup(name) {

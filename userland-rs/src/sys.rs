@@ -54,6 +54,9 @@ mod i386_numbers {
     pub const SYS_WRITEV: usize = 146;
     pub const SYS_NANOSLEEP: usize = 162;
     pub const SYS_EXIT_GROUP: usize = 252;
+    pub const SYS_FTRUNCATE: usize = 93;
+    pub const SYS_READV: usize = 145;
+    pub const SYS_GETEUID: usize = 201;
     pub const SYS_GETCWD: usize = 183;
     pub const SYS_WAITPID: usize = 7;
     pub const SYS_PIPE: usize = 42;
@@ -102,6 +105,9 @@ mod x86_64_numbers {
     pub const SYS_WRITEV: usize = 20;
     pub const SYS_NANOSLEEP: usize = 35;
     pub const SYS_EXIT_GROUP: usize = 231;
+    pub const SYS_FTRUNCATE: usize = 77;
+    pub const SYS_READV: usize = 19;
+    pub const SYS_GETEUID: usize = 107;
     pub const SYS_GETCWD: usize = 79;
     pub const SYS_BRK: usize = 12;
     pub const SYS_PIPE: usize = 22;
@@ -244,6 +250,12 @@ pub fn read(fd: usize, buf: &mut [u8]) -> isize {
 
 /// POSIX `O_CREAT`: dosya yoksa olustur.
 pub const O_CREAT: usize = 0o100;
+/// POSIX `O_TRUNC`: acarken dosyayi **bosaltir**.
+///
+/// Bu bayrak uzun sure yok sayiliyordu ve bu sessiz bir hataydi: uzun
+/// bir dosyanin uzerine kisa bir metin yazan program, kuyrukta eski
+/// icerigi birakiyordu.
+pub const O_TRUNC: usize = 0o1000;
 
 /// VFS'te bir dosya acar. `path` NUL ile sonlanmalidir (bkz. [`crate::io::File`]).
 ///
@@ -660,6 +672,30 @@ impl IoVec {
 /// hicbir sey yazilmazdi.
 pub fn writev(fd: usize, parts: &[IoVec]) -> isize {
     unsafe { syscall3(SYS_WRITEV, fd, parts.as_ptr() as usize, parts.len()) as isize }
+}
+
+/// POSIX `ftruncate`: dosyayi verilen uzunluga getirir.
+///
+/// Bu cagriya kadar bir dosya **kucultulemiyordu**: uzun bir metnin
+/// uzerine kisa bir metin yazan program, kuyrukta eski icerigi
+/// birakiyordu. Buyutme yonu de calisir ve buyuyen bolge **sifir**
+/// okunur (POSIX'in sarti).
+pub fn ftruncate(fd: usize, length: usize) -> isize {
+    unsafe { syscall2(SYS_FTRUNCATE, fd, length) as isize }
+}
+
+/// POSIX `readv`: birden cok tamponu tek cagride doldurur.
+pub fn readv(fd: usize, parts: &mut [IoVec]) -> isize {
+    unsafe { syscall3(SYS_READV, fd, parts.as_ptr() as usize, parts.len()) as isize }
+}
+
+/// POSIX `geteuid`.
+///
+/// TCMK'de kullanici kavrami yok; **0** doner, yani "root". Uydurma bir
+/// numara vermek, ayricalik dususu yapmaya calisan bir programi
+/// yaniltirdi.
+pub fn geteuid() -> usize {
+    unsafe { syscall0(SYS_GETEUID) }
 }
 
 /// POSIX `fsync`: bekleyen yazmalari diske indirir.

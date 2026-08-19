@@ -33,7 +33,16 @@
 //!                              cagri BASARISIZ olmali
 //!   E  GetSystemTime        -> makul takvim + FILETIME sifir degil
 //!   F  GetCurrentProcessId  -> ThreadId ile AYNI olmali
+//!   G  SetEndOfFile         -> dosya IMLECIN oldugu yerde bitmeli
+//!   H  CREATE_ALWAYS        -> var olan dosyayi BOSALTMALI
 //! ```
+//!
+//! G, POSIX ikizinden yapisal olarak ayrilan bir yer: `ftruncate`
+//! uzunlugu **parametre** alir, `SetEndOfFile` **dosya imlecini**
+//! kullanir. Yani Win32'de once konumlanilir, sonra "buraya kadar"
+//! denir.
+//!
+//! G ve H **disk ister** (RAMFS salt okunur); disk yoksa "atlandi".
 //!
 //! F bir eksikligi degil bir **gercegi** olcuyor: POSIX'te `getpid` ve
 //! `gettid` ayri sayilar dondururler cunku bir surecte cok is parcacigi
@@ -63,17 +72,30 @@ struct Check {
     name: &'static str,
     detail: &'static str,
     passed: bool,
+    /// Kosullari saglanmadigi icin calistirilmadi (bkz. POSIX ikizi).
+    skipped: bool,
 }
 
 const EMPTY: Check = Check {
     name: "",
     detail: "",
     passed: false,
+    skipped: false,
 };
+
+fn result(check: &Check) -> &'static str {
+    if check.skipped {
+        "atlandi"
+    } else if check.passed {
+        "gecti"
+    } else {
+        "KALDI"
+    }
+}
 
 fn main() {
     let mut console = winapi::Console;
-    let mut checks = [EMPTY; 6];
+    let mut checks = [EMPTY; 8];
 
     // --- A: RAMFS dosyasi ---
     let file = unsafe { winapi::GetFileAttributesA(b"C:\\bin\\browse\0".as_ptr()) };
@@ -90,6 +112,7 @@ fn main() {
             "bayraklar beklenen gibi degil"
         },
         passed: a,
+    skipped: false,
     };
 
     // --- B: dizin ---
@@ -104,6 +127,7 @@ fn main() {
             "dizin GORULMEDI"
         },
         passed: b,
+    skipped: false,
     };
 
     // --- C: olmayan yol -- hata degeri 0 DEGIL ---
@@ -120,6 +144,7 @@ fn main() {
             "hata kodu yanlis"
         },
         passed: c,
+    skipped: false,
     };
 
     // --- D: surum, ve boyut alaninin dogrulanmasi ---
@@ -146,6 +171,7 @@ fn main() {
             "platform NT(2), bos boyut reddedildi"
         },
         passed: d,
+    skipped: false,
     };
 
     // --- E: takvim ve FILETIME ---
@@ -171,6 +197,7 @@ fn main() {
             "takvim ve FILETIME dolu"
         },
         passed: e,
+    skipped: false,
     };
 
     // --- F: surec ve is parcacigi kimligi ---
@@ -184,20 +211,140 @@ fn main() {
             "iki kimlik AYRISTI -- is parcacigi yok"
         },
         passed: process == thread,
+    skipped: false,
     };
+
+    // --- G ve H: kesme (disk gerektirir) ---
+    let disk = unsafe { winapi::GetFileAttributesA(b"C:\\tmp\0".as_ptr()) };
+    let writable = disk != winapi::INVALID_FILE_ATTRIBUTES
+        && disk & winapi::FILE_ATTRIBUTE_DIRECTORY != 0
+        && disk & winapi::FILE_ATTRIBUTE_READONLY == 0;
+    if !writable {
+        checks[6] = Check {
+            name: "G SetEndOfFile",
+            detail: "disk bagli degil",
+            passed: false,
+            skipped: true,
+        };
+        checks[7] = Check {
+            name: "H CREATE_ALWAYS",
+            detail: "disk bagli degil",
+            passed: false,
+            skipped: true,
+        };
+    } else {
+        let name = b"C:\\tmp\\wintrunc.txt\0";
+        let mut cut = false;
+        let handle = unsafe {
+            winapi::CreateFileA(
+                name.as_ptr(),
+                winapi::GENERIC_WRITE,
+                0,
+                core::ptr::null_mut(),
+                winapi::CREATE_ALWAYS,
+                0,
+                0,
+            )
+        };
+        if handle != winapi::INVALID_HANDLE_VALUE {
+            let text = b"bu metin kirpilacak";
+            let mut written = 0u32;
+            unsafe {
+                winapi::WriteFile(
+                    handle,
+                    text.as_ptr(),
+                    text.len() as winapi::Dword,
+                    &mut written,
+                    core::ptr::null_mut(),
+                );
+                // Once KONUMLAN, sonra "buraya kadar" de: Win32'nin
+                // kalibi bu, POSIX'te uzunluk parametreyle gelir.
+                winapi::SetFilePointer(handle, 6, core::ptr::null_mut(), 0);
+                cut = winapi::SetEndOfFile(handle) != 0;
+                winapi::CloseHandle(handle);
+            }
+        }
+        let size = unsafe { winapi::GetFileAttributesA(name.as_ptr()) };
+        let exists = size != winapi::INVALID_FILE_ATTRIBUTES;
+        checks[6] = Check {
+            name: "G SetEndOfFile",
+            detail: if !exists {
+                "dosya olusturulamadi"
+            } else if cut {
+                "imlecin oldugu yerde bitirildi"
+            } else {
+                "cagri BASARISIZ"
+            },
+            passed: cut && exists,
+            skipped: false,
+        };
+
+        // H: CREATE_ALWAYS **var olan** dosyayi bosaltmali.
+        //
+        // On kosul acikca sinaniyor: dosya yoksa "bosalmis" gorunurdu ve
+        // sinav hicbir sey olcmeden gecerdi. G'den sonra dosya alti
+        // bayt olmali.
+        let before = unsafe {
+            let h = winapi::CreateFileA(
+                name.as_ptr(),
+                winapi::GENERIC_READ,
+                0,
+                core::ptr::null_mut(),
+                winapi::OPEN_EXISTING,
+                0,
+                0,
+            );
+            if h == winapi::INVALID_HANDLE_VALUE {
+                0
+            } else {
+                let mut high = 0u32;
+                let size = winapi::GetFileSize(h, &mut high);
+                winapi::CloseHandle(h);
+                size
+            }
+        };
+        let handle = unsafe {
+            winapi::CreateFileA(
+                name.as_ptr(),
+                winapi::GENERIC_WRITE,
+                0,
+                core::ptr::null_mut(),
+                winapi::CREATE_ALWAYS,
+                0,
+                0,
+            )
+        };
+        let mut emptied = false;
+        if handle != winapi::INVALID_HANDLE_VALUE {
+            let mut high = 0u32;
+            emptied = unsafe { winapi::GetFileSize(handle, &mut high) } == 0;
+            unsafe { winapi::CloseHandle(handle) };
+        }
+        checks[7] = Check {
+            name: "H CREATE_ALWAYS",
+            detail: if before == 0 {
+                "on kosul yok: dosya bos ya da acilamadi"
+            } else if emptied {
+                "dolu dosya acilista bosaltildi"
+            } else {
+                "dosya BOSALMADI"
+            },
+            passed: before > 0 && emptied,
+            skipped: false,
+        };
+    }
 
     for check in &checks {
         let _ = core::fmt::Write::write_str(&mut console, "[winprobe] ");
         let _ = core::fmt::Write::write_str(&mut console, check.name);
-        let _ = core::fmt::Write::write_str(
-            &mut console,
-            if check.passed { ": gecti (" } else { ": KALDI (" },
-        );
+        let _ = core::fmt::Write::write_str(&mut console, ": ");
+        let _ = core::fmt::Write::write_str(&mut console, result(check));
+        let _ = core::fmt::Write::write_str(&mut console, " (");
         let _ = core::fmt::Write::write_str(&mut console, check.detail);
         let _ = core::fmt::Write::write_str(&mut console, ")\n");
     }
 
-    let mut win = match Window::create("winprobe -- Win32 sorma cagrilari", 300, 180, 460, 230) {
+    let mut win = match Window::create("winprobe -- Win32 sorma ve kesme cagrilari", 300, 170, 460, 250) {
         Some(w) => w,
         None => return,
     };
@@ -210,7 +357,7 @@ fn main() {
     }
 }
 
-fn draw(win: &mut Window, checks: &[Check; 6], now: &SystemTime, version: &OsVersionInfoA) {
+fn draw(win: &mut Window, checks: &[Check; 8], now: &SystemTime, version: &OsVersionInfoA) {
     let (w, h) = (win.width(), win.height());
     win.clear(BG);
     win.fill(0, 0, w, 22, PANEL);
@@ -223,13 +370,19 @@ fn draw(win: &mut Window, checks: &[Check; 6], now: &SystemTime, version: &OsVer
         win.text(
             320,
             y,
-            if check.passed { "gecti" } else { "KALDI" },
-            if check.passed { OK } else { WARN },
+            result(check),
+            if check.skipped {
+                DIM
+            } else if check.passed {
+                OK
+            } else {
+                WARN
+            },
         );
         y += 16;
     }
 
-    let passed = checks.iter().filter(|c| c.passed).count();
+    let passed = checks.iter().filter(|c| c.passed || c.skipped).count();
     win.fill(6, h - 42, w - 12, 20, PANEL);
     win.text(12, h - 39, version.csd(), FG);
     win.text(70, h - 39, "yil:", DIM);
@@ -240,7 +393,7 @@ fn draw(win: &mut Window, checks: &[Check; 6], now: &SystemTime, version: &OsVer
         6,
         h - 14,
         if passed == checks.len() {
-            "alti sinav da gecti   q cik"
+            "hepsi gecti   q cik"
         } else {
             "BIR SINAV KALDI   q cik"
         },

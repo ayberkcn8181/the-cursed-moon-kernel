@@ -24,7 +24,18 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::level0a::core::{kmalloc, tcmkfs};
 
-pub const MAX_NODES: usize = 32;
+/// Isim uzayindaki en fazla dugum: gomulu (RAMFS) **ve** diskteki
+/// dosyalar ayni tabloyu paylasir.
+///
+/// Uzun sure 32'ydi ve gomulu program sayisi arttikca sessizce doldu:
+/// acilista tam 32 dugum kayitliydi, yani diskte **hicbir yeni dosya
+/// yaratilamiyordu**. Hicbir hata gorunmuyordu, cunku dolu tablo
+/// `create_file`i basarisiz kiliyor ve o da `ENOENT`e cevriliyordu --
+/// "dosya yok" diyen bir hata, aslinda "yer yok" derken.
+///
+/// Sinir buyutuldu **ve** dolulugu gorunur kilindi (bkz. `list`):
+/// bir sonraki dolusta sebep ekranda yazacak.
+pub const MAX_NODES: usize = 64;
 pub const MAX_PATH: usize = 64;
 
 /// Dugumun hangi arka uctan geldigi.
@@ -283,6 +294,24 @@ pub fn write_at(node: usize, offset: usize, data: &[u8]) -> Result<usize, tcmkfs
     Ok(written)
 }
 
+/// Acik bir dugumu verilen uzunluga getirir (POSIX `ftruncate`).
+///
+/// RAMFS dugumleri kucultulemez: icerikleri cekirdek imajinin
+/// `.rodata`sinda, boyu derleme aninda sabit.
+pub fn truncate(node: usize, length: usize) -> Result<(), tcmkfs::FsError> {
+    let n = node_at(node).ok_or(tcmkfs::FsError::NotFound)?;
+    if n.source != Source::Disk {
+        return Err(tcmkfs::FsError::NotFound);
+    }
+    tcmkfs::truncate(n.inode, length)?;
+
+    let size = tcmkfs::entry_size(n.inode).unwrap_or(0);
+    crate::arch::cpu::without_interrupts(|| unsafe {
+        (*nodes_mut().add(node)).size = size;
+    });
+    Ok(())
+}
+
 /// Diskte bos bir dosya olusturur ve dugum numarasini doner.
 pub fn create_file(path: &str) -> Result<usize, tcmkfs::FsError> {
     if let Some(index) = lookup(path) {
@@ -421,4 +450,20 @@ pub fn list() {
             );
         }
     }
+
+    // Dolulugu **her acilista** soyle. Tablo sessizce doldugunda
+    // gorunen tek belirti "dosya olusturulamadi" oluyordu ve o mesaj
+    // sebebi gizliyordu; sayiyi burada yazmak, bir sonraki dolusu
+    // olcum yapmadan gorulur kiliyor.
+    let used = node_count();
+    crate::println!(
+        "[LEVEL-0a] vfs: {}/{} dugum kullanildi{}",
+        used,
+        MAX_NODES,
+        if used == MAX_NODES {
+            "  -- DOLU: yeni dosya yaratilamaz"
+        } else {
+            ""
+        }
+    );
 }

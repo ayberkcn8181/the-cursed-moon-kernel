@@ -41,3 +41,5 @@ FlushFileBuffers@4 @28
 GetVersionExA@4 @29
 GetCurrentProcessId@0 @30
 GetCurrentThreadId@0 @31
+SetEndOfFile@4 @32
+GetModuleFileNameA@12 @33

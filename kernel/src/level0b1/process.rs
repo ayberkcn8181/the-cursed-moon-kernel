@@ -219,6 +219,37 @@ const MAX_ARGV: usize = 8;
 ///
 /// `GetCommandLineA` bunu doner. POSIX tarafinda karsiligi yok: orada
 /// argumanlar yiginda, `argc`/`argv` olarak durur.
+/// Surecin **imaj yolu** -- cekirdek tarafinda saklanan kopya.
+///
+/// `argv[0]` kullanicinin yigininda duruyor ama ona guvenilemez: surec
+/// kendi yigininda yazdigi seyi degistirebilir. `GetModuleFileNameA`nin
+/// dondurdugu deger, gercek Windows'ta da cekirdegin bildigi yoldur.
+const PROGRAM_PATH_MAX: usize = 64;
+static mut PROGRAM_PATH: [[u8; PROGRAM_PATH_MAX]; scheduler::MAX_TASKS] =
+    [[0; PROGRAM_PATH_MAX]; scheduler::MAX_TASKS];
+static PROGRAM_LEN: [core::sync::atomic::AtomicUsize; scheduler::MAX_TASKS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; scheduler::MAX_TASKS];
+
+fn remember_program(task: usize, program: &str) {
+    let slot = task % scheduler::MAX_TASKS;
+    let taken = program.len().min(PROGRAM_PATH_MAX);
+    crate::arch::cpu::without_interrupts(|| unsafe {
+        let base = (core::ptr::addr_of_mut!(PROGRAM_PATH) as *mut u8).add(slot * PROGRAM_PATH_MAX);
+        core::ptr::copy_nonoverlapping(program.as_ptr(), base, taken);
+    });
+    PROGRAM_LEN[slot].store(taken, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Calisan surecin imaj yolu (Win32 `GetModuleFileNameA`).
+pub fn program_path() -> &'static str {
+    let slot = scheduler::current_id() % scheduler::MAX_TASKS;
+    let len = PROGRAM_LEN[slot].load(core::sync::atomic::Ordering::Relaxed);
+    unsafe {
+        let base = (core::ptr::addr_of!(PROGRAM_PATH) as *const u8).add(slot * PROGRAM_PATH_MAX);
+        core::str::from_utf8(core::slice::from_raw_parts(base, len)).unwrap_or("")
+    }
+}
+
 static COMMAND_LINE: [core::sync::atomic::AtomicUsize; scheduler::MAX_TASKS] =
     [const { core::sync::atomic::AtomicUsize::new(0) }; scheduler::MAX_TASKS];
 
@@ -255,6 +286,12 @@ unsafe fn build_start_stack(
 ) -> usize {
     let task = scheduler::current_id();
     COMMAND_LINE[task % scheduler::MAX_TASKS].store(0, core::sync::atomic::Ordering::Relaxed);
+    // Imajin yolu her iki ABI'de de gerekli ama **farkli sekilde**:
+    // POSIX'te `argv[0]` olarak yigina konuyor, Win32'de
+    // `GetModuleFileNameA` ile sorulunca dondurulmesi gerekiyor. Bir
+    // Windows programi kendi dizinini bu cagriyla bulur, yani yalnizca
+    // yigina koymak yetmiyor.
+    remember_program(task, program);
 
     match format {
         #[cfg(target_arch = "x86")]

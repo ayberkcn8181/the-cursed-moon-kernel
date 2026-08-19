@@ -97,6 +97,13 @@ mod i386_numbers {
     pub const SYS_NANOSLEEP: u32 = 162;
     pub const SYS_SCHED_YIELD: u32 = 158;
     pub const SYS_EXIT_GROUP: u32 = 252;
+    pub const SYS_FTRUNCATE: u32 = 93;
+    pub const SYS_READV: u32 = 145;
+    /// i386'da 199 `getuid32`; eski 24 16-bit kimlik dondururdu.
+    pub const SYS_GETUID: u32 = 199;
+    pub const SYS_GETGID: u32 = 200;
+    pub const SYS_GETEUID: u32 = 201;
+    pub const SYS_GETEGID: u32 = 202;
     pub const SYS_BRK: u32 = 45;
     pub const SYS_GETPID: u32 = 20;
     pub const SYS_KILL: u32 = 37;
@@ -150,6 +157,12 @@ mod x86_64_numbers {
     pub const SYS_NANOSLEEP: u32 = 35;
     pub const SYS_SCHED_YIELD: u32 = 24;
     pub const SYS_EXIT_GROUP: u32 = 231;
+    pub const SYS_FTRUNCATE: u32 = 77;
+    pub const SYS_READV: u32 = 19;
+    pub const SYS_GETUID: u32 = 102;
+    pub const SYS_GETGID: u32 = 104;
+    pub const SYS_GETEUID: u32 = 107;
+    pub const SYS_GETEGID: u32 = 108;
     pub const SYS_BRK: u32 = 12;
     pub const SYS_PIPE: u32 = 22;
     pub const SYS_FORK: u32 = 57;
@@ -444,11 +457,24 @@ pub fn dispatch(frame: &mut SyscallFrame) {
         SYS_OPEN => {
             let mut storage = [0u8; PATH_MAX];
             match unsafe { copy_user_cstr(arg1, &mut storage) } {
-                // arg2 = bayraklar; Linux'ta O_CREAT = 0o100 = 0x40.
-                Some(path) => match kernel_api::open(path, arg2 & 0x40 != 0) {
-                    Ok(fd) => fd as i32,
-                    Err(e) => errno_of(e),
-                },
+                // arg2 = bayraklar. Linux'ta O_CREAT = 0o100 = 0x40,
+                // O_TRUNC = 0o1000 = 0x200.
+                //
+                // `O_TRUNC` bu cagriya kadar **yok sayiliyordu** ve bu
+                // sessiz bir hataydi: uzun bir dosyanin uzerine kisa bir
+                // metin yazan program, kuyrukta eski icerigi birakiyordu.
+                Some(path) => {
+                    let create = arg2 & 0x40 != 0;
+                    let opened = if arg2 & 0x200 != 0 {
+                        kernel_api::open_truncating(path, create)
+                    } else {
+                        kernel_api::open(path, create)
+                    };
+                    match opened {
+                        Ok(fd) => fd as i32,
+                        Err(e) => errno_of(e),
+                    }
+                }
                 None => -EFAULT,
             }
         }
@@ -1010,6 +1036,82 @@ pub fn dispatch(frame: &mut SyscallFrame) {
         // duzenleyicinin "kaydettim" demeden once cagirmasi gereken sey
         // budur.
         SYS_FSYNC => match kernel_api::fsync(arg1 as u32) {
+            Ok(()) => 0,
+            Err(e) => errno_of(e),
+        },
+
+        // `readv(fd, iovec[], count)` -- `writev`in esi.
+        //
+        // Ayni `struct iovec` dizisi, ters yon: her tampon sirayla
+        // doldurulur ve **toplam** okunan doner. Kisa okuma normaldir --
+        // dosya bitince dongu erken kesilir.
+        SYS_READV => {
+            let width = core::mem::size_of::<usize>();
+            if arg3 > MAX_POLL_FDS {
+                return_errno(frame, -EINVAL);
+                return;
+            }
+            let mut total = 0usize;
+            let mut failed = None;
+            for i in 0..arg3 {
+                let record = arg2 + i * 2 * width;
+                if !mmu::is_user_accessible(record)
+                    || !mmu::is_user_accessible(record + 2 * width - 1)
+                {
+                    failed = Some(-EFAULT);
+                    break;
+                }
+                let base = unsafe { (record as *const usize).read_unaligned() };
+                let len = unsafe { ((record + width) as *const usize).read_unaligned() };
+                if len == 0 {
+                    continue;
+                }
+                match unsafe { kernel_api::read(arg1 as u32, base as *mut u8, len) } {
+                    Ok(read) => {
+                        total += read;
+                        // Kisa okuma: kaynak bitti, kalan tamponlari
+                        // doldurmaya calismak bosuna.
+                        if read < len {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        if total == 0 {
+                            failed = Some(errno_of(e));
+                        }
+                        break;
+                    }
+                }
+            }
+            match failed {
+                Some(e) => e,
+                None => {
+                    frame.set_return(total);
+                    return;
+                }
+            }
+        }
+
+        // `getuid`/`geteuid`/`getgid`/`getegid` -- hepsi **0**.
+        //
+        // TCMK'de kullanici ve grup kavrami yok: tek bir ayricalik
+        // duzeyi var (Ring 3) ve dosya sisteminde izin biti bulunmuyor.
+        // Sifir dondurmek "root olarak kosuyorsun" demek ve bu **dogru**
+        // cevap -- uydurma bir kullanici numarasi vermek, ayricalik
+        // dususu yapmaya calisan bir programi yaniltirdi.
+        //
+        // Cagrilarin var olmasi yine de gerekli: gercek programlar
+        // erkenden `geteuid` cagirir ve `ENOSYS` gormeyi beklemez.
+        SYS_GETUID | SYS_GETEUID | SYS_GETGID | SYS_GETEGID => 0,
+
+        // `ftruncate(fd, uzunluk)` -- dosyayi verilen boya getirir.
+        //
+        // Buyutme yonu de destekleniyor ve POSIX orada buyuyen bolgenin
+        // **sifir okunmasini** sart kosar. Yeni tahsis edilen bloklar
+        // daha once baska bir dosyaya ait olabilir; sifirlanmadan
+        // birakmak bir dosya sistemi hatasindan once bir **gizlilik**
+        // hatasi olurdu (bkz. `tcmkfs::truncate`).
+        SYS_FTRUNCATE => match kernel_api::truncate(arg1 as u32, arg2) {
             Ok(()) => 0,
             Err(e) => errno_of(e),
         },

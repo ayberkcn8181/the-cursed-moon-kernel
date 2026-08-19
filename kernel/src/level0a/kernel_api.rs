@@ -357,6 +357,27 @@ pub fn open(path: &str, create: bool) -> Result<usize, KernelError> {
     fd::allocate(node).ok_or(KernelError::TooManyOpenFiles)
 }
 
+/// Kesme istegiyle acar (POSIX `O_TRUNC`, Win32 `CREATE_ALWAYS`).
+///
+/// Ayri bir giris, cunku kesme **acilistan sonra** olmali: once dosya
+/// bulunmali (ya da yaratilmali), sonra bosaltilmali. `open`in icine bir
+/// bayrak daha koymak, cagiran her yeri o bayragi tasimaya zorlardi.
+///
+/// RAMFS'te kesme mumkun degil; orada `open` yine de basarili olur ama
+/// kesme sessizce atlanir -- dosya zaten salt okunur ve cagiran ilk
+/// `write` denemesinde `EROFS` gorur. Acmayi hata saymak, yalnizca
+/// okumak icin `O_TRUNC` gonderen (nadir ama gecerli) bir cagriyi
+/// bozardi.
+pub fn open_truncating(path: &str, create: bool) -> Result<usize, KernelError> {
+    let fd_num = open(path, create)?;
+    if let Some(entry) = fd::get(fd_num) {
+        if entry.kind == fd::FdKind::File {
+            let _ = vfs::truncate(entry.node, 0);
+        }
+    }
+    Ok(fd_num)
+}
+
 /// Acik bir tanimlayicidan okur; okunan bayt sayisini dondurur.
 ///
 /// # Safety
@@ -638,6 +659,37 @@ pub fn fsync(fd_num: u32) -> Result<(), KernelError> {
         return Err(KernelError::ReadOnly);
     }
     tcmkfs::sync().map_err(|_| KernelError::NoSpace)
+}
+
+/// Acik bir dosyayi verilen uzunluga getirir (POSIX `ftruncate`,
+/// Win32 `SetEndOfFile`).
+///
+/// Bu cagriya kadar bir dosya **kucultulemiyordu**: `write` yalnizca
+/// buyutuyordu. Uzun bir metnin uzerine kisa bir metin yazan bir
+/// duzenleyici, dosyanin kuyrugunda eski icerigi birakiyordu.
+///
+/// Iki ABI ayni yere iniyor ama **uzunlugu farkli yerden aliyor**:
+/// POSIX'te parametre, Win32'de **dosya imleci**. Ayrimi Level-0b1
+/// tasiyor; burasi yalnizca sayiyi bekliyor.
+pub fn truncate(fd_num: u32, length: usize) -> Result<(), KernelError> {
+    let entry = fd::get(fd_num as usize).ok_or(KernelError::BadFileDescriptor)?;
+    if entry.kind != fd::FdKind::File {
+        return Err(KernelError::NotSupported);
+    }
+    vfs::truncate(entry.node, length).map_err(|e| match e {
+        tcmkfs::FsError::NotFound => KernelError::ReadOnly,
+        tcmkfs::FsError::Full => KernelError::NoSpace,
+        _ => KernelError::NotSupported,
+    })
+}
+
+/// Acik bir dosyanin imlec konumu -- `SetEndOfFile` icin.
+pub fn file_offset(fd_num: u32) -> Result<usize, KernelError> {
+    let entry = fd::get(fd_num as usize).ok_or(KernelError::BadFileDescriptor)?;
+    if entry.kind != fd::FdKind::File {
+        return Err(KernelError::NotSupported);
+    }
+    Ok(entry.offset)
 }
 
 // --- Dizin gezinmesi ---------------------------------------------------
