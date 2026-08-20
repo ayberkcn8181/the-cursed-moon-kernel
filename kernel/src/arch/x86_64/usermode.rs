@@ -36,8 +36,16 @@ arch_enter_user_mode:
     mov ax, 0x1B
     mov ds, ax
     mov es, ax
-    mov fs, ax
-    mov gs, ax
+    /* FS/GS BILEREK YUKLENMIYOR.
+       Long mode'da bir segment registerina secici yuklemek, o registerin
+       TABAN MSR'sini (IA32_FS_BASE / IA32_GS_BASE) **sifirlar** -- duz
+       64-bit veri tanimlayicisinin tabani sifir oldugu icin. Burada
+       yuklemek, cekirdegin az once yazdigi is-parcacigi tabanini
+       silerdi (bkz. `level0a::core::tls`).
+
+       Bir kez oyleydi ve sonucu net bir sayfa hatasiydi: PE'nin ilk
+       `gs:[0x30]` okumasi 0x30 adresine gitti. i386'da tam tersi gecerli
+       -- orada taban tanimlayicida durur ve register YUKLENMEK zorunda. */
 
     /* iretq cercevesi: SS, RSP, RFLAGS, CS, RIP */
     push 0x1B               /* SS  (kullanici veri) */
@@ -75,8 +83,9 @@ arch_enter_user_mode_regs:
     mov ax, 0x1B
     mov ds, ax
     mov es, ax
-    mov fs, ax
-    mov gs, ax
+    /* FS/GS yuklenmiyor: secici yuklemek taban MSR'sini sifirlar
+       (bkz. `arch_enter_user_mode`). Cocuk, ebeveynden devraldigi
+       is-parcacigi tabanini boylece koruyor. */
 
     /* iretq cercevesi: SS, RSP, RFLAGS, CS, RIP */
     push 0x1B
@@ -109,12 +118,12 @@ arch_return_from_user:
     /* rdi = &resume_slot */
     mov rsp, [rdi]
 
-    /* Ring 0 veri segmentlerini geri yukle */
+    /* Ring 0 veri segmentlerini geri yukle.
+       FS/GS yine disarida: cekirdek onlari kullanmiyor, ve yuklemek
+       calisan gorevin is-parcacigi tabanini silerdi. */
     mov ax, 0x10
     mov ds, ax
     mov es, ax
-    mov fs, ax
-    mov gs, ax
 
     popfq
     pop r15

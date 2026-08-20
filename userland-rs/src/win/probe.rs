@@ -35,7 +35,21 @@
 //!   F  GetCurrentProcessId  -> ThreadId ile AYNI olmali
 //!   G  SetEndOfFile         -> dosya IMLECIN oldugu yerde bitmeli
 //!   H  CREATE_ALWAYS        -> var olan dosyayi BOSALTMALI
+//!   I  TEB                  -> fs:[0x18] / gs:[0x30] kendi adresini
+//!                             vermeli, kimlik ProcessId ile ayni olmali
+//!   J  TEB'deki son hata     -> basarisiz bir cagridan sonra
+//!                             GetLastError ile AYNI degeri tasimali
 //! ```
+//!
+//! I ve J POSIX'te karsiligi olmayan bir seyi olcuyor. Bir Windows
+//! programi kimligini ve son hata kodunu cekirdege **sormaz**: bir
+//! bellek yapisindan (TEB) okur, ve o yapinin adresi bir segment
+//! tabanindadir. `GetLastError` gercek Windows'ta tek satirdir --
+//! `return NtCurrentTeb()->LastErrorValue;`
+//!
+//! J bu yuzden onemli: cekirdegin tuttugu deger ile TEB'deki deger
+//! ayrisirsa, TEB'i dogrudan okuyan derlenmis bir kod **yanlis** hata
+//! gorur.
 //!
 //! G, POSIX ikizinden yapisal olarak ayrilan bir yer: `ftruncate`
 //! uzunlugu **parametre** alir, `SetEndOfFile` **dosya imlecini**
@@ -95,7 +109,7 @@ fn result(check: &Check) -> &'static str {
 
 fn main() {
     let mut console = winapi::Console;
-    let mut checks = [EMPTY; 8];
+    let mut checks = [EMPTY; 10];
 
     // --- A: RAMFS dosyasi ---
     let file = unsafe { winapi::GetFileAttributesA(b"C:\\bin\\browse\0".as_ptr()) };
@@ -334,6 +348,51 @@ fn main() {
         };
     }
 
+    // --- I: TEB gercekten kurulu mu? ---
+    //
+    // `Self` alani TEB'in kendi adresini tasir; bir Windows programi
+    // TEB'e erisirken once bunu okur, cunku segment tabanini dogrudan
+    // ogrenmenin baska yolu yoktur. Sifir gelmesi "TEB yok" demek.
+    let teb = tcmk::teb::current();
+    let teb_pid = tcmk::teb::read(tcmk::teb::UNIQUE_PROCESS_OFFSET);
+    let i = teb != 0 && teb_pid == process as usize;
+    checks[8] = Check {
+        name: "I TEB",
+        detail: if teb == 0 {
+            "TEB YOK -- segment tabani sifir"
+        } else if i {
+            "Self dolu, kimlik ProcessId ile ayni"
+        } else {
+            "kimlik UYUSMUYOR"
+        },
+        passed: i,
+        skipped: false,
+    };
+
+    // --- J: son hata TEB'de de duruyor mu? ---
+    //
+    // Bilerek basarisiz bir cagri yapiliyor; sonra iki kaynak
+    // karsilastiriliyor. Ayrisirlarsa TEB'i dogrudan okuyan derlenmis
+    // bir kod yanlis hata gorur.
+    unsafe { winapi::GetFileAttributesA(b"C:\\hicyok\0".as_ptr()) };
+    let from_call = unsafe { winapi::GetLastError() };
+    let from_teb = tcmk::teb::read32(tcmk::teb::LAST_ERROR_OFFSET);
+    let j = teb != 0 && from_call == winapi::ERROR_FILE_NOT_FOUND && from_teb == from_call;
+    checks[9] = Check {
+        name: "J TEB'de son hata",
+        detail: if teb == 0 {
+            "TEB yok"
+        } else if from_call != winapi::ERROR_FILE_NOT_FOUND {
+            "cagri beklenen hatayi vermedi"
+        } else if j {
+            "TEB ve GetLastError ayni degeri veriyor"
+        } else {
+            "iki kaynak AYRISTI"
+        },
+        passed: j,
+        skipped: false,
+    };
+
     for check in &checks {
         let _ = core::fmt::Write::write_str(&mut console, "[winprobe] ");
         let _ = core::fmt::Write::write_str(&mut console, check.name);
@@ -344,7 +403,7 @@ fn main() {
         let _ = core::fmt::Write::write_str(&mut console, ")\n");
     }
 
-    let mut win = match Window::create("winprobe -- Win32 sorma ve kesme cagrilari", 300, 170, 460, 250) {
+    let mut win = match Window::create("winprobe -- Win32 yuzeyi", 290, 150, 460, 280) {
         Some(w) => w,
         None => return,
     };
@@ -357,7 +416,7 @@ fn main() {
     }
 }
 
-fn draw(win: &mut Window, checks: &[Check; 8], now: &SystemTime, version: &OsVersionInfoA) {
+fn draw(win: &mut Window, checks: &[Check; 10], now: &SystemTime, version: &OsVersionInfoA) {
     let (w, h) = (win.width(), win.height());
     win.clear(BG);
     win.fill(0, 0, w, 22, PANEL);

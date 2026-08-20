@@ -286,11 +286,6 @@ unsafe fn build_start_stack(
 ) -> usize {
     let task = scheduler::current_id();
     COMMAND_LINE[task % scheduler::MAX_TASKS].store(0, core::sync::atomic::Ordering::Relaxed);
-    // Yeni imaj: is-parcacigi tabanlari sifirlanir. `cwd`/ortamdan
-    // farkli olarak burada **korumak yanlis** olurdu -- eski imajin TLS
-    // blogu birakildi, tabani tutmak serbest kalmis bellege isaret eden
-    // bir segment birakmak demek.
-    crate::level0a::core::tls::reset(task);
     // Imajin yolu her iki ABI'de de gerekli ama **farkli sekilde**:
     // POSIX'te `argv[0]` olarak yigina konuyor, Win32'de
     // `GetModuleFileNameA` ile sorulunca dondurulmesi gerekiyor. Bir
@@ -461,6 +456,40 @@ unsafe fn enter_ring3(
         kstack_top
     );
     crate::println!("[LEVEL-0b1] Ring 3'e geciliyor (iret)...");
+
+    // Windows ikilisi ise once **TEB** kurulur: yigin bolgesinin
+    // tepesinden bir blok ayrilir ve FS/GS tabani ona yoneltilir. Bir PE,
+    // kimligini ve son hata kodunu cekirdege sormadan oradan okur --
+    // `GetLastError` gercek Windows'ta bir cagri bile degildir.
+    //
+    // Argumanlar bu bloktan **sonra** yerlestiriliyor, yani TEB'in
+    // altina: sirasi ters olsaydi TEB argumanlarin uzerine yazardi.
+    let task = scheduler::current_id();
+    // Yeni imaj: is-parcacigi tabanlari once **sifirlanir**. `cwd` ve
+    // ortamdan farkli olarak korumak yanlis olurdu -- eski imajin TLS
+    // blogu birakildi, tabani tutmak serbest kalmis bellege isaret eden
+    // bir segment birakmak demek.
+    //
+    // Sira onemli ve bir kez yanlis kuruldu: sifirlama TEB kurulumundan
+    // **sonra** yapiliyordu ve taze tabani siliyordu. Sonuc, PE'nin ilk
+    // `fs:[0x18]` okumasinda 0x18 adresine sayfa hatasiydi.
+    crate::level0a::core::tls::reset(task);
+
+    let stack_top = match prepared.format {
+        #[cfg(target_arch = "x86")]
+        BinaryFormat::Pe32 => unsafe {
+            crate::level0b1::nt_subsystem::teb::install(task, stack_top, stack_bottom)
+        },
+        #[cfg(target_arch = "x86_64")]
+        BinaryFormat::Pe32Plus => unsafe {
+            crate::level0b1::nt_subsystem::teb::install(task, stack_top, stack_bottom)
+        },
+        _ => {
+            // ELF: TEB yok. Onceki imajdan kalan kaydi da temizle.
+            crate::level0b1::nt_subsystem::teb::clear(task);
+            stack_top
+        }
+    };
 
     // Argumanlar yiginin **tepesine** yerlestirilir; ESP onlarin altinda
     // baslar. Iki ABI'nin bicimi burada ayrisir (bkz. `build_start_stack`).

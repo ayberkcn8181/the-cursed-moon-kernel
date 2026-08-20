@@ -80,6 +80,10 @@ pub mod win32;
 /// Windows ikilisinin yaptigi gibi.
 #[cfg(target_os = "windows")]
 pub mod winapi;
+/// Windows'un surece bakan yuzu: TEB. Bir PE, kimligini ve son hata
+/// kodunu cekirdege sormadan buradan okur.
+#[cfg(target_os = "windows")]
+pub mod teb;
 
 /// Uygulamanin giris noktasini tanimlar.
 ///

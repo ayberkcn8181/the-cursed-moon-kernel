@@ -5,3 +5,4 @@
 // urettikleri thunk'in cagri gelenegi degisir (bkz. dll::emit_thunk).
 pub mod dll;
 pub mod nt_syscalls;
+pub mod teb;

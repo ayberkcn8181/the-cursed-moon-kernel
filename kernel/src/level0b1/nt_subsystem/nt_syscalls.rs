@@ -195,6 +195,10 @@ fn error_slot() -> &'static core::sync::atomic::AtomicU32 {
 /// basarili bir cagri onceki degeri silmez, o yuzden burada da oyle.
 fn set_last_error(code: u32) {
     error_slot().store(code, core::sync::atomic::Ordering::Relaxed);
+    // TEB'e de yaz: gercek Windows'ta `GetLastError` **yalnizca** oradan
+    // okur, cekirdege hic gitmez. Iki yerin ayrilmasi, TEB'i dogrudan
+    // okuyan derlenmis bir kodun yanlis deger gormesi demek olurdu.
+    super::teb::store_last_error(crate::level0a::core::scheduler::current_id(), code);
 }
 
 /// Yeni bir imaj yuklenirken son hatayi sifirlar.

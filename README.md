@@ -60,6 +60,7 @@ Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 | 5g | **Kesme**: `ftruncate` `O_TRUNC` + `SetEndOfFile` `CREATE_ALWAYS` | ✅ (i386; x86_64'te disk yok) |
 | 9i | **`readv`**, **`getuid`/`geteuid`** ailesi, **`GetModuleFileNameA`** | ✅ (i386 + x86_64, ELF + PE) |
 | 9j | **Is-parcacigi tabani**: `set_thread_area` (i386) / `arch_prctl` (x86_64) | ✅ (i386 + x86_64) |
+| 7g | **TEB** (`fs:[0x18]` / `gs:[0x30]`, son hata TEB'de de) | ✅ (PE32 + PE32+) |
 | — | **Klavye: shift + caps lock** (US duzeni, buyuk harf ve noktalama) | ✅ (i386 + x86_64) |
 | — | **Kendi onyukleyicisi** + diske kurulum (`install`) | ✅ (i386) |
 | 8 | **`execve`** (surec kendi yerine program yukler) | ✅ (i386 + x86_64) |
@@ -2542,12 +2543,77 @@ M asil olcum: cocuk `fork`tan sonra **kendi** blogunu kuruyor ve
 uyuyor -- yani araya gorev degisimi giriyor. Global tek bir taban olsaydi
 ebeveynin okumasi cocugunkine kayardi. Iki mimaride de gecti.
 
+## TEB: Windows'un surece bakan yuzu
+
+Ustteki altyapinin Windows ayagi. Bir Windows programi cok sey icin
+cekirdege **hic sormaz** -- kimligini, yigin sinirlarini, son hata
+kodunu bir bellek yapisindan okur:
+
+```text
+  i386     fs:[0x18] -> TEB'in kendi adresi (NtTib.Self)
+  x86_64   gs:[0x30] -> ayni alan, 64-bit yerlesimde
+```
+
+Bu, `GetLastError`in gercek Windows'ta neden bir sistem cagrisi
+**olmadigini** aciklar: tek satirdir --
+`return NtCurrentTeb()->LastErrorValue;`
+
+TEB olmadan bu kod yollarinin hepsi sifir adresten okur ve surec coker.
+TCMK artik her PE surecine bir TEB kuruyor: blok yigin bolgesinin
+tepesinden ayriliyor (ayri bir tahsis yok, 512 bayt) ve doldurulan
+alanlar Windows'takiyle **ayni ofsetlerde** -- o sayilar derlenmis
+kodun icine gomuludur.
+
+POSIX ile ayrim burada keskin: orada TLS blogunun **icerigini** program
+belirler (glibc kendi `struct pthread`ini koyar), cekirdek yalnizca
+tabani tutar. Windows'ta yerlesim **cekirdegin sozlesmesidir**.
+
+Son hata iki yerde birden tutuluyor -- cekirdek tablosunda ve TEB'de --
+ve `set_last_error` ikisini birden yaziyor. Ayrilmalari, TEB'i dogrudan
+okuyan derlenmis bir kodun **yanlis** hata gormesi demek olurdu;
+`winprobe` J tam olarak bunu sinar.
+
+### Iki ayri donanim tuzagi, iki ayri mimaride
+
+TEB calisana kadar iki kez sayfa hatasi alindi ve ikisi de ayni sorunun
+zit yuzleriydi.
+
+**x86_64**: long mode'da bir segment registerina **secici yuklemek, o
+registerin taban MSR'sini sifirlar** (duz 64-bit tanimlayicinin tabani
+sifir oldugu icin). Ring 3'e gecis stub'i `mov gs, ax` yapiyordu ve
+cekirdegin az once yazdigi tabani siliyordu. Sonuc: PE'nin ilk
+`gs:[0x30]` okumasi `0x30` adresine gitti. Stub artik FS/GS'e hic
+dokunmuyor.
+
+**i386**: tam tersi gecerli -- taban tanimlayicida durur ve register
+**yuklenmek zorundadir**, cunku secici yuklendiginde tanimlayici gizli
+bir kayitta onbelleklenir. Orada `mov fs, bx` **eklemek** gerekti.
+
+Ayni kavram, iki mimari, ve dogru cozumler birbirinin tersi.
+
+### Sinavlar
+
+```text
+[winprobe] I TEB:              gecti (Self dolu, kimlik ProcessId ile ayni)
+[winprobe] J TEB'de son hata:  gecti (TEB ve GetLastError ayni degeri veriyor)
+```
+
+J bilerek **basarisiz** bir cagri yapip iki kaynagi karsilastiriyor:
+tek bir kaynaga bakmak, ayrisma durumunu hic gormezdi.
+
+![winprobe](docs/screenshot-probe.png)
+
 ### Bilerek yapilmayanlar
 
-* **Win32 TEB henuz yok.** Altyapi hazir (FS/GS tabanlari gorev basina),
-  ama Windows tarafinda o tabanin gosterdigi yerde cekirdegin kurdugu bir
-  **TEB** yapisi olmali; `fs:[0x18]` (32-bit) ve `gs:[0x30]` (64-bit)
-  kendi adresini verir. Sirada o var.
+* **PEB neredeyse bos.** Isaretci gecerli bir adres gosteriyor (yoksa onu
+  okuyan kod sifir adrese gider) ama icinde yalnizca `BeingDebugged = 0`
+  var. `ImageBaseAddress`, yuklu modul listesi ve isletim sistemi surum
+  alanlari yok.
+* **SEH zinciri kurulmuyor.** `ExceptionList` alani Windows'un istedigi
+  gibi `-1` (zincir sonu) ile basliyor -- sifir birakmak, zinciri
+  yuruyen kodu gecerli bir kayit sanip dallandirirdi. Ama bir istisna
+  gerceklestiginde TCMK zinciri **calistirmiyor**; surec dogrudan
+  sonlandiriliyor.
 * **Is-parcacigi yok**, yalnizca tabanlar var: TCMK'de bir gorev = bir
   surec = bir akis.
 * **`set_thread_area` tek girdi ayiriyor**: Linux uc TLS girdisi tutar
