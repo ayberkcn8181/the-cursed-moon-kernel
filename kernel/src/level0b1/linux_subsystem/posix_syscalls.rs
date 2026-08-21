@@ -430,7 +430,7 @@ fn errno_of(err: KernelError) -> i32 {
 
 /// Level-0b2 dispatcher'i tarafindan cagrilir. Donus degerini dogrudan
 /// frame'in EAX alanina yazar (i386 Linux ABI).
-pub fn dispatch(frame: &mut SyscallFrame) {
+pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
     let number = frame.number();
     let [arg1, arg2, arg3, _, _] = frame.args();
 
@@ -523,7 +523,7 @@ pub fn dispatch(frame: &mut SyscallFrame) {
         SYS_FORK => {
             // Tek cagri, iki donus: ebeveyn cocugun kimligini alir,
             // cocuk 0 alir (bkz. `level0b1::fork`).
-            match unsafe { crate::level0b1::fork::fork(frame) } {
+            match unsafe { crate::level0b1::fork::fork(frame, from_interrupt) } {
                 Ok(child) => {
                     frame.set_return(child);
                     return;
@@ -1624,7 +1624,7 @@ pub fn dispatch(frame: &mut SyscallFrame) {
             // Baglam geri konur; `set_return` CAGRILMAZ, cunku donus
             // degeri de saklanan baglamin parcasidir. Kullanicinin
             // isleyiciye girmeden once aldigi EAX/RAX aynen geri gelir.
-            if unsafe { signal::sigreturn(frame) } {
+            if unsafe { signal::sigreturn(frame, from_interrupt) } {
                 return;
             }
             -EINVAL

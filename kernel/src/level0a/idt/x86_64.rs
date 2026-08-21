@@ -13,7 +13,7 @@
 use core::arch::{asm, global_asm};
 use core::mem::size_of;
 
-use crate::arch::cpu::regs::{InterruptStackFrame, SyscallFrame};
+use crate::arch::cpu::regs::{ExceptionFrame, InterruptStackFrame, SyscallFrame};
 use crate::level0a::gdt::KERNEL_CODE_SELECTOR;
 
 const GATE_PRESENT_RING0_INT: u8 = 0x8E; // P=1 DPL=00 type=E (64-bit interrupt gate)
@@ -114,137 +114,113 @@ fn read_cr2() -> usize {
     value as usize
 }
 
-macro_rules! exception_no_code {
-    ($name:ident, $vector:expr) => {
-        extern "x86-interrupt" fn $name(frame: InterruptStackFrame) -> ! {
-            let from_user = frame.code_segment & 3 == 3;
-            crate::level0a::exceptions::handle(
-                $vector,
-                0,
-                frame.instruction_pointer as usize,
-                from_user,
-                0,
-            )
-        }
-    };
+// --- Istisna girisleri ------------------------------------------------
+//
+// Gerekce i386'daki ikiziyle ayni (bkz. `idt::i386`): `x86-interrupt`
+// ABI'si genel registerlari vermez, Windows SEH ise tam bir CONTEXT
+// ister. Bu yuzden girisler elle yazilir.
+//
+// x86_64'te `pusha` yoktur; 15 register tek tek itilir ve sira
+// `ExceptionFrame`/`SyscallFrame` alan siralamasiyla birebir eslesir.
+global_asm!(
+    r#"
+.section .text
+
+.macro EX_NOCODE vec
+.global ex_stub_\vec
+.type ex_stub_\vec, @function
+ex_stub_\vec:
+    push 0                  /* sahte hata kodu -- duzeni tekduze yapar */
+    push \vec
+    jmp exception_common
+.endm
+
+.macro EX_CODE vec
+.global ex_stub_\vec
+.type ex_stub_\vec, @function
+ex_stub_\vec:
+    push \vec               /* hata kodunu CPU zaten itti */
+    jmp exception_common
+.endm
+
+.irp v, 0,1,2,3,4,5,6,7,9,15,16,18,19,20,22,23,24,25,26,27,28,31
+    EX_NOCODE \v
+.endr
+.irp v, 8,10,11,12,13,14,17,21,29,30
+    EX_CODE \v
+.endr
+
+exception_common:
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    mov rdi, rsp            /* &ExceptionFrame (System V ilk arguman) */
+    call exception_dispatch_rust
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+    add rsp, 16             /* vector + error_code */
+    iretq
+
+/* Vektor -> stub tablosu; IDT kurulumu bunu tarar. */
+.section .rodata
+.balign 8
+.global exception_stubs
+exception_stubs:
+.irp v, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31
+    .quad ex_stub_\v
+.endr
+"#
+);
+
+extern "C" {
+    static exception_stubs: [u64; 32];
 }
 
-macro_rules! exception_with_code {
-    ($name:ident, $vector:expr) => {
-        extern "x86-interrupt" fn $name(frame: InterruptStackFrame, error_code: u64) -> ! {
-            let from_user = frame.code_segment & 3 == 3;
-            let fault_addr = if $vector == 14 { read_cr2() } else { 0 };
-            crate::level0a::exceptions::handle(
-                $vector,
-                error_code as usize,
-                frame.instruction_pointer as usize,
-                from_user,
-                fault_addr,
-            )
-        }
-    };
-}
-
-exception_no_code!(ex0, 0);
-exception_no_code!(ex1, 1);
-exception_no_code!(ex2, 2);
-exception_no_code!(ex3, 3);
-exception_no_code!(ex4, 4);
-exception_no_code!(ex5, 5);
-exception_no_code!(ex6, 6);
-exception_no_code!(ex7, 7);
-exception_with_code!(ex8, 8);
-exception_no_code!(ex9, 9);
-exception_with_code!(ex10, 10);
-exception_with_code!(ex11, 11);
-exception_with_code!(ex12, 12);
-exception_with_code!(ex13, 13);
-/// Vektor 14 (sayfa hatasi) **geri donebilen** tek istisnadir.
+/// Istisna cercevesini Level-0a'nin ortak isleyicisine verir.
 ///
-/// Digerleri `-> !` imzasiyla yazilir: hata olumcul, geri donus yok.
-/// Sayfa hatasi ise bir hata olmak zorunda degil -- copy-on-write bir
-/// sayfaya yazmak *beklenen* bir olaydir. Cekirdek sayfayi cogaltir ve
-/// **donerek** hataya yol acan komutu tekrarlatir; uygulama hicbir sey
-/// olmamis gibi devam eder.
-///
-/// Hata kodunun alt iki biti (var + yazma) COW adayini secer. Sayfa
-/// gercekten yoksa (bit 0 = 0) ya da okuma hatasiysa COW olamaz.
-///
-/// Ring 0'dan gelen hatalar da buraya duser ve bilerek: `CR0.WP` acik
-/// oldugu icin cekirdegin kullanici tamponuna yazmasi (`read`, `poll`,
-/// sinyal cercevesi) da COW yolunu tetikler.
-extern "x86-interrupt" fn ex14(frame: InterruptStackFrame, error_code: u64) {
-    let fault_addr = read_cr2();
-
-    const PRESENT: u64 = 1 << 0;
-    const WRITE: u64 = 1 << 1;
-
-    // Iki kurtarilabilir durum var ve hata kodunun 0. biti ikisini
-    // ayirir: sayfa YOK ise talep uzerine sayfalama, sayfa VAR ama
-    // yazma reddedildiyse copy-on-write.
-    let recovered = unsafe {
-        if error_code & PRESENT == 0 {
-            crate::level0a::core::mmu::handle_demand_fault(fault_addr)
-        } else if error_code & WRITE != 0 {
-            crate::level0a::core::mmu::handle_cow_fault(fault_addr)
-        } else {
-            false
-        }
-    };
-    if recovered {
-        return;
+/// Fonksiyon **donebilir**: hata kurtarildiysa (talep uzerine sayfalama,
+/// copy-on-write) ya da cerceve bir SEH isleyicisine cevrildiyse stub
+/// `iretq` calistirir ve Ring 3 devam eder.
+#[no_mangle]
+extern "C" fn exception_dispatch_rust(frame: *mut ExceptionFrame) {
+    unsafe {
+        let fault_addr = if (*frame).vector == 14 { read_cr2() } else { 0 };
+        crate::level0a::exceptions::dispatch(&mut *frame, fault_addr);
     }
-
-    let from_user = frame.code_segment & 3 == 3;
-    crate::level0a::exceptions::handle(
-        14,
-        error_code as usize,
-        frame.instruction_pointer as usize,
-        from_user,
-        fault_addr,
-    )
 }
-exception_no_code!(ex16, 16);
-exception_with_code!(ex17, 17);
-exception_no_code!(ex18, 18);
-exception_no_code!(ex19, 19);
-exception_no_code!(ex20, 20);
-exception_with_code!(ex21, 21);
 
 unsafe fn install_exception_handlers() {
-    let no_code: [(usize, *const ()); 15] = [
-        (0, ex0 as *const ()),
-        (1, ex1 as *const ()),
-        (2, ex2 as *const ()),
-        (3, ex3 as *const ()),
-        (4, ex4 as *const ()),
-        (5, ex5 as *const ()),
-        (6, ex6 as *const ()),
-        (7, ex7 as *const ()),
-        (9, ex9 as *const ()),
-        (16, ex16 as *const ()),
-        (18, ex18 as *const ()),
-        (19, ex19 as *const ()),
-        (20, ex20 as *const ()),
-        (15, ex0 as *const ()),
-        (31, ex0 as *const ()),
-    ];
-    for (vector, handler) in no_code {
-        IDT[vector].set(handler as u64, KERNEL_CODE_SELECTOR, GATE_PRESENT_RING0_INT);
-    }
-
-    let with_code: [(usize, *const ()); 8] = [
-        (8, ex8 as *const ()),
-        (21, ex21 as *const ()),
-        (10, ex10 as *const ()),
-        (11, ex11 as *const ()),
-        (12, ex12 as *const ()),
-        (13, ex13 as *const ()),
-        (14, ex14 as *const ()),
-        (17, ex17 as *const ()),
-    ];
-    for (vector, handler) in with_code {
-        IDT[vector].set(handler as u64, KERNEL_CODE_SELECTOR, GATE_PRESENT_RING0_INT);
+    for vector in 0..32usize {
+        IDT[vector].set(
+            exception_stubs[vector],
+            KERNEL_CODE_SELECTOR,
+            GATE_PRESENT_RING0_INT,
+        );
     }
 }
 
@@ -348,13 +324,13 @@ extern "C" {
 #[no_mangle]
 extern "C" fn syscall_dispatch_rust(frame: *mut SyscallFrame) {
     unsafe {
-        crate::level0b2::dispatcher::handle_syscall(&mut *frame);
+        crate::level0b2::dispatcher::handle_syscall(&mut *frame, true);
     }
 }
 
 #[no_mangle]
 extern "C" fn nt_syscall_dispatch_rust(frame: *mut SyscallFrame) {
     unsafe {
-        crate::level0b2::dispatcher::handle_nt_syscall(&mut *frame);
+        crate::level0b2::dispatcher::handle_nt_syscall(&mut *frame, true);
     }
 }

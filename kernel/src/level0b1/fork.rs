@@ -57,7 +57,7 @@ pub enum ForkError {
 /// # Safety
 /// Yalnizca Ring 3'ten gelen bir syscall isleyicisinden, gecerli bir
 /// `frame` ile cagrilmalidir.
-pub unsafe fn fork(frame: &SyscallFrame) -> Result<usize, ForkError> {
+pub unsafe fn fork(frame: &SyscallFrame, from_interrupt: bool) -> Result<usize, ForkError> {
     let parent = scheduler::current_id();
     let parent_space = scheduler::address_space_of(parent);
     if parent_space == 0 || !usermode::in_user_mode() {
@@ -78,7 +78,7 @@ pub unsafe fn fork(frame: &SyscallFrame) -> Result<usize, ForkError> {
 
     // 3. Ebeveynin baglamini al, donus degerini sifirla: cocuk `fork`'tan
     //    0 ile doner -- POSIX'in "hangisiyim?" sorusuna verdigi cevap.
-    let mut context = frame.user_context();
+    let mut context = frame.user_context_via(from_interrupt);
     context.set_return(0);
 
     let slot = core::ptr::addr_of_mut!(CHILD_CONTEXT) as *mut UserContext;

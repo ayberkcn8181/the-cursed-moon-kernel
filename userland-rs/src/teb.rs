@@ -71,3 +71,30 @@ pub fn read32(offset: usize) -> u32 {
 pub fn current() -> usize {
     read(SELF_OFFSET)
 }
+
+/// `NtTib.ExceptionList` -- SEH zincirinin basi.
+///
+/// Zincirin sonu `-1`dir, `0` degil: sifir "gecerli bir kayit" gibi
+/// gorunur ve zinciri yuruyen kod oraya dallanirdi.
+pub const EXCEPTION_LIST_OFFSET: usize = 0x00;
+
+/// Zincirin su anki basi.
+pub fn exception_list() -> usize {
+    read(EXCEPTION_LIST_OFFSET)
+}
+
+/// Zincirin basini degistirir -- yeni bir kayit takarken/cikarirken.
+///
+/// # Safety
+/// `value` ya `usize::MAX` (zincir sonu) ya da gecerli, **yasayan** bir
+/// `EXCEPTION_REGISTRATION_RECORD` adresi olmalidir. Olmus bir yigin
+/// cercevesini gostermek, bir sonraki istisnada cop veriye dallanmak
+/// demektir.
+pub unsafe fn set_exception_list(value: usize) {
+    #[cfg(target_arch = "x86")]
+    core::arch::asm!("mov fs:[{0}], {1}", in(reg) EXCEPTION_LIST_OFFSET, in(reg) value,
+                     options(nostack, preserves_flags));
+    #[cfg(target_arch = "x86_64")]
+    core::arch::asm!("mov gs:[{0}], {1}", in(reg) EXCEPTION_LIST_OFFSET, in(reg) value,
+                     options(nostack, preserves_flags));
+}

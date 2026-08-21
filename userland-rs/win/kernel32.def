@@ -46,3 +46,6 @@ GetModuleFileNameA@12 @33
 CreateProcessA@40 @34
 WaitForSingleObject@8 @35
 GetExitCodeProcess@8 @36
+AddVectoredExceptionHandler@8 @37
+RemoveVectoredExceptionHandler@4 @38
+RaiseException@16 @39

@@ -278,6 +278,35 @@ extern "system" {
 
     /// Surecin cikis kodu; hala calisiyorsa [`STILL_ACTIVE`].
     pub fn GetExitCodeProcess(process: Handle, exit_code: *mut Dword) -> Bool;
+
+    /// Vektorlu istisna isleyicisi ekler.
+    ///
+    /// SEH zincirinden **once** calisir ve zincirin aksine surecin
+    /// tamaminda gecerlidir -- hangi fonksiyonda oldugunuz fark etmez.
+    /// `first` sifirdan farkliysa isleyici listenin basina gecer.
+    ///
+    /// Isleyici [`crate::seh::EXCEPTION_CONTINUE_EXECUTION`] dondururse
+    /// yurutme, isleyicinin duzenledigi CONTEXT'ten devam eder;
+    /// [`crate::seh::EXCEPTION_CONTINUE_SEARCH`] dondururse sira
+    /// sonrakine gecer.
+    pub fn AddVectoredExceptionHandler(
+        first: Dword,
+        handler: Option<unsafe extern "system" fn(*mut crate::seh::ExceptionPointers) -> i32>,
+    ) -> *mut c_void;
+
+    /// [`AddVectoredExceptionHandler`] ile eklenen isleyiciyi kaldirir.
+    pub fn RemoveVectoredExceptionHandler(handle: *mut c_void) -> Dword;
+
+    /// Yazilim kaynakli istisna atar.
+    ///
+    /// Donanim istisnasindan farki yok: ayni dagitici, ayni isleyiciler.
+    /// Bir isleyici sahiplenmezse surec sonlanir, yani cagri **donmeyebilir**.
+    pub fn RaiseException(
+        code: Dword,
+        flags: Dword,
+        argument_count: Dword,
+        arguments: *const usize,
+    );
 }
 
 /// `CreateProcessA`nin doldurdugu yapi.

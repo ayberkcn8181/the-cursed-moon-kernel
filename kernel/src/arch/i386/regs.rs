@@ -169,3 +169,116 @@ pub struct UserContext {
     pub esp: u32,
     pub eflags: u32,
 }
+
+/// Bir CPU istisnasinda yigina konan **tam** cerceve.
+///
+/// `x86-interrupt` ABI'si istisna handler'ina genel registerlari vermez;
+/// yalnizca EIP/CS/EFLAGS/ESP/SS gorunur. Bu, hatayi *raporlamak* icin
+/// yetiyordu ama iki sey icin yetmez:
+///
+///   * Windows SEH bir **CONTEXT** kaydi ister -- yani butun registerlar.
+///   * Isleyici o kaydi degistirip "devam et" derse, registerlarin geri
+///     yazilabiliyor olmasi gerekir.
+///
+/// Bu yuzden istisna girisleri artik elle yazilmis stub'lardir (bkz.
+/// `idt::i386`) ve su duzeni kurarlar (dusuk adresten yuksege):
+///
+/// ```text
+///   pusha blogu (32 bayt)   <- cercevenin basi
+///   vector                  <- stub itti
+///   error_code              <- CPU itti (ya da stub 0 itti)
+///   EIP, CS, EFLAGS         <- CPU itti
+///   ESP, SS                 <- CPU itti, YALNIZCA Ring 3'ten gelirse
+/// ```
+///
+/// Son iki alan Ring 0 istisnalarinda **yoktur**; `from_user()` yanlissa
+/// okunmamalidir.
+#[repr(C)]
+#[derive(Debug)]
+#[allow(dead_code)]
+pub struct ExceptionFrame {
+    pub edi: u32,
+    pub esi: u32,
+    pub ebp: u32,
+    pub esp_dummy: u32,
+    pub ebx: u32,
+    pub edx: u32,
+    pub ecx: u32,
+    pub eax: u32,
+    pub vector: u32,
+    pub error_code: u32,
+    pub eip: u32,
+    pub cs: u32,
+    pub eflags: u32,
+    pub esp: u32,
+    pub ss: u32,
+}
+
+impl ExceptionFrame {
+    /// Hata Ring 3'ten mi geldi? (CS'in RPL'i 3 mu)
+    pub fn from_user(&self) -> bool {
+        self.cs & 3 == 3
+    }
+
+    /// Hataya yol acan komutun adresi.
+    pub fn instruction_pointer(&self) -> usize {
+        self.eip as usize
+    }
+
+    /// Istisna anindaki **tam** Ring 3 baglami.
+    ///
+    /// # Safety
+    /// Yalnizca `from_user()` dogruyken gecerlidir: Ring 0 istisnalarinda
+    /// CPU ESP/SS itmez ve o alanlar baska verinin uzerine denk gelir.
+    pub unsafe fn user_context(&self) -> UserContext {
+        UserContext {
+            edi: self.edi,
+            esi: self.esi,
+            ebp: self.ebp,
+            ebx: self.ebx,
+            edx: self.edx,
+            ecx: self.ecx,
+            eax: self.eax,
+            eip: self.eip,
+            eflags: self.eflags,
+            esp: self.esp,
+        }
+    }
+
+    /// `user_context`'in tersi: yazilan baglam `popa` + `iretd` ile Ring
+    /// 3'e oldugu gibi doner. CS/SS'e dokunulmaz.
+    ///
+    /// # Safety
+    /// `user_context` ile ayni kosul.
+    pub unsafe fn set_user_context(&mut self, ctx: &UserContext) {
+        self.edi = ctx.edi;
+        self.esi = ctx.esi;
+        self.ebp = ctx.ebp;
+        self.ebx = ctx.ebx;
+        self.edx = ctx.edx;
+        self.ecx = ctx.ecx;
+        self.eax = ctx.eax;
+        self.eip = ctx.eip;
+        self.eflags = ctx.eflags;
+        self.esp = ctx.esp;
+    }
+}
+
+impl SyscallFrame {
+    /// x86_64'teki ikiziyle ayni imza, ama i386'da **tek** bir giris yolu
+    /// var: hem `int 0x80` hem `int 0x2E` birer kesme kapisidir ve ikisi
+    /// de ayni cerceveyi kurar. Bayrak bu yuzden yok sayilir; imzanin
+    /// ortak olmasi, ust katmanlarin mimariye gore dallanmasini onler.
+    ///
+    /// # Safety
+    /// `user_context` ile ayni kosul.
+    pub unsafe fn user_context_via(&self, _from_interrupt: bool) -> UserContext {
+        self.user_context()
+    }
+
+    /// # Safety
+    /// `set_user_context` ile ayni kosul.
+    pub unsafe fn set_user_context_via(&mut self, _from_interrupt: bool, ctx: &UserContext) {
+        self.set_user_context(ctx)
+    }
+}

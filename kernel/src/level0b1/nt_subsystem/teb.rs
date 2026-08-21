@@ -44,6 +44,14 @@ pub const RESERVE: usize = 512;
 /// TEB icindeki PEB'in yeri.
 const PEB_OFFSET: usize = 0x180;
 
+/// Istisna dagitim tramplenin yeri (ayrilmis alanin bos ortasi).
+///
+/// Windows'ta bunun karsiligi `ntdll!KiUserExceptionDispatcher`dir --
+/// yani DLL icinde duran gercek bir fonksiyon. TCMK'de ntdll yok, o
+/// yuzden cekirdek bu birkac bayti dogrudan surecin adres uzayina yazar.
+/// Linux'un eski sinyal tramplenleri de aynen boyleydi.
+const TRAMPOLINE_OFFSET: usize = 0x100;
+
 // --- Alan ofsetleri (Windows ile ayni) --------------------------------
 //
 // Bu sayilar derlenmis Windows kodunun icine gomuludur: `mov eax,
@@ -114,6 +122,8 @@ pub unsafe fn install(task: usize, top: usize, bottom: usize) -> usize {
     // gider.
     let _ = word;
 
+    emit_trampoline(teb + TRAMPOLINE_OFFSET);
+
     TEB_ADDRESS[task % scheduler::MAX_TASKS]
         .store(teb, core::sync::atomic::Ordering::Relaxed);
 
@@ -132,6 +142,83 @@ pub fn clear(task: usize) {
     if task < scheduler::MAX_TASKS {
         TEB_ADDRESS[task].store(0, core::sync::atomic::Ordering::Relaxed);
     }
+}
+
+/// Gorevin TEB adresi -- yoksa sifir. Sifir olmasi "bu bir PE degil"
+/// demektir; istisna dagiticisi bunu boyle okur.
+pub fn address(task: usize) -> usize {
+    if task >= scheduler::MAX_TASKS {
+        return 0;
+    }
+    TEB_ADDRESS[task].load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Istisna dagitim tramplenin adresi -- TEB yoksa sifir.
+pub fn trampoline(task: usize) -> usize {
+    let teb = address(task);
+    if teb == 0 {
+        0
+    } else {
+        teb + TRAMPOLINE_OFFSET
+    }
+}
+
+/// Tramplen kodu: isleyicinin karari (EAX/RAX) ile `NtContinueDispatch`
+/// cagirir.
+///
+/// SEH ve VEH isleyicileri kararlarini siradan bir donus degeri olarak
+/// verir. Bir isleyici `ret` ettiginde buraya duser, tramplen de o
+/// degeri cekirdege tasir. Buradan **geri donus yoktur**: cekirdek ya
+/// yurutmeyi kaldigi yerden surdurur ya da siradaki isleyiciye gecer,
+/// ikisinde de baglami kendisi kurar.
+///
+/// # Safety
+/// `at` en az 16 bayt yazilabilir ve Ring 3'te **yurutulebilir**
+/// olmalidir. TEB yigin bolgesinde durdugu icin bu saglanir.
+#[cfg(target_arch = "x86")]
+unsafe fn emit_trampoline(at: usize) {
+    // 50              push eax           ; karar -> arg1
+    // 8D 54 24 00     lea edx, [esp]     ; &arg1  (NT cagri sozlesmesi)
+    // B8 xx xx xx xx  mov eax, servis
+    // CD 2E           int 0x2E
+    // CC              int3               ; buraya asla donulmez
+    let code = at as *mut u8;
+    code.write(0x50);
+    code.add(1).write(0x8D);
+    code.add(2).write(0x54);
+    code.add(3).write(0x24);
+    code.add(4).write(0x00);
+    code.add(5).write(0xB8);
+    (code.add(6) as *mut u32)
+        .write_unaligned(super::nt_syscalls::NT_CONTINUE_DISPATCH);
+    code.add(10).write(0xCD);
+    code.add(11).write(0x2E);
+    code.add(12).write(0xCC);
+}
+
+/// x86_64 tramplen. Fark, NT cagri sozlesmesinin argumanlari **golge
+/// alandan** okumasi (bkz. `dll::emit_thunk`): karar oraya dokulur.
+///
+/// # Safety
+/// `emit_trampoline` (i386) ile ayni kosul.
+#[cfg(target_arch = "x86_64")]
+unsafe fn emit_trampoline(at: usize) {
+    // 48 89 44 24 08  mov [rsp+8], rax   ; karar -> golge alan
+    // 48 8D 54 24 08  lea rdx, [rsp+8]   ; &arg1
+    // B8 xx xx xx xx  mov eax, servis
+    // CD 2E           int 0x2E
+    // CC              int3
+    const CODE: [u8; 18] = [
+        0x48, 0x89, 0x44, 0x24, 0x08,
+        0x48, 0x8D, 0x54, 0x24, 0x08,
+        0xB8, 0x00, 0x00, 0x00, 0x00,
+        0xCD, 0x2E,
+        0xCC,
+    ];
+    let code = at as *mut u8;
+    core::ptr::copy_nonoverlapping(CODE.as_ptr(), code, CODE.len());
+    (code.add(11) as *mut u32)
+        .write_unaligned(super::nt_syscalls::NT_CONTINUE_DISPATCH);
 }
 
 /// Son hata kodunu TEB'e de yazar.

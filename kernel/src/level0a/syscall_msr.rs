@@ -145,9 +145,9 @@ extern "C" fn syscall_instruction_dispatch(frame: *mut crate::arch::cpu::regs::S
     unsafe {
         let f = &mut *frame;
         if crate::level0b1::nt_subsystem::nt_syscalls::is_nt_service(f.number()) {
-            crate::level0b2::dispatcher::handle_nt_syscall(f);
+            crate::level0b2::dispatcher::handle_nt_syscall(f, false);
         } else {
-            crate::level0b2::dispatcher::handle_syscall(f);
+            crate::level0b2::dispatcher::handle_syscall(f, false);
         }
     }
 }

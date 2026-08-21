@@ -86,11 +86,78 @@ fn describe_page_fault(error_code: usize) -> (&'static str, &'static str, &'stat
     (present, access, ring)
 }
 
-/// Tum istisnalarin ortak govdesi.
+/// Bir istisnanin **tek** giris noktasi.
+///
+/// Cerceve `&mut` gelir cunku bu fonksiyon uc sonuctan birini uretebilir:
+///
+///   1. **Kurtarildi** -- talep uzerine sayfalama ya da copy-on-write.
+///      Hicbir sey degistirmeden donulur, CPU hatali komutu tekrarlar.
+///   2. **Isleyiciye cevrildi** -- surec bir Windows SEH/VEH isleyicisi
+///      kurmus. Cerceve isleyiciye yonlendirilir ve donulur; Ring 3
+///      kaldigi yerden degil, *isleyiciden* devam eder.
+///   3. **Olumcul** -- surec (ya da Ring 0 ise sistem) sonlandirilir.
+///      Bu dalda fonksiyon donmez.
+///
+/// `fault_addr`: sayfa hatasi icin CR2, digerleri icin 0.
+///
+/// # Safety
+/// `frame`, istisna stub'inin kurdugu gecerli bir cerceveyi gostermelidir.
+pub unsafe fn dispatch(frame: &mut crate::arch::cpu::regs::ExceptionFrame, fault_addr: usize) {
+    let vector = frame.vector as usize;
+    let error_code = frame.error_code as usize;
+
+    // --- 1. Kurtarilabilir sayfa hatalari ---
+    //
+    // Sayfa hatasi **geri donebilen** tek istisnadir: copy-on-write bir
+    // sayfaya yazmak ya da henuz eslenmemis bir yigin sayfasina dokunmak
+    // *beklenen* olaylardir. Hata kodunun 0. biti ikisini ayirir: sayfa
+    // YOK ise talep uzerine sayfalama, sayfa VAR ama yazma reddedildiyse
+    // copy-on-write.
+    //
+    // Ring 0'dan gelen hatalar da buraya duser ve bilerek: `CR0.WP` acik
+    // oldugu icin cekirdegin kullanici tamponuna yazmasi (`read`, `poll`,
+    // sinyal cercevesi) da COW yolunu tetikler.
+    if vector == 14 {
+        const PRESENT: usize = 1 << 0;
+        const WRITE: usize = 1 << 1;
+        let recovered = if error_code & PRESENT == 0 {
+            crate::level0a::core::mmu::handle_demand_fault(fault_addr)
+        } else if error_code & WRITE != 0 {
+            crate::level0a::core::mmu::handle_cow_fault(fault_addr)
+        } else {
+            false
+        };
+        if recovered {
+            return;
+        }
+    }
+
+    // --- 2. Windows istisna dagitimi ---
+    //
+    // Surec bir PE ise ve bir isleyici kurmussa, istisna once **ona**
+    // gider. Cerceve isleyiciye cevrilir ve buradan donulur: CPU artik
+    // hatali komuta degil, isleyiciye `iret` eder.
+    //
+    // Bu, POSIX tarafindaki sinyal teslimi ile ayni desendir -- ikisi de
+    // "cekirdek kullanici yiginina bir cerceve kurar ve baglami cevirir"
+    // isini yapar. Fark yalnizca cercevenin **bicimidir**: POSIX bir
+    // sinyal numarasi verir, Windows bir EXCEPTION_RECORD + CONTEXT
+    // ciftinin adresini.
+    if frame.from_user()
+        && crate::level0b1::nt_subsystem::seh::dispatch(frame, vector, error_code, fault_addr)
+    {
+        return;
+    }
+
+    // --- 3. Olumcul ---
+    report_and_die(vector, error_code, frame.instruction_pointer(), frame.from_user(), fault_addr)
+}
+
+/// Tum istisnalarin ortak, **donusu olmayan** govdesi.
 ///
 /// `from_user`: hata Ring 3'ten mi geldi (CS'in RPL'i 3 mu)?
 /// `fault_addr`: page fault icin CR2, digerleri icin 0.
-pub fn handle(vector: usize, error_code: usize, instruction_ptr: usize, from_user: bool, fault_addr: usize) -> ! {
+pub fn report_and_die(vector: usize, error_code: usize, instruction_ptr: usize, from_user: bool, fault_addr: usize) -> ! {
     TOTAL.fetch_add(1, Ordering::Relaxed);
     LAST_VECTOR.store(vector, Ordering::Relaxed);
 
@@ -132,6 +199,15 @@ pub fn handle(vector: usize, error_code: usize, instruction_ptr: usize, from_use
             present,
             access,
             ring
+        );
+    }
+
+    // Dagitim sirasinda cikan bir istisna ozel bir durumdur: kullanici
+    // isleyicisinin kendisi hatali demektir. Windows buna
+    // `ExceptionNestedException` der; ayirt edilmezse tani yaniltici olur.
+    if crate::level0b1::nt_subsystem::seh::active(task) {
+        crate::println!(
+            "            (istisna, SEH isleyicisi calisirken olustu -- ic ice)"
         );
     }
 

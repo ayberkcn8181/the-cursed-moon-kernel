@@ -605,7 +605,7 @@ pub fn name_of(signo: u32) -> &'static str {
 /// # Safety
 /// `frame` Ring 3'ten gelen gecerli bir syscall cercevesi olmalidir ve
 /// cagiran gorevin adres uzayi etkin olmalidir.
-pub unsafe fn deliver_pending(frame: &mut SyscallFrame) {
+pub unsafe fn deliver_pending(frame: &mut SyscallFrame, from_interrupt: bool) {
     if !usermode::in_user_mode() {
         return;
     }
@@ -672,7 +672,7 @@ pub unsafe fn deliver_pending(frame: &mut SyscallFrame) {
             }
             handler => {
                 let depth = DEPTH[task].load(Ordering::SeqCst);
-                let mut context = frame.user_context();
+                let mut context = frame.user_context_via(from_interrupt);
 
                 // Baglam ve **o anki maske** birlikte saklanir: isleyici
                 // dondugunde ikisi de geri gelmeli.
@@ -709,7 +709,7 @@ pub unsafe fn deliver_pending(frame: &mut SyscallFrame) {
                 DEPTH[task].store(depth, Ordering::SeqCst);
                 MAX_NESTED.fetch_max(depth as u32, Ordering::Relaxed);
 
-                frame.set_user_context(&context);
+                frame.set_user_context_via(from_interrupt, &context);
                 DELIVERED.fetch_add(1, Ordering::Relaxed);
                 return;
             }
@@ -725,7 +725,7 @@ pub unsafe fn deliver_pending(frame: &mut SyscallFrame) {
 ///
 /// # Safety
 /// Ring 3'ten gelen gecerli bir cerceve ile cagrilmalidir.
-pub unsafe fn sigreturn(frame: &mut SyscallFrame) -> bool {
+pub unsafe fn sigreturn(frame: &mut SyscallFrame, from_interrupt: bool) -> bool {
     let task = scheduler::current_id();
     if task >= scheduler::MAX_TASKS {
         return false;
@@ -742,7 +742,7 @@ pub unsafe fn sigreturn(frame: &mut SyscallFrame) -> bool {
     let context = (core::ptr::addr_of!(SAVED) as *const UserContext)
         .add(task * NEST_DEPTH + depth)
         .read();
-    frame.set_user_context(&context);
+    frame.set_user_context_via(from_interrupt, &context);
 
     // Isleyicinin ek engelleri yalnizca isleyici suresince gecerliydi.
     let saved_mask = (core::ptr::addr_of!(SAVED_MASK) as *const u32)

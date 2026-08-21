@@ -41,8 +41,14 @@ fn classify(number: u32) -> Channel {
     }
 }
 
-/// IDT vektor 128'den (int 0x80) gelen Linux uyumlu sistem cagrisi.
-pub fn handle_syscall(frame: &mut SyscallFrame) {
+/// Linux uyumlu sistem cagrisi.
+///
+/// `from_interrupt`: cagri bir **kesme kapisindan** mi geldi (int 0x80)
+/// yoksa `syscall` komutundan mi? i386'da tek yol var ve bayrak yok
+/// sayilir; x86_64'te ikisi donus bilgisini baska yerde tasir, yani
+/// cerceveyi yazacak kod bunu bilmek **zorundadir** (bkz.
+/// `SyscallFrame::user_context_via`).
+pub fn handle_syscall(frame: &mut SyscallFrame, from_interrupt: bool) {
     let task = scheduler::current_id();
 
     if load_balancer::note_call(classify(frame.number()), task) == Verdict::Throttle {
@@ -57,7 +63,7 @@ pub fn handle_syscall(frame: &mut SyscallFrame) {
         return;
     }
 
-    posix::dispatch(frame);
+    posix::dispatch(frame, from_interrupt);
 
     // Cagri islendi, Ring 3'e donulmek uzere: **sinyal teslim noktasi**
     // burasidir. Bekleyen bir sinyal varsa cerceve isleyiciye cevrilir,
@@ -66,7 +72,7 @@ pub fn handle_syscall(frame: &mut SyscallFrame) {
     // Teslimin kesme isleyicisinde degil de burada yapilmasi bilincli:
     // burada cercevenin Ring 3'ten geldigi kesindir ve `set_user_context`
     // ile guvenle yazilabilir.
-    unsafe { crate::level0b1::signal::deliver_pending(frame) };
+    unsafe { crate::level0b1::signal::deliver_pending(frame, from_interrupt) };
 }
 
 /// IDT vektor 46'dan (int 0x2E) gelen Windows NT uyumlu sistem cagrisi.
@@ -74,7 +80,7 @@ pub fn handle_syscall(frame: &mut SyscallFrame) {
 /// Dagitici acisindan POSIX ile NT arasindaki tek fark hangi cevirmene
 /// verildigidir; durum kontrolu, yuk olcumu ve fallback yolu ortaktir.
 /// Doc S.1'in "cift uyumluluk" vaadi tam olarak burada somutlasir.
-pub fn handle_nt_syscall(frame: &mut SyscallFrame) {
+pub fn handle_nt_syscall(frame: &mut SyscallFrame, from_interrupt: bool) {
     let task = scheduler::current_id();
 
     if load_balancer::note_call(Channel::Nt, task) == Verdict::Throttle {
@@ -86,11 +92,11 @@ pub fn handle_nt_syscall(frame: &mut SyscallFrame) {
         return;
     }
 
-    crate::level0b1::nt_subsystem::nt_syscalls::dispatch(frame);
+    crate::level0b1::nt_subsystem::nt_syscalls::dispatch(frame, from_interrupt);
 
     // Sinyaller Windows sureclerinde de gecerlidir: cekirdek acisindan
     // ikisi de ayni gorev tablosundaki ayni turden bir surectir. Bir PE
     // uygulamasi `SIGKILL`/`SIGTERM` ile durur; isleyici kaydetmek icin
     // POSIX cagrisini kullanmasi gerekir, ki bu da mumkun.
-    unsafe { crate::level0b1::signal::deliver_pending(frame) };
+    unsafe { crate::level0b1::signal::deliver_pending(frame, from_interrupt) };
 }

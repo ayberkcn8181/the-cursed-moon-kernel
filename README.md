@@ -27,8 +27,8 @@ masaustu sunuyor.
 | Mimariler | i386 (Multiboot1, `int 0x80`) · x86_64 (Multiboot2, `syscall`) |
 | Ikili bicimleri | ELF32/ELF64 · PE32/PE32+ (ithal tablosu cozulur) |
 | POSIX cagrilari | 59 |
-| NT/Win32 cagrilari | 57 (`KERNEL32.dll` 36 ihracat + `TCMKGUI.dll`) |
-| Ring 3 uygulamalari | 25 ELF + 5 PE |
+| NT/Win32 cagrilari | 61 (`KERNEL32.dll` 39 ihracat + `TCMKGUI.dll`) |
+| Ring 3 uygulamalari | 25 ELF + 6 PE |
 | Kalici depolama | ATA PIO + MBR + TCMKFS (yazilabilir, i386) |
 | Kod | ~23 bin satir cekirdek + ~9,5 bin satir userland |
 
@@ -36,15 +36,17 @@ Uyumluluk yuzeyi su alanlarda **iki ABI'de birden** kurulu: dosya
 sistemi (acma/okuma/yazma/kesme/gezinme/yeniden adlandirma), surec
 (`fork`/`execve`/`waitpid`/sinyaller), ortam degiskenleri, calisma
 dizini, program argumanlari, saat, `stat`, `PATH` aramasi, is-parcacigi
-tabani (POSIX TLS / Windows TEB) ve **surec yaratma**
-(`fork`/`execve` -- `CreateProcess`).
+tabani (POSIX TLS / Windows TEB), **surec yaratma**
+(`fork`/`execve` -- `CreateProcess`) ve **istisna dagitimi**
+(sinyaller -- SEH/VEH).
 
-Her yetenek QEMU'da **olculerek** dogrulanmistir: `probe` (11 sinav),
-`winprobe` (12), `bequest` (6), `nested` (4), `winenv` (4) gibi
-programlar sonucu hem ekrana hem seri gunluge yaziyor. Olcumler yol
+Her yetenek QEMU'da **olculerek** dogrulanmistir: `probe` (13 sinav),
+`winprobe` (12), `winseh` (8), `bequest` (6), `nested` (4), `winenv` (4)
+gibi programlar sonucu hem ekrana hem seri gunluge yaziyor. Olcumler yol
 boyunca gercek hatalar buldu -- dolan VFS tablosu, `CreateFileA`'nin
 cevrilmeyen Windows yollari, `GDT` siniri, x86_64'te segment secicisinin
-taban MSR'sini silmesi -- ve her biri README'de kendi bolumunde yazili.
+taban MSR'sini silmesi, kesme ve `syscall` kapilarinin farkli cerceve
+duzeni -- ve her biri README'de kendi bolumunde yazili.
 
 **Tamamlanan fazlar:**
 
@@ -2709,11 +2711,10 @@ tek bir kaynaga bakmak, ayrisma durumunu hic gormezdi.
   okuyan kod sifir adrese gider) ama icinde yalnizca `BeingDebugged = 0`
   var. `ImageBaseAddress`, yuklu modul listesi ve isletim sistemi surum
   alanlari yok.
-* **SEH zinciri kurulmuyor.** `ExceptionList` alani Windows'un istedigi
-  gibi `-1` (zincir sonu) ile basliyor -- sifir birakmak, zinciri
-  yuruyen kodu gecerli bir kayit sanip dallandirirdi. Ama bir istisna
-  gerceklestiginde TCMK zinciri **calistirmiyor**; surec dogrudan
-  sonlandiriliyor.
+* ~~SEH zinciri kurulmuyor.~~ Artik kuruluyor: `ExceptionList`
+  Windows'un istedigi gibi `-1` (zincir sonu) ile basliyor **ve** bir
+  istisna gerceklestiginde zincir yurutuluyor. Bkz.
+  [Coken surec olmek zorunda degil](#coken-surec-olmek-zorunda-degil--seh-ve-veh).
 * **Is-parcacigi yok**, yalnizca tabanlar var: TCMK'de bir gorev = bir
   surec = bir akis.
 * **`set_thread_area` tek girdi ayiriyor**: Linux uc TLS girdisi tutar
@@ -3878,6 +3879,154 @@ Hata Ring 0'dan gelirse bu bir cekirdek hatasidir; Level-0b2 Fallback
 Interface devreye girip sistemi guvenli duruma alir.
 
 Kabuktan `faults` komutu istatistikleri gosterir.
+
+## Coken surec olmek zorunda degil -- SEH ve VEH
+
+Yukaridaki hata izolasyonu bir seyi **varsayiyordu**: hata olumcul.
+Windows'ta degil. `__try`/`__except` derleyicinin urettigi siradan bir
+yapidir ve bir Windows programi coken bir islemden **donebilecegini**
+varsayar. TEB kurulduktan sonra bir PE ikilisi `fs:[0]`da bir zincir
+*gorebiliyordu* ama zincir hicbir zaman yurutulmuyordu: bir sayfa hatasi
+yine surecin sonuydu.
+
+Artik degil.
+
+```
+[winseh] A VEH erisim ihlali:   gecti (yakalandi, duzeltildi, komut tekrarlandi)
+[winseh] B kayit parametreleri: gecti ([0]=yazma, [1]=0x00000000)
+[winseh] C isleyici sirasi:     gecti (once bastaki, sonra duzeltici)
+[winseh] D isleyici kaldirma:   gecti (kaldirildi, bir daha cagrilmadi)
+[winseh] E RaiseException:      gecti (ozel kod + iki parametre dogru geldi)
+[winseh] F SEH zinciri:         gecti (fs:[0] kaydi calisti, 100/4 = 25)
+[winseh] G sifira bolme:        gecti (bolen 4 yapildi, 100/4 = 25)
+[winseh] H zincir geri alma:    gecti (kayit dustu, fs:[0] eski haline dondu)
+```
+
+![SEH/VEH](docs/screenshot-seh.png)
+
+Ekran goruntusundeki iki satir birlikte okunmali:
+
+```
+yakalanan istisna: 0            <- olumcul istisna yok
+sonlandirilan surec: 0          <- kimse olmedi
+SEH dagitildi: 6  surduruldu: 6  sahipsiz: 0
+```
+
+`winseh.exe` alti kez coktu ve alti kez ayaga kalkti. i386'da sekiz
+sinavin sekizi, x86_64'te altisi geciyor; kalan ikisi **bilerek**
+atlaniyor (asagida).
+
+### Iki mekanizma, ve neden ikisi de var
+
+| | SEH (zincir) | VEH (vektorlu) |
+|---|---|---|
+| kayit yeri | `fs:[0]` -- **yiginda** | surec genelinde bir liste |
+| kim kurar | derleyici (`__try`) | `AddVectoredExceptionHandler` |
+| isleyici imzasi | `(record, frame, context, dispatcher)` | `(EXCEPTION_POINTERS*)` |
+| "devam et" | `0` | `-1` |
+| "sirakine gec" | `1` | `0` |
+| mimari | yalnizca 32-bit | 32 ve 64-bit |
+
+Son iki satir onemli. **Ayni anlami tasiyan iki donus degeri farkli
+sayilardir** -- bu Windows'un kendi tuhafligi, TCMK'nin sadelestirmesi
+degil. Cekirdek ikisini karistirsaydi, zincirdeki bir "sirakine gec"
+(`1`) yanlis okunurdu. `continue_dispatch` bu yuzden hangi asamada
+oldugunu bilerek karsilastirir.
+
+Ve x86_64'te zincir **yok**: Microsoft 64-bit'te tablo tabanli
+(`.pdata`/`.xdata`) cozume gecti. TCMK bu ayrimi aynen tasiyor -- F ve H
+sinavlari 64-bit'te uydurma bir sonuc yazmak yerine acikca "atlandi"
+diyor.
+
+### Dagitim nasil calisiyor
+
+Gercek Windows'ta donguyu `ntdll!KiUserExceptionDispatcher` Ring 3'te
+dondurur. TCMK'de dongu cekirdektedir; Ring 3'e yalnizca *isleyiciler*
+girer:
+
+```text
+  istisna  ->  cekirdek yigina EXCEPTION_RECORD + CONTEXT yazar
+           ->  cerceveyi isleyiciye cevirir, donus adresi = tramplen
+           ->  isleyici calisir (Ring 3), EAX/RAX ile karar doner
+           ->  tramplen int 0x2E ile cekirdege doner
+           ->  cekirdek ya devam eder ya siradaki isleyiciye gecer
+```
+
+Tramplen, cekirdegin TEB'in ayrilmis alanina yazdigi **13 baytlik** bir
+koddur. Linux'un eski sinyal tramplenleri de aynen boyleydi: cekirdegin
+kullanici adres uzayina bir donus yolu birakmasi disinda secenek yok.
+
+Bu, `level0b1::signal`in yaptigi isin Windows'çasi. Iki yol da "cekirdek
+kullanici yiginina bir cerceve kurar ve baglami cevirir" desenini
+kullanir, hatta ayni `UserContext` tipini paylasirlar. Fark cercevenin
+**bicimi**: POSIX bir sinyal numarasi verir, Windows bir kayit ciftinin
+adresini.
+
+### "Devam et" demek CONTEXT'i degistirmek demek
+
+Bir isleyici hicbir seyi degistirmeden "devam et" derse ayni komut
+yeniden calisir ve ayni hatayi verir. O yuzden A ve G sinavlari
+duzeltmeyi gercekten yapiyor:
+
+* **A**: `mov [ecx], edx` sifir adrese yaziyor. Isleyici CONTEXT'teki
+  `Ecx`i gecerli bir adrese cevirip devam ediyor; komut tekrarlanip
+  yazma **hedefine varmis** oluyor.
+* **G**: `div ecx` sifira boluyor. Isleyici `Ecx`i 4 yapiyor, `100/4 =
+  25` cikiyor.
+
+Bunun calisabilmesi icin istisna girisleri bastan yazildi. Onceden
+`extern "x86-interrupt" fn`'lerdi ve o ABI **genel registerlari
+vermiyordu**: handler yalnizca EIP/CS/EFLAGS/ESP/SS goruyordu. Hatayi
+raporlamak icin yeterliydi, CONTEXT uretmek icin degil. Artik girisler
+`syscall_entry` ile ayni deseni kullanan elle yazilmis stub'lar
+(`pusha` + cerceve adresini Rust'a ver) ve `ExceptionFrame` tam bir
+baglam tasiyor.
+
+### Olcumun buldugu hata: iki kapi, iki cerceve
+
+x86_64'te ilk denemede surec **veriye dalladi**:
+
+```
+[LEVEL-0b2] ISTISNA #14 (page-fault) -- Ring 3 kaynakli
+            IP=0x00c06b4f  hata_kodu=0x5
+            adres=0x02000000  koruma-ihlali / okuma / Ring 3
+```
+
+`IP` kullanici yiginin ortasindaydi. Sebep tek bir varsayimdi:
+x86_64'te bir sistem cagrisi **iki ayri kapidan** gelebilir ve ikisi
+donus bilgisini baska yerde tasir.
+
+```text
+  syscall komutu   RIP -> RCX,  RFLAGS -> R11,  RSP -> giris stub'i itti
+  int 0x80/0x2E    RIP/RFLAGS/RSP -> CPU'nun kesme cercevesinde
+```
+
+`SyscallFrame::set_user_context` yalnizca birinci satiri biliyordu.
+Kesme yolundan gelen bir cerceveye `sysretq` duzeniyle yazmak, **RSP'yi
+RIP yuvasina koymak** demek. PE thunk'lari her zaman `int 0x2E`
+kullandigi icin Windows tarafinda gecerli olan hep ikinci satir.
+
+Cozum, giris yolunu cagri boyunca tasimak
+(`user_context_via(from_interrupt)`). Ayni hata POSIX tarafinda da
+**sessizce** duruyordu: x86_64'te `int 0x80`dan gelen bir `fork` ya da
+sinyal teslimi de bozuk cerceve yazardi. Kendi userland'imiz `syscall`
+komutunu kullandigi icin hic gorunmemisti. Simdi ikisi de dogru.
+
+### Bilerek yapilmayanlar
+
+* **Geri sarma (unwinding) yok.** Bir isleyici ya "devam et" der ya
+  "sirakine gec"; `__finally` bloklarini calistiran ve yigini geri saran
+  `RtlUnwind` yolu yok.
+* **x86_64'te tablo tabanli SEH yok** (yukari bkz.). `.pdata`
+  ayristirmak ve unwind kodlarini yorumlamak ayri bir is.
+* **Ic ice dagitim yok.** Bir isleyicinin kendisi cokerse Windows
+  `ExceptionNestedException` uretir; TCMK daha muhafazakar davranip
+  sureci sonlandirir -- ama tanida "ic ice" diye acikca yazar.
+* **Surec basina dort vektorlu isleyici.** Gercek Windows'ta liste
+  sinirsiz; burada sabit dizi, cunku cekirdekte surec basina dinamik
+  tahsis yapmamak genel tercih.
+* **`UnhandledExceptionFilter` yok.** Zincirin sonuna gelinip kimse
+  sahiplenmezse surec dogrudan sonlaniyor.
 
 ## Alfa'nin bilinen sinirlari
 

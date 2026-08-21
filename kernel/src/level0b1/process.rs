@@ -442,6 +442,9 @@ unsafe fn enter_ring3(
     // Ayni gerekce: bu yuvada calismis onceki surecin cikis kodu
     // silinmeli, yoksa yeni surece ait bir tutamac onu gorur.
     crate::level0b1::nt_subsystem::nt_syscalls::clear_reaped_exit(scheduler::current_id());
+    // Istisna isleyicileri de surece aittir; yeni imaj bunlari devralamaz
+    // (devralsaydi, artik var olmayan bir koda dallanilirdi).
+    crate::level0b1::nt_subsystem::seh::reset(scheduler::current_id());
 
     // Ring 3 -> Ring 0 gecisleri icin ayri bir cekirdek yigini.
     let kstack = kmalloc::kmalloc_aligned(KERNEL_STACK_SIZE, 16).ok_or(SpawnError::OutOfMemory)?;

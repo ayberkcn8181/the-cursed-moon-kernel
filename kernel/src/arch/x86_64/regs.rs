@@ -195,3 +195,182 @@ impl SyscallFrame {
         self.rax = value as u64;
     }
 }
+
+/// Bir CPU istisnasinda yigina konan **tam** cerceve (x86_64).
+///
+/// Gerekce ve duzen i386'daki ikiziyle aynidir (bkz. `arch::i386::regs`):
+/// `x86-interrupt` ABI'si genel registerlari vermedigi icin istisna
+/// girisleri elle yazilmis stub'lardir. Alan sirasi `SyscallFrame` ile
+/// bilincli olarak aynidir -- iki giris yolu ayni push desenini kullanir.
+///
+/// ```text
+///   R15..RAX (15 kelime)    <- stub itti
+///   vector                  <- stub itti
+///   error_code              <- CPU itti (ya da stub 0 itti)
+///   RIP, CS, RFLAGS         <- CPU itti
+///   RSP, SS                 <- CPU itti (x86_64'te ayricalik degismese
+///                              bile HER ZAMAN itilir)
+/// ```
+///
+/// Son satir x86_64'un i386'dan gercek bir farkidir: uzun modda `iretq`
+/// cercevesi her zaman bes kelimedir, yani `rsp`/`ss` Ring 0
+/// istisnalarinda da gecerlidir.
+#[repr(C)]
+#[derive(Debug)]
+#[allow(dead_code)]
+pub struct ExceptionFrame {
+    pub r15: u64,
+    pub r14: u64,
+    pub r13: u64,
+    pub r12: u64,
+    pub r11: u64,
+    pub r10: u64,
+    pub r9: u64,
+    pub r8: u64,
+    pub rbp: u64,
+    pub rdi: u64,
+    pub rsi: u64,
+    pub rdx: u64,
+    pub rcx: u64,
+    pub rbx: u64,
+    pub rax: u64,
+    pub vector: u64,
+    pub error_code: u64,
+    pub rip: u64,
+    pub cs: u64,
+    pub rflags: u64,
+    pub rsp: u64,
+    pub ss: u64,
+}
+
+impl ExceptionFrame {
+    /// Hata Ring 3'ten mi geldi? (CS'in RPL'i 3 mu)
+    pub fn from_user(&self) -> bool {
+        self.cs & 3 == 3
+    }
+
+    /// Hataya yol acan komutun adresi.
+    pub fn instruction_pointer(&self) -> usize {
+        self.rip as usize
+    }
+
+    /// Istisna anindaki **tam** Ring 3 baglami.
+    ///
+    /// # Safety
+    /// Yalnizca `from_user()` dogruyken anlamlidir.
+    pub unsafe fn user_context(&self) -> UserContext {
+        UserContext {
+            rax: self.rax,
+            rbx: self.rbx,
+            rcx: self.rcx,
+            rdx: self.rdx,
+            rsi: self.rsi,
+            rdi: self.rdi,
+            rbp: self.rbp,
+            r8: self.r8,
+            r9: self.r9,
+            r10: self.r10,
+            r11: self.r11,
+            r12: self.r12,
+            r13: self.r13,
+            r14: self.r14,
+            r15: self.r15,
+            rip: self.rip,
+            rsp: self.rsp,
+            rflags: self.rflags,
+        }
+    }
+
+    /// `user_context`'in tersi; yazilan baglam `iretq` ile geri doner.
+    ///
+    /// Burada RIP/RFLAGS **dogrudan** kendi alanlarina yazilir -- syscall
+    /// yolundaki RCX/R11 dolayisi yok, cunku `iretq` onlari cerceveden
+    /// okur.
+    ///
+    /// # Safety
+    /// `user_context` ile ayni kosul.
+    pub unsafe fn set_user_context(&mut self, ctx: &UserContext) {
+        self.rax = ctx.rax;
+        self.rbx = ctx.rbx;
+        self.rcx = ctx.rcx;
+        self.rdx = ctx.rdx;
+        self.rsi = ctx.rsi;
+        self.rdi = ctx.rdi;
+        self.rbp = ctx.rbp;
+        self.r8 = ctx.r8;
+        self.r9 = ctx.r9;
+        self.r10 = ctx.r10;
+        self.r11 = ctx.r11;
+        self.r12 = ctx.r12;
+        self.r13 = ctx.r13;
+        self.r14 = ctx.r14;
+        self.r15 = ctx.r15;
+        self.rip = ctx.rip;
+        self.rflags = ctx.rflags;
+        self.rsp = ctx.rsp;
+    }
+}
+
+impl SyscallFrame {
+    /// Cagiranin baglami -- **hangi kapidan girildigine gore**.
+    ///
+    /// x86_64'te bir sistem cagrisi iki ayri yoldan gelebilir ve ikisi
+    /// donus bilgisini **baska yerde** tasir:
+    ///
+    /// ```text
+    ///   syscall komutu   RIP -> RCX,  RFLAGS -> R11,  RSP -> stub itti
+    ///   int 0x80/0x2E    RIP/RFLAGS/RSP -> CPU'nun kesme cercevesinde
+    /// ```
+    ///
+    /// Ayrimi yapmamak sessiz ve yikici bir hataya yol acar: kesme
+    /// yolundan gelen bir cerceveye `sysretq` duzeniyle yazmak, RSP'yi
+    /// RIP yuvasina koymak demektir -- surec veriye dallanir.
+    ///
+    /// PE thunk'lari **her zaman** `int 0x2E` kullanir (bkz.
+    /// `dll::emit_thunk`), yani Windows tarafinda gecerli olan hep ikinci
+    /// satirdir.
+    ///
+    /// # Safety
+    /// Yalnizca Ring 3'ten gelen bir cerceve icin gecerlidir ve
+    /// `from_interrupt` cercevenin gercek giris yolunu anlatmalidir.
+    pub unsafe fn user_context_via(&self, from_interrupt: bool) -> UserContext {
+        let mut ctx = self.user_context();
+        if from_interrupt {
+            let iret = (self as *const SyscallFrame as *const u64).add(15);
+            ctx.rip = iret.read();
+            ctx.rflags = iret.add(2).read();
+            ctx.rsp = iret.add(3).read();
+        }
+        ctx
+    }
+
+    /// `user_context_via`'nin tersi.
+    ///
+    /// # Safety
+    /// `user_context_via` ile ayni kosul.
+    pub unsafe fn set_user_context_via(&mut self, from_interrupt: bool, ctx: &UserContext) {
+        if !from_interrupt {
+            self.set_user_context(ctx);
+            return;
+        }
+        self.rax = ctx.rax;
+        self.rbx = ctx.rbx;
+        self.rcx = ctx.rcx;
+        self.rdx = ctx.rdx;
+        self.rsi = ctx.rsi;
+        self.rdi = ctx.rdi;
+        self.rbp = ctx.rbp;
+        self.r8 = ctx.r8;
+        self.r9 = ctx.r9;
+        self.r10 = ctx.r10;
+        self.r11 = ctx.r11;
+        self.r12 = ctx.r12;
+        self.r13 = ctx.r13;
+        self.r14 = ctx.r14;
+        self.r15 = ctx.r15;
+        let iret = (self as *mut SyscallFrame as *mut u64).add(15);
+        iret.write(ctx.rip);
+        iret.add(2).write(ctx.rflags);
+        iret.add(3).write(ctx.rsp);
+    }
+}

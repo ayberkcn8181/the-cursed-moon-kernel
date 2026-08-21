@@ -1520,6 +1520,17 @@ fn execute(line: &str) {
                 }
                 None => write_line("yok"),
             }
+            // Windows tarafi: dagitilan istisnalar sonlandirilan
+            // sureclerin **disindadir** -- isleyici sahiplendiyse surec
+            // yasamaya devam eder.
+            use crate::level0b1::nt_subsystem::seh;
+            write_str("SEH dagitildi: ");
+            write_num(seh::dispatched());
+            write_str("  surduruldu: ");
+            write_num(seh::continued());
+            write_str("  sahipsiz: ");
+            write_num(seh::unhandled());
+            newline();
         }
         "win" => {
             write_line("  id  boyut     sahip     tampon (surecin adresi)");

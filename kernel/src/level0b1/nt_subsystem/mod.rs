@@ -5,4 +5,6 @@
 // urettikleri thunk'in cagri gelenegi degisir (bkz. dll::emit_thunk).
 pub mod dll;
 pub mod nt_syscalls;
+/// Windows istisna dagitimi (SEH zinciri + vektorlu isleyiciler).
+pub mod seh;
 pub mod teb;

@@ -32,6 +32,10 @@ path = "src/win/envtest.rs"
 name = "winprobe"
 path = "src/win/probe.rs"
 
+[[bin]]
+name = "winseh"
+path = "src/win/seh.rs"
+
 [profile.dev]
 panic = "abort"
 opt-level = 1

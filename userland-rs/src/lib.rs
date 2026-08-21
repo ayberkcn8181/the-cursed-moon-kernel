@@ -84,6 +84,9 @@ pub mod winapi;
 /// kodunu cekirdege sormadan buradan okur.
 #[cfg(target_os = "windows")]
 pub mod teb;
+/// Windows istisna yapilari: SEH zinciri ve vektorlu isleyiciler.
+#[cfg(target_os = "windows")]
+pub mod seh;
 
 /// Uygulamanin giris noktasini tanimlar.
 ///

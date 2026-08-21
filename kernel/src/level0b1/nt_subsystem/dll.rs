@@ -317,6 +317,28 @@ static KERNEL32: &[Export] = &[
         // hProcess, lpExitCode
         stack_bytes: 8,
     },
+    Export {
+        name: "AddVectoredExceptionHandler",
+        ordinal: 37,
+        service: nt::NT_ADD_VECTORED_EXCEPTION_HANDLER,
+        // First, Handler
+        stack_bytes: 8,
+    },
+    Export {
+        name: "RemoveVectoredExceptionHandler",
+        ordinal: 38,
+        service: nt::NT_REMOVE_VECTORED_EXCEPTION_HANDLER,
+        // Handle
+        stack_bytes: 4,
+    },
+    Export {
+        name: "RaiseException",
+        ordinal: 39,
+        service: nt::NT_RAISE_EXCEPTION,
+        // dwExceptionCode, dwExceptionFlags, nNumberOfArguments,
+        // lpArguments
+        stack_bytes: 16,
+    },
 ];
 
 /// `TCMKGUI.dll` -- win32k cagrilarinin kullanici modundaki yuzu.

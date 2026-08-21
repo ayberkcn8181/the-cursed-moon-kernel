@@ -32,6 +32,8 @@ use crate::level0a::core::mmu;
 use crate::level0a::kernel_api::{self, KernelError};
 use crate::level0a::{gui_api, wm};
 
+use super::seh;
+
 // --- Yurutucu (ntoskrnl) tablosu: NTSTATUS dondururler --------------
 pub const NT_TERMINATE_PROCESS: u32 = 0x1000;
 pub const NT_WRITE_CONSOLE: u32 = 0x1001;
@@ -94,6 +96,16 @@ pub const NT_GET_MODULE_FILE_NAME_A: u32 = 0x3027;
 pub const NT_CREATE_PROCESS_A: u32 = 0x3028;
 pub const NT_WAIT_FOR_SINGLE_OBJECT: u32 = 0x3029;
 pub const NT_GET_EXIT_CODE_PROCESS: u32 = 0x302A;
+pub const NT_ADD_VECTORED_EXCEPTION_HANDLER: u32 = 0x302B;
+pub const NT_REMOVE_VECTORED_EXCEPTION_HANDLER: u32 = 0x302C;
+pub const NT_RAISE_EXCEPTION: u32 = 0x302D;
+/// Istisna dagitim tramplenin donus kapisi.
+///
+/// `KERNEL32.dll` ihracat listesinde **yoktur** ve olmamalidir: bunu
+/// program degil, cekirdegin surecin adres uzayina yazdigi tramplen
+/// cagirir (bkz. `teb::emit_trampoline`). Gercek Windows'ta karsiligi
+/// `ntdll`nin ic `NtContinue` cagrisidir.
+pub const NT_CONTINUE_DISPATCH: u32 = 0x302E;
 
 pub const NT_USER_CREATE_WINDOW_W32: u32 = 0x3010;
 pub const NT_GDI_GET_BITS_W32: u32 = 0x3011;
@@ -285,7 +297,7 @@ pub fn is_nt_service(number: u32) -> bool {
 }
 
 /// Level-0b2 dispatcher'i tarafindan cagrilir (int 0x2E).
-pub fn dispatch(frame: &mut SyscallFrame) {
+pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
     let number = frame.number();
     let [arg1, arg2, arg3, _, _] = frame.args();
 
@@ -304,7 +316,7 @@ pub fn dispatch(frame: &mut SyscallFrame) {
     // Gomulu DLL thunk'larindan gelen Win32 API cagrilari: argumanlar
     // registerlerde degil, EDX'in gosterdigi yigin blogunda.
     if number >= WIN32_API_BASE {
-        dispatch_win32_api(frame);
+        dispatch_win32_api(frame, from_interrupt);
         return;
     }
 
@@ -479,7 +491,7 @@ fn dispatch_win32k(frame: &mut SyscallFrame) {
 ///
 /// Donus degeri Win32 sozlesmesine uyar: `BOOL` icin 1/0, tutamac icin
 /// tutamacin kendisi, hata icin `INVALID_HANDLE_VALUE`.
-fn dispatch_win32_api(frame: &mut SyscallFrame) {
+fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
     let number = frame.number();
     let args = arg_block(frame);
 
@@ -1440,6 +1452,94 @@ fn dispatch_win32_api(frame: &mut SyscallFrame) {
                     WIN32_FALSE
                 }
             }
+        }
+
+        // --- Istisna dagitimi (bkz. `seh.rs`) ---
+
+        // AddVectoredExceptionHandler(First, Handler) -> PVOID
+        //
+        // Windows'ta bu **surec genelinde** bir listedir ve SEH
+        // zincirinden ONCE calisir. TCMK'de de oyle. `First` sifirdan
+        // farkliysa isleyici listenin basina gecer.
+        NT_ADD_VECTORED_EXCEPTION_HANDLER => {
+            let first = arg(args, 0).unwrap_or(0) != 0;
+            let handler = arg_ptr(args, 1).unwrap_or(0);
+            let task = crate::level0a::core::scheduler::current_id();
+            let result = seh::add_vectored(task, first, handler);
+            if result == 0 {
+                set_last_error(ERROR_INVALID_PARAMETER);
+            }
+            result
+        }
+
+        // RemoveVectoredExceptionHandler(Handle) -> ULONG
+        NT_REMOVE_VECTORED_EXCEPTION_HANDLER => {
+            let handle = arg_ptr(args, 0).unwrap_or(0);
+            let task = crate::level0a::core::scheduler::current_id();
+            if seh::remove_vectored(task, handle) {
+                WIN32_TRUE
+            } else {
+                set_last_error(ERROR_INVALID_PARAMETER);
+                WIN32_FALSE
+            }
+        }
+
+        // RaiseException(dwCode, dwFlags, nArgs, lpArgs)
+        //
+        // Donmez: ya bir isleyici yurutmeyi surdurur ya da surec biter.
+        // Bu yuzden `return_win32` ile erken cikilir -- normal donus
+        // degeri yazilirsa isleyiciye kurulan cerceve ezilirdi.
+        NT_RAISE_EXCEPTION => {
+            let code = arg(args, 0).unwrap_or(0);
+            let flags = arg(args, 1).unwrap_or(0);
+            let count = arg(args, 2).unwrap_or(0) as usize;
+            let list = arg_ptr(args, 3).unwrap_or(0);
+
+            let mut params = [0usize; 15];
+            let count = count.min(15);
+            let mut usable = 0usize;
+            if list != 0 {
+                let width = core::mem::size_of::<usize>();
+                for i in 0..count {
+                    let at = list + i * width;
+                    if !mmu::is_user_accessible(at) {
+                        break;
+                    }
+                    params[i] = unsafe { (at as *const usize).read_unaligned() };
+                    usable = i + 1;
+                }
+            }
+
+            if unsafe { seh::raise(frame, from_interrupt, code, flags, &params[..usable]) } {
+                return;
+            }
+            crate::println!(
+                "[LEVEL-0b1] NT: yakalanmayan RaiseException {:#010x}; surec sonlandiriliyor.",
+                code
+            );
+            kernel_api::exit_current_task(code & 0xFF);
+        }
+
+        // NtContinueDispatch(disposition)
+        //
+        // Yalnizca tramplen cagirir. Ya yurutme surer (cerceve
+        // isleyicinin duzenledigi CONTEXT'ten yuklenir) ya da siradaki
+        // isleyiciye gecilir; iki durumda da cerceve **burada** kurulur,
+        // o yuzden normal donus yolu kullanilmaz.
+        NT_CONTINUE_DISPATCH => {
+            let disposition = arg_ptr(args, 0).unwrap_or(0);
+            if unsafe { seh::continue_dispatch(frame, from_interrupt, disposition) } {
+                return;
+            }
+            // Zincirin sonuna gelindi ve kimse sahiplenmedi. Windows'ta
+            // bu noktada `UnhandledExceptionFilter` calisir ve surec
+            // sonlanir; TCMK dogrudan sonlandirir.
+            let task = crate::level0a::core::scheduler::current_id();
+            crate::println!(
+                "[LEVEL-0b1] NT: yakalanmayan istisna (IP=0x{:08x}); surec sonlandiriliyor.",
+                seh::fault_address(task)
+            );
+            kernel_api::exit_current_task(seh::STATUS_ACCESS_VIOLATION & 0xFF);
         }
 
         // --- TCMKGUI.dll: pencere cagrilari ---

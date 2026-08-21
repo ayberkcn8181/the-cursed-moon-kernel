@@ -135,6 +135,9 @@ static WINENV_EXE: &[u8] = include_bytes!("../../userland/winenv.exe");
 /// GetFileAttributesA/GetVersionExA/GetSystemTime -- Win32 ikizleri.
 #[cfg(target_arch = "x86")]
 static WINPROBE_EXE: &[u8] = include_bytes!("../../userland/winprobe.exe");
+/// SEH/VEH: coken bir PE, kendi isleyicisiyle ayakta kaliyor mu?
+#[cfg(target_arch = "x86")]
+static WINSEH_EXE: &[u8] = include_bytes!("../../userland/winseh.exe");
 
 /// Linux (ELF64, x86_64) kullanici programi -- `tools/gen_hello_elf64.py`.
 /// Elle kodlanmis en kucuk ELF64: yukleyicinin dar yolunu sinar.
@@ -205,6 +208,8 @@ static WINFILES_EXE64: &[u8] = include_bytes!("../../userland/winfiles.exe64");
 static WINENV_EXE64: &[u8] = include_bytes!("../../userland/winenv.exe64");
 #[cfg(target_arch = "x86_64")]
 static WINPROBE_EXE64: &[u8] = include_bytes!("../../userland/winprobe.exe64");
+#[cfg(target_arch = "x86_64")]
+static WINSEH_EXE64: &[u8] = include_bytes!("../../userland/winseh.exe64");
 
 /// Kullanici programlarinin VFS uzerinden okudugu test dosyasi.
 static BOOT_MSG: &[u8] = b"/boot/msg.txt: VFS uzerinden okundu (RAMFS).\n";
@@ -243,6 +248,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/winfiles.exe", WINFILES_EXE),
     ("/bin/winenv.exe", WINENV_EXE),
     ("/bin/winprobe.exe", WINPROBE_EXE),
+    ("/bin/winseh.exe", WINSEH_EXE),
     ("/boot/msg.txt", BOOT_MSG),
 ];
 
@@ -277,6 +283,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/winfiles.exe", WINFILES_EXE64),
     ("/bin/winenv.exe", WINENV_EXE64),
     ("/bin/winprobe.exe", WINPROBE_EXE64),
+    ("/bin/winseh.exe", WINSEH_EXE64),
     ("/boot/msg.txt", BOOT_MSG),
 ];
 
