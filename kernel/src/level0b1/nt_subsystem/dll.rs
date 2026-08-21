@@ -293,6 +293,30 @@ static KERNEL32: &[Export] = &[
         // hModule, lpFilename, nSize
         stack_bytes: 12,
     },
+    Export {
+        name: "CreateProcessA",
+        ordinal: 34,
+        service: nt::NT_CREATE_PROCESS_A,
+        // On parametre: lpApplicationName, lpCommandLine,
+        // lpProcessAttributes, lpThreadAttributes, bInheritHandles,
+        // dwCreationFlags, lpEnvironment, lpCurrentDirectory,
+        // lpStartupInfo, lpProcessInformation
+        stack_bytes: 40,
+    },
+    Export {
+        name: "WaitForSingleObject",
+        ordinal: 35,
+        service: nt::NT_WAIT_FOR_SINGLE_OBJECT,
+        // hHandle, dwMilliseconds
+        stack_bytes: 8,
+    },
+    Export {
+        name: "GetExitCodeProcess",
+        ordinal: 36,
+        service: nt::NT_GET_EXIT_CODE_PROCESS,
+        // hProcess, lpExitCode
+        stack_bytes: 8,
+    },
 ];
 
 /// `TCMKGUI.dll` -- win32k cagrilarinin kullanici modundaki yuzu.

@@ -27,7 +27,7 @@ masaustu sunuyor.
 | Mimariler | i386 (Multiboot1, `int 0x80`) · x86_64 (Multiboot2, `syscall`) |
 | Ikili bicimleri | ELF32/ELF64 · PE32/PE32+ (ithal tablosu cozulur) |
 | POSIX cagrilari | 59 |
-| NT/Win32 cagrilari | 54 (`KERNEL32.dll` 33 ihracat + `TCMKGUI.dll`) |
+| NT/Win32 cagrilari | 57 (`KERNEL32.dll` 36 ihracat + `TCMKGUI.dll`) |
 | Ring 3 uygulamalari | 25 ELF + 5 PE |
 | Kalici depolama | ATA PIO + MBR + TCMKFS (yazilabilir, i386) |
 | Kod | ~23 bin satir cekirdek + ~9,5 bin satir userland |
@@ -35,11 +35,12 @@ masaustu sunuyor.
 Uyumluluk yuzeyi su alanlarda **iki ABI'de birden** kurulu: dosya
 sistemi (acma/okuma/yazma/kesme/gezinme/yeniden adlandirma), surec
 (`fork`/`execve`/`waitpid`/sinyaller), ortam degiskenleri, calisma
-dizini, program argumanlari, saat, `stat`, `PATH` aramasi ve
-is-parcacigi tabani (POSIX TLS / Windows TEB).
+dizini, program argumanlari, saat, `stat`, `PATH` aramasi, is-parcacigi
+tabani (POSIX TLS / Windows TEB) ve **surec yaratma**
+(`fork`/`execve` -- `CreateProcess`).
 
 Her yetenek QEMU'da **olculerek** dogrulanmistir: `probe` (11 sinav),
-`winprobe` (10), `bequest` (6), `nested` (4), `winenv` (4) gibi
+`winprobe` (12), `bequest` (6), `nested` (4), `winenv` (4) gibi
 programlar sonucu hem ekrana hem seri gunluge yaziyor. Olcumler yol
 boyunca gercek hatalar buldu -- dolan VFS tablosu, `CreateFileA`'nin
 cevrilmeyen Windows yollari, `GDT` siniri, x86_64'te segment secicisinin
@@ -90,6 +91,7 @@ taban MSR'sini silmesi -- ve her biri README'de kendi bolumunde yazili.
 | 9i | **`readv`**, **`getuid`/`geteuid`** ailesi, **`GetModuleFileNameA`** | ✅ (i386 + x86_64, ELF + PE) |
 | 9j | **Is-parcacigi tabani**: `set_thread_area` (i386) / `arch_prctl` (x86_64) | ✅ (i386 + x86_64) |
 | 7g | **TEB** (`fs:[0x18]` / `gs:[0x30]`, son hata TEB'de de) | ✅ (PE32 + PE32+) |
+| 7h | **`CreateProcessA`** + `WaitForSingleObject` + `GetExitCodeProcess` | ✅ (PE32 + PE32+) |
 | — | **Klavye: shift + caps lock** (US duzeni, buyuk harf ve noktalama) | ✅ (i386 + x86_64) |
 | — | **Kendi onyukleyicisi** + diske kurulum (`install`) | ✅ (i386) |
 | 8 | **`execve`** (surec kendi yerine program yukler) | ✅ (i386 + x86_64) |
@@ -2571,6 +2573,75 @@ dogru gelirse taban gercekten donanima yazilmis demektir.
 M asil olcum: cocuk `fork`tan sonra **kendi** blogunu kuruyor ve
 uyuyor -- yani araya gorev degisimi giriyor. Global tek bir taban olsaydi
 ebeveynin okumasi cocugunkine kayardi. Iki mimaride de gecti.
+
+## `CreateProcess`: Win32 artik surec yaratabiliyor
+
+En buyuk asimetri buydu. POSIX tarafinda `fork`/`execve`/`waitpid` uzun
+suredir vardi; Windows tarafinda **hicbir karsiligi yoktu** -- bir PE
+yalnizca kendisi olabiliyor, cocuk baslatamiyordu.
+
+Iki dunyanin en keskin ayrildigi yer de burasi:
+
+```text
+  POSIX   fork() + execve()   IKI cagri. Once surec ikiye ayrilir (cocuk
+          her seyi devralir), sonra imaj degistirilir. Aradaki pencere
+          KASITLIDIR: yonlendirme orada kurulur.
+
+  Win32   CreateProcess()     TEK cagri. Yaratma ve yukleme ayrilmaz;
+          "aradaki an" diye bir sey yoktur. Devralma bu yuzden
+          PARAMETRELERLE anlatilir (bInheritHandles, STARTUPINFO).
+```
+
+Beklemede de ayni ayrim surer: `waitpid` tek cagride hem "bitti mi"
+hem "hangi kodla" cevabini verir; Win32 ikiye boler --
+`WaitForSingleObject` **ne oldugunu**, `GetExitCodeProcess` **kodu**
+soyler.
+
+### Bir Windows cagrisiyla baslatilan Linux ikilisi
+
+Projenin butun iddiasi bu satirda:
+
+```text
+[winprobe] K CreateProcessA: gecti (ELF cocuk Win32 cagrisiyla basladi)
+```
+
+`winprobe.exe` (bir **PE**) `CreateProcessA("C:\bin\hello")` cagiriyor;
+`/bin/hello` bir **ELF32**. Bicim magic'ten secildigi icin cagiran hangi
+dunyadan geldigini bilmiyor bile. Level-0b1'in var olma sebebi tam
+olarak budur.
+
+### Olcum iki hatayi arka arkaya buldu
+
+**Bir: bekleyen surec kilitlendi.** `WaitForSingleObject` cagiran PE bir
+daha uyanmadi -- oysa gunlukte cocugun cikisi yaziyordu. Sebep
+`wait_for_task`in dongusundeydi: yalnizca `Terminated` durumunu
+bekliyordu, ama launcher baslattigi uygulama bitince yuvayi **geri
+veriyor** ve durum `Unused` oluyordu. O an bir daha hic gelmeyecek bir
+durumu beklemek demekti. Dongu artik ikisini de kabul ediyor; POSIX
+`waitpid` de ayni yaristan korunmus oldu.
+
+**Iki: cikis kodu kayboldu.** Bekleme yuvayi geri verince kod
+zamanlayicida kalmiyor, `GetExitCodeProcess` `STILL_ACTIVE` goruyordu --
+yani **bitmis** bir surec "hala calisiyor" diyordu. Windows'ta cikis
+kodunu ayakta tutan sey acik tutamactir; TCMK'de o rolu kucuk bir tablo
+ustlendi, ve `CreateProcessA` cocugu artik `spawn_child` ile (POSIX
+`fork`un kullandigi isaretle) **beklenebilir** olarak baslatiyor.
+
+![winprobe](docs/screenshot-probe.png)
+
+### Bilerek yapilmayanlar
+
+* **`STARTUPINFO` yok sayiliyor**: TCMK'de pencere/konsol devralma
+  kavrami yok, `bInheritHandles` da oyle.
+* **`lpEnvironment` yok sayiliyor.** Cocuk ortami oturum tablosundan
+  aliyor; POSIX tarafinda ayni sey `execve`nin ucuncu parametresiyle
+  yapilabiliyor (bkz. yukarisi).
+* **`WaitForSingleObject` yalnizca `INFINITE` ve sifir sureyi ayirt
+  eder**: zamanlayicida "sureli bekleme" kavrami yok ve bir sure
+  uydurmak yaniltirdi.
+* **`STILL_ACTIVE` tuzagi korunuyor**: 259 ile cikan bir surec Windows'ta
+  da "hala calisiyor" gorunur. Ayikliyormus gibi yapmak, gercek
+  Windows'ta calismayan bir varsayimi burada calisir kilardi.
 
 ## TEB: Windows'un surece bakan yuzu
 

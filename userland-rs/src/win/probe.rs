@@ -39,7 +39,15 @@
 //!                             vermeli, kimlik ProcessId ile ayni olmali
 //!   J  TEB'deki son hata     -> basarisiz bir cagridan sonra
 //!                             GetLastError ile AYNI degeri tasimali
+//!   K  CreateProcessA        -> bir **ELF** baslatabilmeli
+//!   L  WaitForSingleObject   -> cocuk bitince WAIT_OBJECT_0, ve
+//!                             GetExitCodeProcess STILL_ACTIVE dememeli
 //! ```
+//!
+//! K bu projenin butun iddiasini tek satira indiriyor: Win32'nin surec
+//! yaratma cagrisiyla bir **Linux ikilisi** baslatiliyor. Bicim
+//! magic'ten seciliyor, yani cagiran hangi dunyadan geldigini bilmiyor
+//! bile.
 //!
 //! I ve J POSIX'te karsiligi olmayan bir seyi olcuyor. Bir Windows
 //! programi kimligini ve son hata kodunu cekirdege **sormaz**: bir
@@ -109,7 +117,7 @@ fn result(check: &Check) -> &'static str {
 
 fn main() {
     let mut console = winapi::Console;
-    let mut checks = [EMPTY; 10];
+    let mut checks = [EMPTY; 12];
 
     // --- A: RAMFS dosyasi ---
     let file = unsafe { winapi::GetFileAttributesA(b"C:\\bin\\browse\0".as_ptr()) };
@@ -393,6 +401,69 @@ fn main() {
         skipped: false,
     };
 
+    // --- K ve L: surec yaratma ---
+    //
+    // Hedef bilerek bir **ELF**: `/bin/hello` hemen cikan kucuk bir
+    // Linux ikilisi. Win32'nin cagrisiyla baslamasi, bicim seciminin
+    // magic'ten yapildiginin dogrudan kaniti.
+    let mut info = winapi::ProcessInformation::new();
+    let created = unsafe {
+        winapi::CreateProcessA(
+            b"C:\\bin\\hello\0".as_ptr(),
+            core::ptr::null(),
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+            0,
+            0,
+            core::ptr::null_mut(),
+            core::ptr::null(),
+            core::ptr::null_mut(),
+            &mut info,
+        )
+    };
+    checks[10] = Check {
+        name: "K CreateProcessA",
+        detail: if created == 0 {
+            "cagri BASARISIZ"
+        } else if info.process_id != 0 {
+            "ELF cocuk Win32 cagrisiyla basladi"
+        } else {
+            "kimlik doldurulmadi"
+        },
+        passed: created != 0 && info.process_id != 0,
+        skipped: false,
+    };
+
+    // L: bitmesini bekle, sonra cikis kodunu sor.
+    //
+    // Iki ayri cagri olmasi Win32'nin sozlesmesi: `waitpid` ikisini tek
+    // cagride verir, burada bekleme "ne oldu"yu, kod ayri bir cagriyi
+    // ister.
+    let mut code = winapi::STILL_ACTIVE;
+    let waited = if created != 0 {
+        unsafe { winapi::WaitForSingleObject(info.process, winapi::INFINITE) }
+    } else {
+        winapi::WAIT_TIMEOUT
+    };
+    if created != 0 {
+        unsafe { winapi::GetExitCodeProcess(info.process, &mut code) };
+        unsafe { winapi::CloseHandle(info.process) };
+    }
+    checks[11] = Check {
+        name: "L WaitForSingleObject",
+        detail: if created == 0 {
+            "cocuk yaratilamadi"
+        } else if waited != winapi::WAIT_OBJECT_0 {
+            "bekleme WAIT_OBJECT_0 vermedi"
+        } else if code == winapi::STILL_ACTIVE {
+            "bitti ama STILL_ACTIVE gorunuyor"
+        } else {
+            "cocuk bitti, cikis kodu okundu"
+        },
+        passed: created != 0 && waited == winapi::WAIT_OBJECT_0 && code != winapi::STILL_ACTIVE,
+        skipped: false,
+    };
+
     for check in &checks {
         let _ = core::fmt::Write::write_str(&mut console, "[winprobe] ");
         let _ = core::fmt::Write::write_str(&mut console, check.name);
@@ -403,7 +474,7 @@ fn main() {
         let _ = core::fmt::Write::write_str(&mut console, ")\n");
     }
 
-    let mut win = match Window::create("winprobe -- Win32 yuzeyi", 290, 150, 460, 280) {
+    let mut win = match Window::create("winprobe -- Win32 yuzeyi", 280, 130, 460, 310) {
         Some(w) => w,
         None => return,
     };
@@ -416,7 +487,7 @@ fn main() {
     }
 }
 
-fn draw(win: &mut Window, checks: &[Check; 10], now: &SystemTime, version: &OsVersionInfoA) {
+fn draw(win: &mut Window, checks: &[Check; 12], now: &SystemTime, version: &OsVersionInfoA) {
     let (w, h) = (win.width(), win.height());
     win.clear(BG);
     win.fill(0, 0, w, 22, PANEL);

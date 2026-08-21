@@ -91,6 +91,9 @@ pub const NT_GET_CURRENT_PROCESS_ID: u32 = 0x3024;
 pub const NT_GET_CURRENT_THREAD_ID: u32 = 0x3025;
 pub const NT_SET_END_OF_FILE: u32 = 0x3026;
 pub const NT_GET_MODULE_FILE_NAME_A: u32 = 0x3027;
+pub const NT_CREATE_PROCESS_A: u32 = 0x3028;
+pub const NT_WAIT_FOR_SINGLE_OBJECT: u32 = 0x3029;
+pub const NT_GET_EXIT_CODE_PROCESS: u32 = 0x302A;
 
 pub const NT_USER_CREATE_WINDOW_W32: u32 = 0x3010;
 pub const NT_GDI_GET_BITS_W32: u32 = 0x3011;
@@ -167,6 +170,37 @@ const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x0000_0010;
 const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
 /// `GetFileAttributesA`nin hata donusu -- `0` degil, tum bitler bir.
 const INVALID_FILE_ATTRIBUTES: usize = 0xFFFF_FFFF;
+
+/// Surec tutamaci isareti.
+///
+/// TCMK'de dosya tutamaclari **tanimlayici numarasidir** (kucuk sayilar);
+/// surec tutamaci da bir gorev kimligi, yani ayni araliktan. Ikisini
+/// ayirmadan `CloseHandle` bir sureci kapatirken ayni numarali dosyayi
+/// kapatirdi. En ust bit isaret olarak kullaniliyor: Windows'ta tutamac
+/// degerleri zaten opaktir, cagiran onlari yorumlamaz.
+const PROCESS_HANDLE_FLAG: usize = 0x8000_0000;
+
+/// Surec hala calisiyor -- `GetExitCodeProcess` bunu doner.
+const STILL_ACTIVE: u32 = 259;
+
+/// Beklenmis cocuklarin cikis kodlari.
+///
+/// Gerekli, cunku bekleme gorev yuvasini **geri veriyor**: kod
+/// zamanlayicida artik yok. Windows'ta cikis kodunu ayakta tutan sey
+/// acik tutamactir; TCMK'de o rolu bu kucuk tablo oynuyor.
+///
+/// `u32::MAX` "bu yuva icin kayit yok" demek -- gecerli bir cikis kodu
+/// olamayacak kadar buyuk oldugu icin ayrik bir isaret gerekmiyor.
+static REAPED_EXIT: [core::sync::atomic::AtomicU32;
+    crate::level0a::core::scheduler::MAX_TASKS] = [const {
+    core::sync::atomic::AtomicU32::new(u32::MAX)
+}; crate::level0a::core::scheduler::MAX_TASKS];
+/// `WaitForSingleObject`: nesne isaretlendi (surec bitti).
+const WAIT_OBJECT_0: usize = 0;
+/// `WaitForSingleObject`: sure doldu.
+const WAIT_TIMEOUT: usize = 0x102;
+/// `WaitForSingleObject`: tutamac gecersiz.
+const WAIT_FAILED: usize = 0xFFFF_FFFF;
 
 /// Tampon yetmedi -- `GetModuleFileNameA` kirptiginda birakir.
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
@@ -475,7 +509,18 @@ fn dispatch_win32_api(frame: &mut SyscallFrame) {
 
         NT_WIN32_CLOSE_HANDLE => {
             // CloseHandle(HANDLE) -> BOOL
+            //
+            // Windows'ta tek bir `CloseHandle` her tur nesneyi kapatir --
+            // dosya, surec, olay. TCMK'de ayrim tutamacin en ust bitinde
+            // (bkz. `PROCESS_HANDLE_FLAG`), cunku iki tur ayni sayi
+            // araligini kullaniyor.
+            //
+            // Surec tutamacini kapatmak **basarili bir no-op**: TCMK'de
+            // nesne sayaci yok, gorev yuvasi zaten cikista geri veriliyor.
+            // Hata dondurmek, tutamacini duzgunce kapatan bir programi
+            // yaniltirdi.
             match arg(args, 0) {
+                Some(handle) if handle as usize & PROCESS_HANDLE_FLAG != 0 => WIN32_TRUE,
                 Some(handle) => match kernel_api::close(handle) {
                     Ok(()) => WIN32_TRUE,
                     Err(_) => WIN32_FALSE,
@@ -1190,6 +1235,213 @@ fn dispatch_win32_api(frame: &mut SyscallFrame) {
             }
         }
 
+        // CreateProcessA(lpApplicationName, lpCommandLine, ...,
+        //                lpProcessInformation) -> BOOL
+        //
+        // Bu cagriya kadar Win32 tarafi **surec yaratamiyordu**: POSIX'te
+        // `fork`/`execve` vardi, Windows tarafinda karsiligi yoktu. En
+        // buyuk asimetri buydu.
+        //
+        // Ve iki dunyanin en keskin ayrildigi yer de burasi:
+        //
+        //   POSIX  fork() + execve()  IKI cagri. Once surec ikiye ayrilir
+        //          (cocuk her seyi devralir), sonra imaj degistirilir.
+        //          Aradaki pencerede cocuk hala ebeveynin kodudur -- ve o
+        //          pencere kasitlidir: yonlendirme orada kurulur.
+        //
+        //   Win32  CreateProcess()    TEK cagri. Yaratma ve yukleme
+        //          ayrilmaz; "aradaki an" diye bir sey yoktur. Devralma
+        //          bu yuzden **parametrelerle** anlatilir
+        //          (bInheritHandles, STARTUPINFO).
+        //
+        // TCMK'de yol `launcher::spawn_user_app_id`e iniyor: yeni gorev
+        // yuvasi acilir, ebeveyni cagiran surectir, ve imaj bicimi
+        // **magic'ten** secilir. Yani `CreateProcessA` ile bir **ELF**
+        // baslatmak da mumkun -- projenin butun iddiasi tek satirda.
+        //
+        // Desteklenmeyenler bilerek yok sayiliyor: guvenlik
+        // tanimlayicilari, oncelik siniflari, `STARTUPINFO` (TCMK'de
+        // pencere/konsol devralma kavrami yok).
+        NT_CREATE_PROCESS_A => {
+            let mut path_storage = [0u8; PATH_MAX];
+            let mut line_storage = [0u8; PATH_MAX];
+
+            // Windows iki ad alani kabul eder: `lpApplicationName` (tam
+            // yol) ve `lpCommandLine` (ilk kelimesi program adi). Biri
+            // NULL olabilir; ikisi de doluysa ilki kazanir.
+            let application = arg_ptr(args, 0)
+                .filter(|p| *p != 0)
+                .and_then(|p| unsafe { copy_user_cstr(p, &mut path_storage) })
+                .map(|p| p.len())
+                .map(|len| normalize_win_path(&mut path_storage, len));
+            let command = arg_ptr(args, 1)
+                .filter(|p| *p != 0)
+                .and_then(|p| unsafe { copy_user_cstr(p, &mut line_storage) })
+                .map(|p| p.len());
+
+            let mut program = [0u8; PATH_MAX];
+            let mut program_len = 0usize;
+            let mut arguments = [0u8; PATH_MAX];
+            let mut arguments_len = 0usize;
+
+            match application {
+                Some(path) => {
+                    program_len = path.len().min(PATH_MAX);
+                    program[..program_len].copy_from_slice(&path.as_bytes()[..program_len]);
+                    // Komut satirinin tamami arguman olarak gecer.
+                    if let Some(len) = command {
+                        arguments_len = len.min(PATH_MAX);
+                        arguments[..arguments_len]
+                            .copy_from_slice(&line_storage[..arguments_len]);
+                    }
+                }
+                None => match command {
+                    Some(len) => {
+                        let line = normalize_win_path(&mut line_storage, len);
+                        // Ilk kelime program, kalani arguman.
+                        let (first, rest) = match line.find(' ') {
+                            Some(i) => (&line[..i], line[i + 1..].trim_start()),
+                            None => (line, ""),
+                        };
+                        program_len = first.len().min(PATH_MAX);
+                        program[..program_len]
+                            .copy_from_slice(&first.as_bytes()[..program_len]);
+                        arguments_len = rest.len().min(PATH_MAX);
+                        arguments[..arguments_len]
+                            .copy_from_slice(&rest.as_bytes()[..arguments_len]);
+                    }
+                    // Ne uygulama adi ne komut satiri verilmis:
+                    // `program_len` sifir kalir ve asagida yakalanir.
+                    None => {}
+                },
+            }
+
+            let program = core::str::from_utf8(&program[..program_len]).unwrap_or("");
+            let arguments = core::str::from_utf8(&arguments[..arguments_len]).unwrap_or("");
+
+            if program.is_empty() {
+                set_last_error(ERROR_INVALID_PARAMETER);
+                return_win32(frame, WIN32_FALSE);
+                return;
+            }
+            match crate::level0a::launcher::spawn_child_app(program, arguments) {
+                Ok(id) => {
+                    // `PROCESS_INFORMATION`: hProcess, hThread,
+                    // dwProcessId, dwThreadId. TCMK'de is parcacigi yok,
+                    // yani ikinci ikili birinciyle ayni deger -- bir
+                    // gorev = bir surec = bir akis.
+                    if let Some(info) = arg_ptr(args, 9) {
+                        let handle = id | PROCESS_HANDLE_FLAG;
+                        let width = core::mem::size_of::<usize>();
+                        if info != 0
+                            && mmu::is_user_accessible(info)
+                            && mmu::is_user_accessible(info + 2 * width + 7)
+                        {
+                            unsafe {
+                                (info as *mut usize).write_unaligned(handle);
+                                ((info + width) as *mut usize).write_unaligned(handle);
+                                ((info + 2 * width) as *mut u32).write_unaligned(id as u32);
+                                ((info + 2 * width + 4) as *mut u32)
+                                    .write_unaligned(id as u32);
+                            }
+                        }
+                    }
+                    WIN32_TRUE
+                }
+                Err(_) => {
+                    set_last_error(ERROR_FILE_NOT_FOUND);
+                    WIN32_FALSE
+                }
+            }
+        }
+
+        // WaitForSingleObject(hHandle, dwMilliseconds) -> DWORD
+        //
+        // POSIX `waitpid`in karsiligi, ama sozlesmesi farkli: donus
+        // **cikis kodu degil**, "ne oldu" bilgisidir (`WAIT_OBJECT_0` /
+        // `WAIT_TIMEOUT`). Cikis kodunu ogrenmek icin ayri bir cagri
+        // gerekir -- `waitpid`in tek cagride ikisini birden vermesinin
+        // tersi.
+        //
+        // TCMK yalnizca `INFINITE` ve sifir sureyi ayirt ediyor: ara
+        // degerler icin zamanlayicida "sureli bekleme" kavrami yok, ve
+        // beklenen sureyi uydurmak yaniltirdi.
+        NT_WAIT_FOR_SINGLE_OBJECT => {
+            let handle = arg(args, 0).unwrap_or(0) as usize;
+            let timeout = arg(args, 1).unwrap_or(0);
+            match handle.checked_sub(PROCESS_HANDLE_FLAG) {
+                None => {
+                    set_last_error(ERROR_INVALID_HANDLE);
+                    WAIT_FAILED
+                }
+                Some(task) => {
+                    // Bir surec nesnesi, surec **calismiyorken**
+                    // isaretlidir. Iki durum da buna girer: bitmis ama
+                    // toplanmamis (`Terminated`), ya da yuvasi coktan
+                    // geri verilmis (`Unused`). Ikincisini hata saymak
+                    // yanlis olurdu -- "cocugum bitti mi?" sorusunun
+                    // cevabi ikisinde de evet.
+                    let state = crate::level0a::core::scheduler::state_of(task);
+                    let signalled = matches!(
+                        state,
+                        crate::level0a::core::scheduler::TaskState::Terminated
+                            | crate::level0a::core::scheduler::TaskState::Unused
+                    );
+                    if signalled {
+                        // Bitmis ama toplanmamissa kodu simdi saklayalim:
+                        // sonraki `GetExitCodeProcess` icin tek sans bu.
+                        if state == crate::level0a::core::scheduler::TaskState::Terminated {
+                            remember_exit(task, crate::level0a::core::scheduler::exit_code_of(task));
+                        }
+                        WAIT_OBJECT_0
+                    } else if timeout == 0 {
+                        WAIT_TIMEOUT
+                    } else {
+                        if let Some(code) =
+                            crate::level0a::core::scheduler::wait_for_task(task)
+                        {
+                            remember_exit(task, code);
+                        }
+                        WAIT_OBJECT_0
+                    }
+                }
+            }
+        }
+
+        // GetExitCodeProcess(hProcess, lpExitCode) -> BOOL
+        //
+        // Surec hala calisiyorsa `STILL_ACTIVE` (259) yazilir. Windows'un
+        // bilinen tuzagi da budur: 259 ile cikan bir surec "hala
+        // calisiyor" gibi gorunur. TCMK bu davranisi **koruyor**, cunku o
+        // sayiyi ayikliyormus gibi yapmak, gercek Windows'ta calismayan
+        // bir varsayimi burada calisir kilardi.
+        NT_GET_EXIT_CODE_PROCESS => {
+            let handle = arg(args, 0).unwrap_or(0) as usize;
+            match (handle.checked_sub(PROCESS_HANDLE_FLAG), arg_ptr(args, 1)) {
+                (Some(task), Some(out)) if out != 0 && mmu::is_user_accessible(out) => {
+                    // Once beklemede saklanan kod; yoksa zamanlayiciya
+                    // bak. Sirasi onemli: bekleme yuvayi geri verdigi
+                    // icin zamanlayicida artik deger yok.
+                    let code = match remembered_exit(task) {
+                        Some(code) => code,
+                        None
+                            if crate::level0a::core::scheduler::state_of(task)
+                                == crate::level0a::core::scheduler::TaskState::Terminated =>
+                        {
+                            crate::level0a::core::scheduler::exit_code_of(task)
+                        }
+                        None => STILL_ACTIVE,
+                    };
+                    unsafe { (out as *mut u32).write_unaligned(code) };
+                    WIN32_TRUE
+                }
+                _ => {
+                    set_last_error(ERROR_INVALID_HANDLE);
+                    WIN32_FALSE
+                }
+            }
+        }
+
         // --- TCMKGUI.dll: pencere cagrilari ---
         NT_USER_CREATE_WINDOW_W32 => {
             // TcmkCreateWindow(lpTitle, x, y, cx, cy) -> HWND
@@ -1491,6 +1743,42 @@ fn store_out(block: usize, index: usize, value: u32) {
 /// NT cagrilarinin "cikti" degerini (handle, okunan bayt sayisi) cagirana
 /// bildirdigi register: i386'da EDX, x86_64'te RDX. Mimariden bagimsiz
 /// kalmasi icin tek yerde toplanmistir.
+/// Beklenmis bir cocugun cikis kodunu saklar.
+fn remember_exit(task: usize, code: u32) {
+    if task < crate::level0a::core::scheduler::MAX_TASKS {
+        REAPED_EXIT[task].store(code, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Saklanmis cikis kodu -- yoksa `None`.
+fn remembered_exit(task: usize) -> Option<u32> {
+    if task >= crate::level0a::core::scheduler::MAX_TASKS {
+        return None;
+    }
+    match REAPED_EXIT[task].load(core::sync::atomic::Ordering::Relaxed) {
+        u32::MAX => None,
+        code => Some(code),
+    }
+}
+
+/// Yeni bir imaj bu yuvaya gelince eski kaydi sil.
+///
+/// Yuvalar geri kazanildigi icin sart: aksi halde yeni bir surecin
+/// tutamaci, ayni numarali onceki surecin cikis kodunu gorurdu.
+pub fn clear_reaped_exit(task: usize) {
+    if task < crate::level0a::core::scheduler::MAX_TASKS {
+        REAPED_EXIT[task].store(u32::MAX, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Win32 araligindan **erken** donmek icin.
+///
+/// Dagitici donus degerini bir `match` ifadesinden kuruyor, yani bir
+/// kolun ortasindan cikmak ancak boyle mumkun.
+fn return_win32(frame: &mut SyscallFrame, value: usize) {
+    frame.set_return(value);
+}
+
 #[cfg(target_arch = "x86")]
 fn set_out(frame: &mut SyscallFrame, value: usize) {
     frame.edx = value as u32;

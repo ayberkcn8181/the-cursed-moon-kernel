@@ -169,6 +169,33 @@ pub fn available() -> &'static [(&'static str, &'static str, &'static str)] {
 
 /// Bir uygulamayi yeni bir gorevde Ring 3'te baslatir.
 pub fn spawn_user_app(path: &str, args: &str) -> Result<(), &'static str> {
+    spawn_user_app_id(path, args).map(|_| ())
+}
+
+/// Ayni is, ama **gorev kimligini** dondurur.
+///
+/// Kabuk icin kimlik gereksizdi (`run` yalnizca "basladi" der), ama
+/// Win32'nin `CreateProcess`i onu dondurmek **zorunda**: cagiran hemen
+/// `PROCESS_INFORMATION` yapisini dolduracak ve sonra o kimlikle
+/// bekleyecek. POSIX'te ayni bilgi `fork`un donus degeriyle gelir.
+pub fn spawn_user_app_id(path: &str, args: &str) -> Result<usize, &'static str> {
+    spawn_inner_app(path, args, false)
+}
+
+/// **Beklenebilir** cocuk olarak baslatir (Win32 `CreateProcess`).
+///
+/// Fark cikis kodunun omrunde: siradan bir `run` sonrasinda launcher
+/// yuvayi hemen geri veriyor, cunku kimse kodu sormayacak. Windows'ta
+/// ise tutamac acikken cikis kodu **yasamak zorunda** --
+/// `GetExitCodeProcess` surec bittikten sonra cagrilir.
+///
+/// POSIX tarafinda ayni isaret `fork` icin kullaniliyor; iki dunyanin
+/// "cocuk kodunu ebeveyn toplar" kurali burada ayni mekanizmaya iniyor.
+pub fn spawn_child_app(path: &str, args: &str) -> Result<usize, &'static str> {
+    spawn_inner_app(path, args, true)
+}
+
+fn spawn_inner_app(path: &str, args: &str, waitable: bool) -> Result<usize, &'static str> {
     let mut found = [0u8; MAX_PATH];
     let (resolved, task_name) =
         resolve(path, &mut found).ok_or("bilinmeyen uygulama ('apps'/'ls' ile listeleyin)")?;
@@ -201,9 +228,14 @@ pub fn spawn_user_app(path: &str, args: &str) -> Result<(), &'static str> {
         Ok(())
     })?;
 
-    let id = scheduler::spawn(task_name, app_task).ok_or("gorev olusturulamadi")?;
+    let id = if waitable {
+        scheduler::spawn_child(task_name, app_task)
+    } else {
+        scheduler::spawn(task_name, app_task)
+    }
+    .ok_or("gorev olusturulamadi")?;
     crate::level0b2::ipc::post(crate::level0b2::ipc::Kind::AppStart, id, 0, 0, task_name);
-    Ok(())
+    Ok(id)
 }
 
 /// Kuyruktaki yolu alir. Donen dilim static tabloyu gosterir; gorev onu

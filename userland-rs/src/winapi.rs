@@ -243,7 +243,79 @@ extern "system" {
     /// degil) -- `GetCurrentDirectoryA`dan farkli, ve bu Windows'un
     /// kendi tutarsizligi.
     pub fn GetModuleFileNameA(module: Handle, filename: *mut u8, size: Dword) -> Dword;
+
+    /// Yeni bir surec yaratir -- **tek cagride**.
+    ///
+    /// POSIX'te ayni is iki cagriyla yapilir (`fork` + `execve`) ve
+    /// aradaki pencere kasitlidir: cocuk bir sure ebeveynin kodudur ve
+    /// yonlendirme orada kurulur. Win32'de o an **yoktur**; devralma
+    /// parametrelerle anlatilir.
+    ///
+    /// TCMK'de imaj bicimi magic'ten secilir, yani bu cagriyla bir
+    /// **ELF** de baslatilabilir.
+    #[allow(clippy::too_many_arguments)]
+    pub fn CreateProcessA(
+        application_name: *const u8,
+        command_line: *const u8,
+        process_attributes: *mut c_void,
+        thread_attributes: *mut c_void,
+        inherit_handles: Bool,
+        creation_flags: Dword,
+        environment: *mut c_void,
+        current_directory: *const u8,
+        startup_info: *mut c_void,
+        process_information: *mut ProcessInformation,
+    ) -> Bool;
+
+    /// Nesne isaretlenene kadar bekler.
+    ///
+    /// POSIX `waitpid` ile ayni ise yarar ama sozlesmesi farkli: donus
+    /// **cikis kodu degil**, "ne oldu" bilgisidir. Kodu ogrenmek icin
+    /// ayri bir cagri gerekir.
+    ///
+    /// TCMK yalnizca [`INFINITE`] ile sifir sureyi ayirt eder.
+    pub fn WaitForSingleObject(handle: Handle, milliseconds: Dword) -> Dword;
+
+    /// Surecin cikis kodu; hala calisiyorsa [`STILL_ACTIVE`].
+    pub fn GetExitCodeProcess(process: Handle, exit_code: *mut Dword) -> Bool;
 }
+
+/// `CreateProcessA`nin doldurdugu yapi.
+///
+/// TCMK'de is parcacigi yok: `hThread`/`dwThreadId` alanlari surec
+/// degerleriyle **ayni** -- bir gorev = bir surec = bir akis.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ProcessInformation {
+    pub process: Handle,
+    pub thread: Handle,
+    pub process_id: Dword,
+    pub thread_id: Dword,
+}
+
+impl ProcessInformation {
+    pub const fn new() -> Self {
+        ProcessInformation {
+            process: 0,
+            thread: 0,
+            process_id: 0,
+            thread_id: 0,
+        }
+    }
+}
+
+/// `WaitForSingleObject`: sonsuza kadar bekle.
+pub const INFINITE: Dword = 0xFFFF_FFFF;
+/// Nesne isaretlendi (surec bitti).
+pub const WAIT_OBJECT_0: Dword = 0;
+/// Sure doldu.
+pub const WAIT_TIMEOUT: Dword = 0x102;
+/// Surec hala calisiyor.
+///
+/// Windows'un bilinen tuzagi: 259 ile **cikan** bir surec de boyle
+/// gorunur. TCMK bu davranisi koruyor -- ayikliyormus gibi yapmak,
+/// gercek Windows'ta calismayan bir varsayimi burada calisir kilardi.
+pub const STILL_ACTIVE: Dword = 259;
 
 /// `SYSTEMTIME` -- Windows'un bolunmus zaman yapisi (sekiz `WORD`).
 #[repr(C)]

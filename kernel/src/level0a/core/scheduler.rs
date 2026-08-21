@@ -1113,16 +1113,37 @@ pub fn wait_for_task(child: usize) -> Option<u32> {
     // Bekleyen gorev `Waiting` durumunda oldugu icin zamanlanmaz; dongu
     // ancak cocuk bitince kirilir. Baska hicbir sey kosmuyorsa `yield_now`
     // idle'i secer, o da bir sonraki kesmeye kadar bekler.
+    // Dongu **iki** durumda kiriliyor ve ikincisi bir yaris sonucu:
+    //
+    //   Terminated  cocuk bitti, cikis kodu duruyor -- normal yol.
+    //   Unused      cocugu **baskasi** toplamis ve yuvayi geri vermis.
+    //               Launcher, baslattigi uygulama bitince bunu yapiyor.
+    //
+    // Ikincisi hesaba katilmazsa dongu sonsuza kadar `Terminated`
+    // bekler ve o durum bir daha hic gelmez -- bekleyen surec kilitlenir.
+    // Win32'nin `WaitForSingleObject`i eklendiginde tam olarak bu oldu:
+    // cocuk cikti, gunlukte "uygulama bitti" yazdi, ama bekleyen PE bir
+    // daha uyanmadi.
+    //
+    // Cikis kodu her turda saklaniyor: yuva serbest kalinca deger
+    // silinir, yani onu **gormusken** almak gerekiyor.
+    let mut last_code = 0u32;
     loop {
         yield_now();
-        if state_of(child) == TaskState::Terminated {
-            break;
+        match state_of(child) {
+            TaskState::Terminated => {
+                last_code = exit_code_of(child);
+                break;
+            }
+            TaskState::Unused => break,
+            _ => {}
         }
     }
 
-    let code = exit_code_of(child);
+    // Yuva hala bizdeyse geri ver; baskasi verdiyse `release_slot` zaten
+    // etkisiz.
     crate::arch::cpu::without_interrupts(|| release_slot(child));
-    Some(code)
+    Some(last_code)
 }
 
 /// `waitpid(-1)`: cagiranin **herhangi bir** cocugunu bekler.

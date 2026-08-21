@@ -43,3 +43,6 @@ GetCurrentProcessId@0 @30
 GetCurrentThreadId@0 @31
 SetEndOfFile@4 @32
 GetModuleFileNameA@12 @33
+CreateProcessA@40 @34
+WaitForSingleObject@8 @35
+GetExitCodeProcess@8 @36
