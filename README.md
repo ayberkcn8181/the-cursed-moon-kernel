@@ -16,6 +16,35 @@ Katmanlar (Ring donanim izolasyonuna dayanir):
 
 Roadmap ve teknik detaylar icin proje dokumantasyonuna bakin.
 
+## Su anki durum
+
+TCMK bugun **iki mimaride** (i386 + x86_64) aciliyor, **iki ikili
+bicimini** (ELF + PE) ayni cekirdekte calistiriyor ve grafik bir
+masaustu sunuyor.
+
+| | |
+|---|---|
+| Mimariler | i386 (Multiboot1, `int 0x80`) · x86_64 (Multiboot2, `syscall`) |
+| Ikili bicimleri | ELF32/ELF64 · PE32/PE32+ (ithal tablosu cozulur) |
+| POSIX cagrilari | 59 |
+| NT/Win32 cagrilari | 54 (`KERNEL32.dll` 33 ihracat + `TCMKGUI.dll`) |
+| Ring 3 uygulamalari | 25 ELF + 5 PE |
+| Kalici depolama | ATA PIO + MBR + TCMKFS (yazilabilir, i386) |
+| Kod | ~23 bin satir cekirdek + ~9,5 bin satir userland |
+
+Uyumluluk yuzeyi su alanlarda **iki ABI'de birden** kurulu: dosya
+sistemi (acma/okuma/yazma/kesme/gezinme/yeniden adlandirma), surec
+(`fork`/`execve`/`waitpid`/sinyaller), ortam degiskenleri, calisma
+dizini, program argumanlari, saat, `stat`, `PATH` aramasi ve
+is-parcacigi tabani (POSIX TLS / Windows TEB).
+
+Her yetenek QEMU'da **olculerek** dogrulanmistir: `probe` (11 sinav),
+`winprobe` (10), `bequest` (6), `nested` (4), `winenv` (4) gibi
+programlar sonucu hem ekrana hem seri gunluge yaziyor. Olcumler yol
+boyunca gercek hatalar buldu -- dolan VFS tablosu, `CreateFileA`'nin
+cevrilmeyen Windows yollari, `GDT` siniri, x86_64'te segment secicisinin
+taban MSR'sini silmesi -- ve her biri README'de kendi bolumunde yazili.
+
 **Tamamlanan fazlar:**
 
 | Faz | Icerik | Durum |
