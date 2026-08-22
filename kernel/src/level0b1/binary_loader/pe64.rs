@@ -72,9 +72,26 @@ pub enum PeError {
     ThunkAreaFull,
 }
 
+/// `GetProcAddress` icin ayrilan thunk sayisi.
+///
+/// Gercek Windows'ta sinir yok (DLL zaten bellekte). Burada her cagri
+/// yeni bir kod parcasi uretmek zorunda oldugu icin bir tavan gerekiyor;
+/// ayni fonksiyon tekrar istendiginde onbellekten donuluyor, yani sinir
+/// **farkli** fonksiyon sayisidir.
+const RUNTIME_THUNKS: usize = 16;
+
 pub struct LoadedImage {
     pub entry: u64,
     pub end: u64,
+    /// `GetProcAddress` icin ayrilan **calisma zamani thunk alani**.
+    ///
+    /// Ithal tablosundaki fonksiyonlarin thunk'lari yukleme aninda
+    /// uretilir. Ama bir program ithal etmedigi bir fonksiyonu
+    /// `GetProcAddress` ile isteyebilir -- gercek Windows'ta da tipik
+    /// olan budur (surum tespiti, gecikmeli baglama). O anda uretilecek
+    /// thunk'lar bu alana yazilir.
+    pub thunk_arena: u64,
+    pub thunk_arena_end: u64,
 }
 
 fn read_u16(image: &[u8], off: usize) -> Option<u16> {
@@ -198,9 +215,18 @@ pub fn load(image: &[u8]) -> Result<LoadedImage, PeError> {
         end = resolve_imports(load_base, size_of_image, import_rva, thunks_at)?;
     }
 
+    // Calisma zamani thunk alani. Imajin ve ithal thunk'larinin
+    // arkasina, yigindan **once** ayrilir; boylece `GetProcAddress`
+    // ihtiyac duydugunda yazacak yeri olur.
+    let arena = (end + 0xF) & !0xF;
+    let arena_end = arena + RUNTIME_THUNKS * dll::THUNK_SIZE;
+    let end = arena_end;
+
     Ok(LoadedImage {
         entry: (load_base + entry_rva) as u64,
         end: end as u64,
+        thunk_arena: arena as u64,
+        thunk_arena_end: arena_end as u64,
     })
 }
 

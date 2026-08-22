@@ -339,6 +339,31 @@ static KERNEL32: &[Export] = &[
         // lpArguments
         stack_bytes: 16,
     },
+    Export {
+        name: "GetModuleHandleA",
+        ordinal: 40,
+        service: nt::NT_GET_MODULE_HANDLE_A,
+        stack_bytes: 4,
+    },
+    Export {
+        name: "GetProcAddress",
+        ordinal: 41,
+        service: nt::NT_GET_PROC_ADDRESS,
+        // hModule, lpProcName
+        stack_bytes: 8,
+    },
+    Export {
+        name: "LoadLibraryA",
+        ordinal: 42,
+        service: nt::NT_LOAD_LIBRARY_A,
+        stack_bytes: 4,
+    },
+    Export {
+        name: "FreeLibrary",
+        ordinal: 43,
+        service: nt::NT_FREE_LIBRARY,
+        stack_bytes: 4,
+    },
 ];
 
 /// `TCMKGUI.dll` -- win32k cagrilarinin kullanici modundaki yuzu.
@@ -399,6 +424,34 @@ static DLLS: &[Dll] = &[
         exports: TCMKGUI,
     },
 ];
+
+/// Gomulu DLL'lerin sayisi -- modul tablosu bu kadar girdi tasir.
+pub fn count() -> usize {
+    DLLS.len()
+}
+
+/// `index`. DLL'in adi (`"KERNEL32.dll"` gibi).
+pub fn name_at(index: usize) -> Option<&'static str> {
+    DLLS.get(index).map(|d| d.name)
+}
+
+/// `index`. DLL'den ada gore ihracat cozer.
+pub fn resolve_in(index: usize, function: &str) -> Option<Export> {
+    DLLS.get(index)?
+        .exports
+        .iter()
+        .find(|e| e.name == function)
+        .copied()
+}
+
+/// `index`. DLL'den ordinale gore ihracat cozer.
+pub fn resolve_ordinal_in(index: usize, ordinal: u16) -> Option<Export> {
+    DLLS.get(index)?
+        .exports
+        .iter()
+        .find(|e| e.ordinal == ordinal)
+        .copied()
+}
 
 /// Bir DLL adi + fonksiyon adi ciftini cozer.
 ///

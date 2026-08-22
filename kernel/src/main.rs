@@ -143,6 +143,9 @@ static WINSEH_EXE: &[u8] = include_bytes!("../../userland/winseh.exe");
 /// Win32'nin komut satiri ve ortam blogu sozlesmesi.
 #[cfg(target_arch = "x86")]
 static WINARGV_EXE: &[u8] = include_bytes!("../../userland/winargv.exe");
+/// PEB ve modul tablosu: GetModuleHandleA / GetProcAddress.
+#[cfg(target_arch = "x86")]
+static WINMODS_EXE: &[u8] = include_bytes!("../../userland/winmods.exe");
 
 /// Linux (ELF64, x86_64) kullanici programi -- `tools/gen_hello_elf64.py`.
 /// Elle kodlanmis en kucuk ELF64: yukleyicinin dar yolunu sinar.
@@ -219,6 +222,8 @@ static WINPROBE_EXE64: &[u8] = include_bytes!("../../userland/winprobe.exe64");
 static WINSEH_EXE64: &[u8] = include_bytes!("../../userland/winseh.exe64");
 #[cfg(target_arch = "x86_64")]
 static WINARGV_EXE64: &[u8] = include_bytes!("../../userland/winargv.exe64");
+#[cfg(target_arch = "x86_64")]
+static WINMODS_EXE64: &[u8] = include_bytes!("../../userland/winmods.exe64");
 
 /// Kullanici programlarinin VFS uzerinden okudugu test dosyasi.
 static BOOT_MSG: &[u8] = b"/boot/msg.txt: VFS uzerinden okundu (RAMFS).\n";
@@ -260,6 +265,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/winprobe.exe", WINPROBE_EXE),
     ("/bin/winseh.exe", WINSEH_EXE),
     ("/bin/winargv.exe", WINARGV_EXE),
+    ("/bin/winmods.exe", WINMODS_EXE),
     ("/boot/msg.txt", BOOT_MSG),
 ];
 
@@ -297,6 +303,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/winprobe.exe", WINPROBE_EXE64),
     ("/bin/winseh.exe", WINSEH_EXE64),
     ("/bin/winargv.exe", WINARGV_EXE64),
+    ("/bin/winmods.exe", WINMODS_EXE64),
     ("/boot/msg.txt", BOOT_MSG),
 ];
 

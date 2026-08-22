@@ -27,8 +27,8 @@ masaustu sunuyor.
 | Mimariler | i386 (Multiboot1, `int 0x80`) · x86_64 (Multiboot2, `syscall`) |
 | Ikili bicimleri | ELF32/ELF64 · PE32/PE32+ (ithal tablosu cozulur) |
 | POSIX cagrilari | 60 (+ ELF yardimci vektoru) |
-| NT/Win32 cagrilari | 61 (`KERNEL32.dll` 39 ihracat + `TCMKGUI.dll`) |
-| Ring 3 uygulamalari | 26 ELF + 7 PE |
+| NT/Win32 cagrilari | 65 (`KERNEL32.dll` 43 ihracat + `TCMKGUI.dll`) |
+| Ring 3 uygulamalari | 26 ELF + 8 PE |
 | Kalici depolama | ATA PIO + MBR + TCMKFS (yazilabilir, i386) |
 | Kod | ~23 bin satir cekirdek + ~9,5 bin satir userland |
 
@@ -41,7 +41,7 @@ tabani (POSIX TLS / Windows TEB), **surec yaratma**
 (sinyaller -- SEH/VEH).
 
 Her yetenek QEMU'da **olculerek** dogrulanmistir: `probe` (16 sinav),
-`winprobe` (12), `winseh` (8), `quoted` (4), `winargv` (4), `bequest`
+`winprobe` (12), `winseh` (8), `winmods` (6), `quoted` (4), `winargv` (4), `bequest`
 (6), `nested` (4), `winenv` (4) gibi programlar sonucu hem ekrana hem
 seri gunluge yaziyor. Olcumler yol boyunca gercek hatalar buldu -- dolan
 VFS tablosu, `CreateFileA`'nin cevrilmeyen Windows yollari, `GDT`
@@ -2708,10 +2708,9 @@ tek bir kaynaga bakmak, ayrisma durumunu hic gormezdi.
 
 ### Bilerek yapilmayanlar
 
-* **PEB neredeyse bos.** Isaretci gecerli bir adres gosteriyor (yoksa onu
-  okuyan kod sifir adrese gider) ama icinde yalnizca `BeingDebugged = 0`
-  var. `ImageBaseAddress`, yuklu modul listesi ve isletim sistemi surum
-  alanlari yok.
+* ~~PEB neredeyse bos.~~ Artik dolu: `ImageBaseAddress`, modul listesi
+  ve surum alanlari var. Bkz.
+  [PEB ve modul tablosu](#peb-ve-modul-tablosu-getprocaddress-calisiyor).
 * ~~SEH zinciri kurulmuyor.~~ Artik kuruluyor: `ExceptionList`
   Windows'un istedigi gibi `-1` (zincir sonu) ile basliyor **ve** bir
   istisna gerceklestiginde zincir yurutuluyor. Bkz.
@@ -3880,6 +3879,107 @@ Hata Ring 0'dan gelirse bu bir cekirdek hatasidir; Level-0b2 Fallback
 Interface devreye girip sistemi guvenli duruma alir.
 
 Kabuktan `faults` komutu istatistikleri gosterir.
+
+## PEB ve modul tablosu: `GetProcAddress` calisiyor
+
+Yardimci vektorun Windows'taki karsiligi PEB'dir. Buraya kadar PEB
+yalnizca **vardi**: isaretci gecerli bir adres gosteriyordu ve icinde
+`BeingDebugged = 0` disinda bir sey yoktu. Artik surecin kendisi
+hakkindaki bilgi de orada, ve uzerine uc Win32 cagrisi kuruldu.
+
+```
+[winmods] A PEB imaj tabani:      gecti (PEB ve GetModuleHandleA ayni adresi veriyor)
+[winmods] B modul listesi:        gecti (halka kapali, ilk girdi surecin imaji)
+[winmods] C GetModuleHandleA:     gecti (kernel32 bulundu, uydurma bulunmadi)
+[winmods] D ithal edilmeyen cagri: gecti (uretilen thunk gercekten calisti)
+[winmods] E ayni adres:           gecti (ikinci cagri ayni adresi verdi)
+[winmods] F ordinal ile arama:    gecti (ordinal 3 ile ad ayni adresi verdi)
+```
+
+![PEB ve modul tablosu](docs/screenshot-modules.png)
+
+### D neden bu tablonun sebebi
+
+`Sleep`, `winmods.exe`in ithal tablosunda **yok** -- kaynak onu hic
+cagirmiyor. `GetProcAddress` yine de buluyor, ve donen adres
+cagrilabiliyor. Yani **ithal tablosu, calistirilabilir seylerin tamami
+degil**.
+
+Bu, gercek Windows yazilimlarinda siradan bir kaliptir: bir program yeni
+bir surumde gelen ya da istege bagli bir fonksiyonu calisma zamaninda
+arar, bulamazsa eski yolu kullanir. Ithal tablosuna koysaydi eski
+Windows'ta hic acilmazdi.
+
+TCMK'de diskte `KERNEL32.dll` diye bir dosya olmadigi icin bu, cekirdegin
+**o anda kod uretmesi** demek: istenen fonksiyon icin imajin arkasinda
+ayrilmis kucuk bir alana bir thunk yaziliyor (`RUNTIME_THUNKS` = 16).
+Ayni fonksiyon tekrar istenirse onbellekten donuluyor -- E sinavinin
+olctugu de bu, cunku Windows'un sozlesmesi "her cagri ayni adresi verir"
+ve programlar adresleri karsilastirir.
+
+### Baglantili liste, dizi degil
+
+Modul listesi Windows'ta bir `LIST_ENTRY` halkasidir: `PEB_LDR_DATA`
+icindeki bas hem ilk hem son girdiyi gosterir ve son girdinin `Flink`i
+basa doner. Diziye cevirmek kolay olurdu ama listeyi gezen gercek bir
+kod tam olarak bu halkayi yurur; kirmak onu sonsuz donguye ya da cop
+veriye goturur. B sinavi halkayi bastan yurumeyi ve **basa geri
+donmeyi** olcuyor.
+
+Uc liste de var (`InLoadOrder`, `InMemoryOrder`, `InInitializationOrder`)
+ve ucu de ayni girdileri farkli baglantilarla geziyor -- Windows'ta da
+oyle.
+
+### Yerlesim: TEB blogu 512 bayttan 1,5 KiB'a
+
+Butun bu yapilar yigin bolgesinin tepesinden ayrilan blokta duruyor:
+
+```text
+  0x000  TEB alanlari
+  0x100  istisna dagitim trampleni
+  0x180  PEB
+  0x2C0  PEB_LDR_DATA
+  0x300  LDR_DATA_TABLE_ENTRY x 3
+  0x450  modul adlari (UTF-16)
+```
+
+Modul adlarinin genis karakterli olmasi bir tercih degil: Windows'un
+`UNICODE_STRING`i oyle, ve uzunluk alani **bayt** cinsindendir --
+karakter degil. Bu, alanin en cok karistirilan tarafi.
+
+Kullanici yigini da 8 KiB'den 16'ya cikti. Iki sabit tuketici var: bu
+blok (1,5 KiB) ve bir istisna dagitiminda kurulan `EXCEPTION_RECORD` +
+`CONTEXT` cifti (x86_64'te ~1,4 KiB). Ikisi eski yiginin ucte birini
+yiyordu; buyutmek, programa kalan yeri sessizce daraltmamak icin.
+
+### Tanitici (HMODULE) ne, ne degil
+
+Gercek Windows'ta bir HMODULE, DLL'in yuklendigi **tabandir**. TCMK'de
+gomulu DLL'lerin imaji olmadigi icin etiketlenmis bir sayi kullaniliyor
+(`0x0D110000` araligi) -- kullanici bolgesine hic denk gelmeyen bir
+aralik seciliyor ki yanlislikla adres gibi kullanilirsa sessizce yanlis
+veri okumak yerine hemen hata versin.
+
+Surecin **kendi** imaji icin tanitici gercek bir adres: imaj bellekte
+duruyor, yani Windows'un sozlesmesi orada aynen gecerli. A sinavi bunu
+iki kaynagi karsilastirarak olcuyor -- biri PEB'den okunuyor, digeri
+cekirdege soruluyor.
+
+### Bilerek yapilmayanlar
+
+* **`LoadLibraryA` gercekten bir sey yuklemiyor.** Gomulu tabloda varsa
+  tanitici doner, yoksa hata; `GetModuleHandleA` ile ayni yere cikar.
+  Diskten PE okuyup eslemek ve basvuru sayaci tutmak ayri bir is.
+* **`FreeLibrary` basvuru sayaci tutmuyor**, yalnizca taniticiyi
+  dogrulayip TRUE doner.
+* **EXE ihracat yapamaz.** `GetProcAddress` surecin kendi imajina
+  sorulursa sifir doner; TCMK'nin ureticileri ihracat tablosu koymuyor
+  ve var gibi davranmak yaniltirdi.
+* **`ProcessParameters` sifir.** Komut satiri ve ortam blogu icin gercek
+  bir `RTL_USER_PROCESS_PARAMETERS` yapisi yok; ikisine de kendi
+  cagrilarindan ulasiliyor.
+* **Surec basina 16 calisma zamani thunk'i.** Sinir **farkli**
+  fonksiyon sayisidir; ayni fonksiyonu bin kez istemek bir yuva harcar.
 
 ## Yardimci vektor: cekirdegin programa kendisi hakkinda soyledigi
 

@@ -18,7 +18,14 @@ use crate::level0b1::binary_loader::{elf32, pe32};
 use crate::level0b1::binary_loader::{elf64, pe64};
 
 /// Ring 3 yigini icin ayrilan alan (kullanici bolgesinin tepesinde).
-const USER_STACK_SIZE: usize = 8 * 1024;
+///
+/// 8 KiB'den 16'ya cikti. Sebep, yiginin tepesindeki iki sabit
+/// tuketici: TEB blogu (PE sureclerinde 1,5 KiB -- artik PEB ve modul
+/// listesi de orada) ve bir istisna dagitiminda kurulan
+/// EXCEPTION_RECORD + CONTEXT cifti (x86_64'te ~1,4 KiB). Ikisi eski
+/// yiginin ucte birini yiyordu; bu, programa kalan yeri sessizce
+/// daraltmak demekti.
+const USER_STACK_SIZE: usize = 16 * 1024;
 /// Ring 3'ten kesme geldiginde CPU'nun gececegi cekirdek yigini.
 const KERNEL_STACK_SIZE: usize = 16 * 1024;
 
@@ -68,6 +75,9 @@ struct Prepared {
     phnum: usize,
     /// Imajin tabani -- iki formatta da yuklendigi en dusuk adres.
     base: usize,
+    /// `GetProcAddress` icin ayrilan thunk alani (yalnizca PE).
+    thunk_arena: usize,
+    thunk_arena_end: usize,
 }
 
 /// VFS'teki bir yoldan ikili calistirir; format magic baytlarindan secilir
@@ -160,6 +170,8 @@ unsafe fn detect_and_load(image: &[u8]) -> Result<Prepared, SpawnError> {
                     phentsize: 0,
                     phnum: 0,
                     base: crate::level0a::core::mmu::USER_MEM_START,
+                    thunk_arena: img.thunk_arena as usize,
+                    thunk_arena_end: img.thunk_arena_end as usize,
                 })
             }
             // Doc S.7: PE basarisiz olursa ELF'e geri dusulur.
@@ -174,6 +186,8 @@ unsafe fn detect_and_load(image: &[u8]) -> Result<Prepared, SpawnError> {
                     phentsize: img.phentsize as usize,
                     phnum: img.phnum as usize,
                     base: img.base as usize,
+                    thunk_arena: 0,
+                    thunk_arena_end: 0,
                 });
             }
         }
@@ -189,6 +203,8 @@ unsafe fn detect_and_load(image: &[u8]) -> Result<Prepared, SpawnError> {
         phentsize: img.phentsize as usize,
         phnum: img.phnum as usize,
         base: img.base as usize,
+        thunk_arena: 0,
+        thunk_arena_end: 0,
     })
 }
 
@@ -208,6 +224,8 @@ unsafe fn detect_and_load(image: &[u8]) -> Result<Prepared, SpawnError> {
                     phentsize: 0,
                     phnum: 0,
                     base: crate::level0a::core::mmu::USER_MEM_START,
+                    thunk_arena: img.thunk_arena as usize,
+                    thunk_arena_end: img.thunk_arena_end as usize,
                 })
             }
             Err(pe_err) => {
@@ -224,6 +242,8 @@ unsafe fn detect_and_load(image: &[u8]) -> Result<Prepared, SpawnError> {
                     phentsize: img.phentsize,
                     phnum: img.phnum,
                     base: img.base,
+                    thunk_arena: 0,
+                    thunk_arena_end: 0,
                 });
             }
         }
@@ -242,6 +262,8 @@ unsafe fn detect_and_load(image: &[u8]) -> Result<Prepared, SpawnError> {
         phentsize: img.phentsize,
         phnum: img.phnum,
         base: img.base,
+        thunk_arena: 0,
+        thunk_arena_end: 0,
     })
 }
 
@@ -282,7 +304,16 @@ fn remember_program(task: usize, program: &str) {
 
 /// Calisan surecin imaj yolu (Win32 `GetModuleFileNameA`).
 pub fn program_path() -> &'static str {
-    let slot = scheduler::current_id() % scheduler::MAX_TASKS;
+    program_path_of(scheduler::current_id())
+}
+
+/// Belirli bir gorevin imaj yolu.
+///
+/// Modul tablosu bunu ister: PEB kurulurken **hangi** gorev icin
+/// kuruldugu bilinir, ama o gorev henuz calisiyor olmayabilir (bir
+/// cocuk icin kuruluyor olabilir).
+pub fn program_path_of(task: usize) -> &'static str {
+    let slot = task % scheduler::MAX_TASKS;
     let len = PROGRAM_LEN[slot].load(core::sync::atomic::Ordering::Relaxed);
     unsafe {
         let base = (core::ptr::addr_of!(PROGRAM_PATH) as *const u8).add(slot * PROGRAM_PATH_MAX);
@@ -627,6 +658,30 @@ unsafe fn enter_ring3(
     // **sonra** yapiliyordu ve taze tabani siliyordu. Sonuc, PE'nin ilk
     // `fs:[0x18]` okumasinda 0x18 adresine sayfa hatasiydi.
     crate::level0a::core::tls::reset(task);
+
+    // Modul tablosu TEB'den **once** kurulmali: PEB yerlesimi imaj
+    // tabanini ve boyunu oradan okuyor.
+    match prepared.format {
+        #[cfg(target_arch = "x86")]
+        BinaryFormat::Pe32 => crate::level0b1::nt_subsystem::modules::set_image(
+            task,
+            prepared.base,
+            prepared.end - prepared.base,
+            prepared.entry,
+            prepared.thunk_arena,
+            prepared.thunk_arena_end,
+        ),
+        #[cfg(target_arch = "x86_64")]
+        BinaryFormat::Pe32Plus => crate::level0b1::nt_subsystem::modules::set_image(
+            task,
+            prepared.base,
+            prepared.end - prepared.base,
+            prepared.entry,
+            prepared.thunk_arena,
+            prepared.thunk_arena_end,
+        ),
+        _ => crate::level0b1::nt_subsystem::modules::reset(task),
+    }
 
     let stack_top = match prepared.format {
         #[cfg(target_arch = "x86")]

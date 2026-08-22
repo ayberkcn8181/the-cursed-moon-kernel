@@ -37,6 +37,10 @@ name = "winprobe"
 path = "src/win/probe.rs"
 
 [[bin]]
+name = "winmods"
+path = "src/win/modules.rs"
+
+[[bin]]
 name = "winargv"
 path = "src/win/argv.rs"
 

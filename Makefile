@@ -219,7 +219,7 @@ USER_APPS := hello paint plasma crash hog spin notes menu twins relay echo2 sigd
 # imaji yuklerken taban yeniden yerlesimi uygular -- gercek bir Windows
 # programinda oldugu gibi.
 WIN_TARGET_DIR := $(TARGET_DIR)/userland-win
-WIN_APPS := winclock winpad winfiles winenv winprobe winseh winargv
+WIN_APPS := winclock winpad winfiles winenv winprobe winseh winargv winmods
 
 # Ithal kutuphaneleri (Faz 7b). Ortada gercek bir DLL YOKTUR: bunlar
 # yalnizca baglayiciya "bu adlar KERNEL32.dll'den gelecek" demenin
@@ -293,7 +293,7 @@ userland-win: $(WIN_LIB_DIR)/stamp
 # kullanici bolgesinin cok uzerindedir, yani yeniden yerlesim burada
 # **zorunludur**: delta negatiftir ve butun DIR64 girdileri duzeltilir.
 WIN64_TARGET_DIR := $(TARGET_DIR)/userland-win64
-WIN64_APPS := winclock winpad winfiles winenv winprobe winseh winargv
+WIN64_APPS := winclock winpad winfiles winenv winprobe winseh winargv winmods
 
 userland-win64: $(WIN_LIB_DIR)/stamp64
 	@mkdir -p $(ROOT_DIR)/userland

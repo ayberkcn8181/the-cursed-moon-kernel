@@ -49,3 +49,7 @@ GetExitCodeProcess@8 @36
 AddVectoredExceptionHandler@8 @37
 RemoveVectoredExceptionHandler@4 @38
 RaiseException@16 @39
+GetModuleHandleA@4 @40
+GetProcAddress@8 @41
+LoadLibraryA@4 @42
+FreeLibrary@4 @43

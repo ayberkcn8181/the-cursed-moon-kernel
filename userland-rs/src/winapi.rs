@@ -307,7 +307,60 @@ extern "system" {
         argument_count: Dword,
         arguments: *const usize,
     );
+
+    /// Yuklu bir modulun taniticisi. `NULL` verilirse surecin **kendi**
+    /// imaj tabani doner.
+    ///
+    /// Yuklu **olmayan** bir DLL'i yuklemez, yalnizca bakar; yoksa NULL
+    /// ve `GetLastError` = `ERROR_MOD_NOT_FOUND` (126).
+    pub fn GetModuleHandleA(module_name: *const u8) -> Hmodule;
+
+    /// Bir fonksiyonun adresi.
+    ///
+    /// `proc_name`in ust 16 biti sifirsa Windows onu **ordinal** sayar
+    /// (`MAKEINTRESOURCE`). [`proc_address_by_ordinal`] bunu kullanir.
+    ///
+    /// Ithal tablosunda olmayan bir fonksiyon da bulunabilir: cekirdek
+    /// istendigi anda bir thunk uretir. Ayni fonksiyon tekrar istenirse
+    /// **ayni** adres doner -- programlar bunu karsilastirma icin
+    /// kullanir.
+    pub fn GetProcAddress(module: Hmodule, proc_name: *const u8) -> *const c_void;
+
+    /// TCMK'de yuklenecek bir dosya yok: gomulu tabloda varsa tanitici
+    /// doner, yoksa NULL. Yani [`GetModuleHandleA`] ile ayni yere cikar.
+    pub fn LoadLibraryA(file_name: *const u8) -> Hmodule;
+
+    /// Basvuru sayaci olmadigi icin serbest birakilacak bir sey yok;
+    /// gecerli bir tanitici icin yine de TRUE doner.
+    pub fn FreeLibrary(module: Hmodule) -> Bool;
 }
+
+/// Modul taniticisi. Gercek Windows'ta DLL'in yuklendigi tabandir;
+/// TCMK'de gomulu DLL'ler icin etiketlenmis bir sayidir (ortada imaj
+/// yok). Surecin **kendi** imaji icin gercek bir adrestir.
+pub type Hmodule = *const c_void;
+
+/// `GetProcAddress`in ordinal bicimi.
+///
+/// Windows'un `MAKEINTRESOURCE` numarasi: ust 16 bit sifirsa deger ad
+/// degil sira numarasi sayilir. Gercek DLL'lerde ordinal-only
+/// ihracatlar vardir ve tek erisim yolu budur.
+///
+/// # Safety
+/// `module` gecerli bir tanitici olmalidir.
+pub unsafe fn proc_address_by_ordinal(module: Hmodule, ordinal: u16) -> *const c_void {
+    GetProcAddress(module, ordinal as usize as *const u8)
+}
+
+/// `GetModuleHandleA(NULL)` -- surecin kendi imaj tabani.
+pub fn image_base() -> Hmodule {
+    unsafe { GetModuleHandleA(core::ptr::null()) }
+}
+
+/// `ERROR_MOD_NOT_FOUND`
+pub const ERROR_MOD_NOT_FOUND: Dword = 126;
+/// `ERROR_PROC_NOT_FOUND`
+pub const ERROR_PROC_NOT_FOUND: Dword = 127;
 
 /// `CreateProcessA`nin doldurdugu yapi.
 ///

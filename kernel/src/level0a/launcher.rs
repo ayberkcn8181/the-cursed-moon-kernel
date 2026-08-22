@@ -146,6 +146,7 @@ static KNOWN_APPS: &[(&str, &str, &str)] = &[
     ("winprobe", "/bin/winprobe.exe", "winprobe"),
     ("winseh", "/bin/winseh.exe", "winseh"),
     ("winargv", "/bin/winargv.exe", "winargv"),
+    ("winmods", "/bin/winmods.exe", "winmods"),
 ];
 
 /// Kabuktan gelen adi tam yola ve gorev adina cevirir.

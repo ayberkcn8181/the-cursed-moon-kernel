@@ -32,7 +32,13 @@ use crate::level0a::core::mmu;
 use crate::level0a::kernel_api::{self, KernelError};
 use crate::level0a::{gui_api, wm};
 
+use super::modules;
 use super::seh;
+
+/// Gomulu DLL sayisi -- `FreeLibrary` taniticiyi dogrularken kullanir.
+fn dll_count() -> usize {
+    super::dll::count()
+}
 
 // --- Yurutucu (ntoskrnl) tablosu: NTSTATUS dondururler --------------
 pub const NT_TERMINATE_PROCESS: u32 = 0x1000;
@@ -106,6 +112,10 @@ pub const NT_RAISE_EXCEPTION: u32 = 0x302D;
 /// cagirir (bkz. `teb::emit_trampoline`). Gercek Windows'ta karsiligi
 /// `ntdll`nin ic `NtContinue` cagrisidir.
 pub const NT_CONTINUE_DISPATCH: u32 = 0x302E;
+pub const NT_GET_MODULE_HANDLE_A: u32 = 0x302F;
+pub const NT_GET_PROC_ADDRESS: u32 = 0x3030;
+pub const NT_LOAD_LIBRARY_A: u32 = 0x3031;
+pub const NT_FREE_LIBRARY: u32 = 0x3032;
 
 pub const NT_USER_CREATE_WINDOW_W32: u32 = 0x3010;
 pub const NT_GDI_GET_BITS_W32: u32 = 0x3011;
@@ -162,6 +172,10 @@ const ERROR_FILE_NOT_FOUND: u32 = 2;
 const ERROR_TOO_MANY_OPEN_FILES: u32 = 4;
 const ERROR_ACCESS_DENIED: u32 = 5;
 const ERROR_INVALID_HANDLE: u32 = 6;
+/// Istenen DLL yuklu degil (`GetModuleHandleA`/`LoadLibraryA`).
+const ERROR_MOD_NOT_FOUND: u32 = 126;
+/// DLL var ama fonksiyon yok (`GetProcAddress`).
+const ERROR_PROC_NOT_FOUND: u32 = 127;
 /// `FindNextFileA` dizin bittiginde bunu birakir -- Windows'ta dongunun
 /// **normal** sonlanma sebebi budur, gercek bir hata degildir.
 const ERROR_NO_MORE_FILES: u32 = 18;
@@ -1596,6 +1610,101 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
                 seh::fault_address(task)
             );
             kernel_api::exit_current_task(seh::STATUS_ACCESS_VIOLATION & 0xFF);
+        }
+
+        // --- Modul tablosu (bkz. `modules.rs`) ---
+
+        // GetModuleHandleA(lpModuleName) -> HMODULE
+        //
+        // NULL istenirse surecin **kendi** imaj tabani doner. Bu, gercek
+        // Windows'ta da en cok kullanilan bicimdir: kaynak yuklemek ya
+        // da kendi yolunu bulmak icin gerekir.
+        NT_GET_MODULE_HANDLE_A => {
+            let mut storage = [0u8; PATH_MAX];
+            let name = arg_ptr(args, 0)
+                .filter(|p| *p != 0)
+                .and_then(|p| unsafe { copy_user_cstr(p, &mut storage) });
+            let task = crate::level0a::core::scheduler::current_id();
+            let handle = modules::handle_for(task, name);
+            if handle == 0 {
+                set_last_error(ERROR_MOD_NOT_FOUND);
+            }
+            handle
+        }
+
+        // GetProcAddress(hModule, lpProcName) -> FARPROC
+        //
+        // `lpProcName`in ust 16 biti sifirsa Windows onu **ordinal**
+        // sayar (`MAKEINTRESOURCE`). Ayrimi burada yapmak sart: gercek
+        // DLL'lerde ordinal-only ihracatlar vardir ve adres olarak
+        // dereferans edilirse cop okunur.
+        NT_GET_PROC_ADDRESS => {
+            let handle = arg_ptr(args, 0).unwrap_or(0);
+            let raw = arg_ptr(args, 1).unwrap_or(0);
+            let task = crate::level0a::core::scheduler::current_id();
+
+            let mut storage = [0u8; PATH_MAX];
+            let (name, ordinal) = if raw != 0 && raw < 0x1_0000 {
+                (None, Some(raw as u16))
+            } else {
+                (
+                    unsafe { copy_user_cstr(raw, &mut storage) },
+                    None,
+                )
+            };
+            let address = unsafe { modules::proc_address(task, handle, name, ordinal) };
+            if address == 0 {
+                set_last_error(ERROR_PROC_NOT_FOUND);
+            }
+            address
+        }
+
+        // LoadLibraryA(lpLibFileName) -> HMODULE
+        //
+        // TCMK'de yuklenecek bir dosya yok: gomulu tabloda varsa
+        // tanitici doner, yoksa hata. Gercek Windows'ta fark, diskten
+        // okuyup eslemesi ve basvuru sayacini artirmasi -- burada ikisi
+        // de anlamsiz oldugu icin cagri `GetModuleHandleA` ile ayni yere
+        // cikiyor. Bu bilincli bir sadelestirme, gizlenen bir eksiklik
+        // degil.
+        NT_LOAD_LIBRARY_A => {
+            let mut storage = [0u8; PATH_MAX];
+            let name = arg_ptr(args, 0)
+                .filter(|p| *p != 0)
+                .and_then(|p| unsafe { copy_user_cstr(p, &mut storage) });
+            let task = crate::level0a::core::scheduler::current_id();
+            match name {
+                None => {
+                    set_last_error(ERROR_INVALID_PARAMETER);
+                    0
+                }
+                Some(name) => {
+                    let handle = modules::handle_for(task, Some(name));
+                    if handle == 0 {
+                        set_last_error(ERROR_MOD_NOT_FOUND);
+                    }
+                    handle
+                }
+            }
+        }
+
+        // FreeLibrary(hModule) -> BOOL
+        //
+        // Basvuru sayaci yok, yani serbest birakilacak bir sey de yok.
+        // Yine de gecerli bir tanitici icin TRUE donmeli: cagiran bunu
+        // temizlik yolunda kontrol eder.
+        NT_FREE_LIBRARY => {
+            let handle = arg_ptr(args, 0).unwrap_or(0);
+            let task = crate::level0a::core::scheduler::current_id();
+            let known = handle != 0
+                && (handle == modules::image_base(task)
+                    || (0..dll_count()).any(|i| modules::synthetic_handle(i) == handle));
+            if known {
+                WIN32_TRUE
+            } else {
+                set_last_error(ERROR_INVALID_HANDLE);
+                WIN32_FALSE
+            }
         }
 
         // --- TCMKGUI.dll: pencere cagrilari ---

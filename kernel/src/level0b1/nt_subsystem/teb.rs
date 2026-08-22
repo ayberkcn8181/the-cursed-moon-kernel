@@ -34,15 +34,41 @@
 
 use crate::level0a::core::scheduler;
 
-/// Yigin bolgesinin tepesinden TEB icin ayrilan yer.
+/// Yigin bolgesinin tepesinden TEB (ve arkasindaki yapilar) icin
+/// ayrilan yer.
 ///
-/// Tam sayfa degil: TCMK'nin doldurdugu alanlar `0x68`e kadar, PEB de
-/// ayni blogun icinde. Kullanici yigini 8 KiB oldugu icin bir sayfa
-/// ayirmak yiginin yarisini yemek olurdu.
-pub const RESERVE: usize = 512;
+/// Blok yalnizca TEB degil; Windows'un surece bakan **butun** yuzu
+/// burada duruyor:
+///
+/// ```text
+///   0x000  TEB alanlari
+///   0x100  istisna dagitim trampleni
+///   0x180  PEB
+///   0x2C0  PEB_LDR_DATA
+///   0x300  LDR_DATA_TABLE_ENTRY x 3
+///   0x450  modul adlari (UTF-16)
+/// ```
+///
+/// 512 bayttan 1536'ya cikti: modul listesi olmadan `GetModuleHandleA`
+/// ve `GetProcAddress` yazilamazdi, ve o yapilar tek basina 512 baytin
+/// uzerinde.
+pub const RESERVE: usize = 0x600;
 
 /// TEB icindeki PEB'in yeri.
 const PEB_OFFSET: usize = 0x180;
+/// Modul listesinin basligi (`PEB_LDR_DATA`).
+const LDR_OFFSET: usize = 0x2C0;
+/// Modul girdilerinin (`LDR_DATA_TABLE_ENTRY`) basi.
+const LDR_ENTRIES_OFFSET: usize = 0x300;
+/// Bir modul girdisi icin ayrilan yer. x86_64'te yapi 0x68'e kadar
+/// uzuyor; 0x70 hem ona hem hizalamaya yetiyor.
+const LDR_ENTRY_STRIDE: usize = 0x70;
+/// Modul adlarinin (UTF-16) yazildigi alan.
+const NAMES_OFFSET: usize = 0x450;
+/// Bir modul adi icin ayrilan bayt (UTF-16, yani karakter basina 2).
+const NAME_STRIDE: usize = 0x60;
+/// Listede kac modul gorunur: surecin kendi imaji + gomulu DLL'ler.
+const MAX_MODULES: usize = 3;
 
 /// Istisna dagitim tramplenin yeri (ayrilmis alanin bos ortasi).
 ///
@@ -56,6 +82,67 @@ const TRAMPOLINE_OFFSET: usize = 0x100;
 //
 // Bu sayilar derlenmis Windows kodunun icine gomuludur: `mov eax,
 // fs:[0x18]` gibi. Degistirmek ikili uyumu bozar.
+/// PEB ve modul listesi alan ofsetleri -- bunlar da Windows ABI'sinin
+/// parcasi. Bir program `PEB->ImageBaseAddress` okurken tam olarak bu
+/// ofsete gider.
+#[cfg(target_arch = "x86")]
+mod peb_layout {
+    pub const BEING_DEBUGGED: usize = 0x02;
+    pub const IMAGE_BASE: usize = 0x08;
+    pub const LDR: usize = 0x0C;
+    pub const PROCESS_PARAMETERS: usize = 0x10;
+    pub const OS_MAJOR: usize = 0xA4;
+    pub const OS_MINOR: usize = 0xA8;
+    pub const OS_BUILD: usize = 0xAC;
+    pub const OS_PLATFORM_ID: usize = 0xB0;
+
+    // PEB_LDR_DATA
+    pub const LDR_LENGTH: usize = 0x00;
+    pub const LDR_INITIALIZED: usize = 0x04;
+    pub const LDR_IN_LOAD_ORDER: usize = 0x0C;
+    pub const LDR_IN_MEMORY_ORDER: usize = 0x14;
+    pub const LDR_IN_INIT_ORDER: usize = 0x1C;
+    pub const LDR_DATA_SIZE: usize = 0x24;
+
+    // LDR_DATA_TABLE_ENTRY
+    pub const ENTRY_IN_LOAD_ORDER: usize = 0x00;
+    pub const ENTRY_IN_MEMORY_ORDER: usize = 0x08;
+    pub const ENTRY_IN_INIT_ORDER: usize = 0x10;
+    pub const ENTRY_DLL_BASE: usize = 0x18;
+    pub const ENTRY_POINT: usize = 0x1C;
+    pub const ENTRY_SIZE_OF_IMAGE: usize = 0x20;
+    pub const ENTRY_FULL_NAME: usize = 0x24;
+    pub const ENTRY_BASE_NAME: usize = 0x2C;
+}
+
+#[cfg(target_arch = "x86_64")]
+mod peb_layout {
+    pub const BEING_DEBUGGED: usize = 0x02;
+    pub const IMAGE_BASE: usize = 0x10;
+    pub const LDR: usize = 0x18;
+    pub const PROCESS_PARAMETERS: usize = 0x20;
+    pub const OS_MAJOR: usize = 0x118;
+    pub const OS_MINOR: usize = 0x11C;
+    pub const OS_BUILD: usize = 0x120;
+    pub const OS_PLATFORM_ID: usize = 0x124;
+
+    pub const LDR_LENGTH: usize = 0x00;
+    pub const LDR_INITIALIZED: usize = 0x04;
+    pub const LDR_IN_LOAD_ORDER: usize = 0x10;
+    pub const LDR_IN_MEMORY_ORDER: usize = 0x20;
+    pub const LDR_IN_INIT_ORDER: usize = 0x30;
+    pub const LDR_DATA_SIZE: usize = 0x58;
+
+    pub const ENTRY_IN_LOAD_ORDER: usize = 0x00;
+    pub const ENTRY_IN_MEMORY_ORDER: usize = 0x10;
+    pub const ENTRY_IN_INIT_ORDER: usize = 0x20;
+    pub const ENTRY_DLL_BASE: usize = 0x30;
+    pub const ENTRY_POINT: usize = 0x38;
+    pub const ENTRY_SIZE_OF_IMAGE: usize = 0x40;
+    pub const ENTRY_FULL_NAME: usize = 0x48;
+    pub const ENTRY_BASE_NAME: usize = 0x58;
+}
+
 #[cfg(target_arch = "x86")]
 mod layout {
     pub const EXCEPTION_LIST: usize = 0x00;
@@ -117,12 +204,8 @@ pub unsafe fn install(task: usize, top: usize, bottom: usize) -> usize {
     put(layout::PEB, peb);
     ((teb + layout::LAST_ERROR) as *mut u32).write_unaligned(0);
 
-    // PEB: su an yalnizca varligi onemli (`BeingDebugged` = 0). Isaretci
-    // gecerli bir adres gostermeli, yoksa onu okuyan kod sifir adrese
-    // gider.
-    let _ = word;
-
     emit_trampoline(teb + TRAMPOLINE_OFFSET);
+    build_peb(task, teb, peb, word);
 
     TEB_ADDRESS[task % scheduler::MAX_TASKS]
         .store(teb, core::sync::atomic::Ordering::Relaxed);
@@ -240,4 +323,170 @@ pub fn store_last_error(task: usize, code: u32) {
         return;
     }
     unsafe { ((teb + layout::LAST_ERROR) as *mut u32).write_unaligned(code) };
+}
+
+
+/// PEB'i ve modul listesini kurar.
+///
+/// Buraya kadar PEB yalnizca **vardi**: isaretci gecerli bir adres
+/// gosteriyordu ve icinde `BeingDebugged = 0` disinda bir sey yoktu.
+/// Simdi surecin kendisi hakkindaki bilgi de orada:
+///
+/// ```text
+///   ImageBaseAddress   imaj nereye yuklendi
+///   Ldr                yuklu modullerin baglantili listesi
+///   OSMajorVersion..   isletim sistemi surumu
+/// ```
+///
+/// POSIX tarafinda ayni bilgiyi yardimci vektor (`auxv`) tasir -- ama
+/// orada baslangic yiginindaki gecici bir dizidir, burada surec boyunca
+/// duran bir yapi.
+///
+/// ## Baglantili liste, dizi degil
+///
+/// Modul listesi Windows'ta bir `LIST_ENTRY` halkasidir ve **halkanin
+/// basi listenin icindedir**: son girdinin `Flink`i basa doner. Bunu
+/// diziye cevirmek kolay olurdu ama bir Windows programi listeyi
+/// gezerken tam olarak bu halkayi yurur; kirmak, gezen kodu sonsuz
+/// donguye ya da cop veriye goturur.
+///
+/// # Safety
+/// `teb`/`peb` gecerli, Ring 3'e acik ve **sifirlanmis** olmalidir.
+unsafe fn build_peb(task: usize, teb: usize, peb: usize, word: usize) {
+    use super::modules;
+
+    let put = |at: usize, value: usize| ((at) as *mut usize).write_unaligned(value);
+    let put32 = |at: usize, value: u32| ((at) as *mut u32).write_unaligned(value);
+
+    let ldr = teb + LDR_OFFSET;
+    let base = modules::image_base(task);
+
+    ((peb + peb_layout::BEING_DEBUGGED) as *mut u8).write(0);
+    put(peb + peb_layout::IMAGE_BASE, base);
+    put(peb + peb_layout::LDR, ldr);
+    // `ProcessParameters` icin gercek bir yapi yok. Sifir birakmak,
+    // "yok" demenin dogru yolu: onu okuyan kod NULL kontrolu yapar.
+    put(peb + peb_layout::PROCESS_PARAMETERS, 0);
+    // Surum, `GetVersionExA`nin dondugu degerlerle **ayni** olmali;
+    // ayrisirsa iki kaynagi karsilastiran kod yanlis karar verir.
+    put32(peb + peb_layout::OS_MAJOR, 5);
+    put32(peb + peb_layout::OS_MINOR, 2);
+    put32(peb + peb_layout::OS_BUILD, 3790);
+    put32(peb + peb_layout::OS_PLATFORM_ID, 2);
+
+    put32(ldr + peb_layout::LDR_LENGTH, peb_layout::LDR_DATA_SIZE as u32);
+    ((ldr + peb_layout::LDR_INITIALIZED) as *mut u8).write(1);
+
+    // --- Modul girdileri ---
+    //
+    // Sira Windows'un gelenegiyle ayni: once surecin kendi imaji, sonra
+    // gomulu DLL'ler.
+    let mut program = [0u8; 64];
+    let path = crate::level0b1::process::program_path_of(task);
+    let path_len = path.len().min(program.len());
+    program[..path_len].copy_from_slice(&path.as_bytes()[..path_len]);
+    let path = core::str::from_utf8(&program[..path_len]).unwrap_or("");
+
+    let mut count = 0usize;
+    for index in 0..MAX_MODULES {
+        let entry = teb + LDR_ENTRIES_OFFSET + index * LDR_ENTRY_STRIDE;
+        let name_at = teb + NAMES_OFFSET + index * NAME_STRIDE;
+
+        let (full, short, dll_base, entry_point, size) = if index == 0 {
+            (
+                path,
+                modules::base_name(path),
+                base,
+                modules::image_entry(task),
+                modules::image_size(task),
+            )
+        } else {
+            match super::dll::name_at(index - 1) {
+                // Sentetik DLL'ler icin taban gercek bir adres degil
+                // (ortada imaj yok); giris noktasi ve boyu sifir.
+                Some(name) => (name, name, modules::synthetic_handle(index - 1), 0, 0),
+                None => break,
+            }
+        };
+
+        put(entry + peb_layout::ENTRY_DLL_BASE, dll_base);
+        put(entry + peb_layout::ENTRY_POINT, entry_point);
+        put32(entry + peb_layout::ENTRY_SIZE_OF_IMAGE, size as u32);
+        // `FullDllName` ve `BaseDllName` ayni tampona bakiyor: TCMK'de
+        // tam yol ile dosya adi arasindaki fark yalnizca baslangic
+        // noktasi.
+        let short_at = name_at + (full.len() - short.len()) * 2;
+        write_unicode_string(entry + peb_layout::ENTRY_FULL_NAME, name_at, full);
+        write_utf16(name_at, full);
+        write_unicode_string_at(entry + peb_layout::ENTRY_BASE_NAME, short_at, short);
+        count += 1;
+    }
+
+    // --- Halkalari kapat ---
+    //
+    // Uc liste de ayni girdileri farkli baglantilarla gezer. Baslari
+    // `PEB_LDR_DATA` icinde; son girdinin `Flink`i oraya doner.
+    let heads = [
+        (ldr + peb_layout::LDR_IN_LOAD_ORDER, peb_layout::ENTRY_IN_LOAD_ORDER),
+        (ldr + peb_layout::LDR_IN_MEMORY_ORDER, peb_layout::ENTRY_IN_MEMORY_ORDER),
+        (ldr + peb_layout::LDR_IN_INIT_ORDER, peb_layout::ENTRY_IN_INIT_ORDER),
+    ];
+    for (head, link) in heads {
+        if count == 0 {
+            // Bos halka: bas kendini gosterir.
+            put(head, head);
+            put(head + word, head);
+            continue;
+        }
+        for index in 0..count {
+            let node = teb + LDR_ENTRIES_OFFSET + index * LDR_ENTRY_STRIDE + link;
+            let next = if index + 1 < count {
+                teb + LDR_ENTRIES_OFFSET + (index + 1) * LDR_ENTRY_STRIDE + link
+            } else {
+                head
+            };
+            let prev = if index > 0 {
+                teb + LDR_ENTRIES_OFFSET + (index - 1) * LDR_ENTRY_STRIDE + link
+            } else {
+                head
+            };
+            put(node, next);
+            put(node + word, prev);
+        }
+        let first = teb + LDR_ENTRIES_OFFSET + link;
+        let last = teb + LDR_ENTRIES_OFFSET + (count - 1) * LDR_ENTRY_STRIDE + link;
+        put(head, first);
+        put(head + word, last);
+    }
+}
+
+/// `UNICODE_STRING`: uzunluk (bayt), kapasite, tampon.
+///
+/// Uzunluk **bayt** cinsindendir, karakter degil -- Windows'un en cok
+/// karistirilan alanlarindan biri.
+unsafe fn write_unicode_string(at: usize, buffer: usize, text: &str) {
+    write_unicode_string_at(at, buffer, text)
+}
+
+unsafe fn write_unicode_string_at(at: usize, buffer: usize, text: &str) {
+    let bytes = (text.len() * 2) as u16;
+    (at as *mut u16).write_unaligned(bytes);
+    ((at + 2) as *mut u16).write_unaligned(bytes + 2);
+    ((at + core::mem::size_of::<usize>()) as *mut usize).write_unaligned(buffer);
+}
+
+/// ASCII bir dizeyi UTF-16 olarak yazar (NUL sonlandirmali).
+///
+/// Windows'un modul adlari genis karakterlidir. Adlarimiz ASCII oldugu
+/// icin donusum her baytin ustune sifir eklemekten ibaret.
+unsafe fn write_utf16(at: usize, text: &str) {
+    let mut i = 0usize;
+    for byte in text.bytes() {
+        if (i + 1) * 2 >= NAME_STRIDE {
+            break;
+        }
+        ((at + i * 2) as *mut u16).write_unaligned(byte as u16);
+        i += 1;
+    }
+    ((at + i * 2) as *mut u16).write_unaligned(0);
 }
