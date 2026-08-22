@@ -13,6 +13,8 @@ const ELFDATA2LSB: u8 = 1;
 const ET_EXEC: u16 = 2;
 const EM_386: u16 = 3;
 const PT_LOAD: u32 = 1;
+/// Program baslik tablosunun kendisini tarif eden girdi.
+const PT_PHDR: u32 = 6;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -61,6 +63,17 @@ pub struct LoadedImage {
     pub entry: u32,
     /// Yuklenen en yuksek adres (yigin yerlesimi icin).
     pub end: u32,
+    /// Program basliklarinin **bellekteki** adresi -- eslenmemisse 0.
+    ///
+    /// Yardimci vektorun (`auxv`) `AT_PHDR` girdisi budur ve gercek bir
+    /// libc'nin ilk isi onu okumaktir: kendi ELF basliklarini bulup TLS
+    /// bolumunu, yigin korumasini ve dinamik bolumu oradan cikarir.
+    /// Dosyadaki ofset ise ise yaramaz -- surec dosyayi gormez.
+    pub phdr: u32,
+    pub phentsize: u32,
+    pub phnum: u32,
+    /// Yuklenen en dusuk adres (imajin tabani).
+    pub base: u32,
 }
 
 /// `image` icindeki ELF32'yi kullanici bellek bolgesine yukler.
@@ -73,6 +86,8 @@ pub fn load(image: &[u8]) -> Result<LoadedImage, ElfError> {
     let ehdr = read_ehdr(image)?;
 
     let mut highest: u32 = 0;
+    let mut lowest: u32 = 0;
+    let mut phdr_at: u32 = 0;
 
     for i in 0..ehdr.e_phnum as usize {
         let off = ehdr.e_phoff as usize + i * ehdr.e_phentsize as usize;
@@ -83,6 +98,12 @@ pub fn load(image: &[u8]) -> Result<LoadedImage, ElfError> {
         let phdr: Elf32Phdr =
             unsafe { core::ptr::read_unaligned(image.as_ptr().add(off) as *const Elf32Phdr) };
 
+        // PT_PHDR, program baslik tablosunun **bellekteki** adresini
+        // dogrudan soyler ve yetkili kaynak odur. Yoksa asagida
+        // segment ofsetinden hesaplanir.
+        if phdr.p_type == PT_PHDR {
+            phdr_at = phdr.p_vaddr as u32;
+        }
         if phdr.p_type != PT_LOAD || phdr.p_memsz == 0 {
             continue;
         }
@@ -120,6 +141,21 @@ pub fn load(image: &[u8]) -> Result<LoadedImage, ElfError> {
         if vend as u32 > highest {
             highest = vend as u32;
         }
+        if lowest == 0 || (vaddr as u32) < lowest {
+            lowest = vaddr as u32;
+        }
+
+        // Program baslik tablosu bu segmentin dosya araligina dusuyorsa
+        // bellekteki karsiligi hesaplanabilir. PT_PHDR yoksa standart
+        // yontem budur.
+        let table_end = ehdr.e_phoff as usize
+            + ehdr.e_phnum as usize * ehdr.e_phentsize as usize;
+        if phdr_at == 0
+            && (ehdr.e_phoff as usize) >= file_start
+            && table_end <= file_end
+        {
+            phdr_at = (vaddr + (ehdr.e_phoff as usize - file_start)) as u32;
+        }
     }
 
     if highest == 0 {
@@ -129,6 +165,10 @@ pub fn load(image: &[u8]) -> Result<LoadedImage, ElfError> {
     Ok(LoadedImage {
         entry: ehdr.e_entry,
         end: highest,
+        phdr: phdr_at,
+        phentsize: ehdr.e_phentsize as u32,
+        phnum: ehdr.e_phnum as u32,
+        base: lowest,
     })
 }
 

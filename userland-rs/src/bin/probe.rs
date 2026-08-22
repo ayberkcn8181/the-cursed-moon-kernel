@@ -52,6 +52,7 @@
 #![no_std]
 #![no_main]
 
+use tcmk::args;
 use tcmk::gui::Window;
 use tcmk::io::Stdout;
 use tcmk::sys;
@@ -99,7 +100,7 @@ fn result(check: &Check) -> &'static str {
 fn main() {
     use core::fmt::Write;
     let mut out = Stdout;
-    let mut checks = [EMPTY; 13];
+    let mut checks = [EMPTY; 16];
 
     // --- A: RAMFS dosyasi ---
     let file = sys::stat("/bin/browse");
@@ -428,6 +429,109 @@ fn main() {
         skipped: false,
     };
 
+    // --- N: yardimci vektor var mi ---
+    //
+    // `auxv`, cekirdegin programa "kendin hakkinda" soyledigi tek yer ve
+    // baslangic yiginindaki `environ`in NULL'undan sonra durur. Gercek
+    // bir libc'nin ilk isi burayi okumaktir; yoksa `main`e hic varilmaz.
+    let pagesz = args::auxv(args::at::PAGESZ);
+    let clktck = args::auxv(args::at::CLKTCK);
+    let n = pagesz == Some(4096) && clktck == Some(100);
+    checks[13] = Check {
+        name: "N auxv var",
+        detail: if pagesz.is_none() {
+            "vektor HIC yok"
+        } else if pagesz != Some(4096) {
+            "AT_PAGESZ yanlis"
+        } else if clktck != Some(100) {
+            "AT_CLKTCK PIT hiziyla uyusmuyor"
+        } else {
+            "AT_PAGESZ 4096, AT_CLKTCK 100"
+        },
+        passed: n,
+        skipped: false,
+    };
+
+    // --- O: AT_PHDR gercekten program basligini gosteriyor mu ---
+    //
+    // Sayinin dolu olmasi yetmez; **oradan okunan** seyin bir program
+    // basligi oldugu dogrulanmali. Ilk girdinin `p_type`i PT_LOAD (1)
+    // olmali ve girdi boyu mimarinin beklediginle esitse adres gercek
+    // demektir. Cekirdek dosyadaki ofseti verseydi bu sinav kalirdi.
+    // Dogrulama ELF'in **kendi** tanimina dayaniyor: tabloda PT_PHDR
+    // girdisi varsa `p_vaddr` alani tablonun bellekteki adresini
+    // soyler, ve o adres `AT_PHDR` ile ayni olmali. Cekirdek dosyadaki
+    // ofseti verseydi ikisi ayrisirdi.
+    const PT_PHDR: u32 = 6;
+    let phdr = args::auxv(args::at::PHDR).unwrap_or(0);
+    let phent = args::auxv(args::at::PHENT).unwrap_or(0);
+    let phnum = args::auxv(args::at::PHNUM).unwrap_or(0);
+    let expected_phent = if core::mem::size_of::<usize>() == 8 { 56 } else { 32 };
+    // PT_PHDR girdisini ara ve `p_vaddr`ini oku. Alan ofseti mimariye
+    // gore degisir: 32-bit'te 0x08, 64-bit'te 0x10.
+    let vaddr_offset = if core::mem::size_of::<usize>() == 8 { 0x10 } else { 0x08 };
+    let mut self_described = 0usize;
+    if phdr != 0 && phent == expected_phent {
+        for i in 0..phnum.min(16) {
+            let entry = phdr + i * phent;
+            let kind = unsafe { (entry as *const u32).read_unaligned() };
+            if kind == PT_PHDR {
+                self_described = unsafe {
+                    ((entry + vaddr_offset) as *const usize).read_unaligned()
+                };
+                break;
+            }
+        }
+    }
+    let o = phdr != 0 && phent == expected_phent && phnum > 0 && self_described == phdr;
+    checks[14] = Check {
+        name: "O AT_PHDR gercek",
+        detail: if phdr == 0 {
+            "AT_PHDR bos -- baslik eslenmemis"
+        } else if phent != expected_phent {
+            "AT_PHENT mimariyle uyusmuyor"
+        } else if self_described == 0 {
+            "tabloda PT_PHDR girdisi bulunamadi"
+        } else if o {
+            "PT_PHDR kendini AT_PHDR ile ayni yerde gosteriyor"
+        } else {
+            "PT_PHDR baska bir adres soyluyor"
+        },
+        passed: o,
+        skipped: false,
+    };
+
+    // --- P: isaretci tasiyan girdiler ---
+    //
+    // `AT_EXECFN` calistirilan dosyanin adini, `AT_RANDOM` 16 baytlik
+    // tohumu gosterir. Ikisi de yiginda durur ve okunabilmeleri gerekir.
+    // `AT_BASE` sifir olmali: dinamik yorumlayici yok, ve sifir "statik
+    // baglanmis" demenin dogru yolu.
+    let execfn = args::auxv(args::at::EXECFN).unwrap_or(0);
+    let random = args::auxv(args::at::RANDOM).unwrap_or(0);
+    let base = args::auxv(args::at::BASE);
+    let execfn_ok = execfn != 0 && unsafe { (execfn as *const u8).read() } == b'/';
+    let random_ok = random != 0 && {
+        // Onaltinin hepsi ayni degerse tohum uretilmemis demektir.
+        let first = unsafe { (random as *const u8).read() };
+        (1..16).any(|i| unsafe { (random as *const u8).add(i).read() } != first)
+    };
+    let p = execfn_ok && random_ok && base == Some(0);
+    checks[15] = Check {
+        name: "P auxv isaretcileri",
+        detail: if !execfn_ok {
+            "AT_EXECFN okunamadi"
+        } else if !random_ok {
+            "AT_RANDOM tohumu bos"
+        } else if base != Some(0) {
+            "AT_BASE sifir degil (yorumlayici yok)"
+        } else {
+            "EXECFN ve RANDOM dolu, BASE = 0"
+        },
+        passed: p,
+        skipped: false,
+    };
+
     for check in &checks {
         let _ = writeln!(
             out,
@@ -469,7 +573,7 @@ fn millis(spec: (usize, usize)) -> usize {
     spec.0 * 1000 + spec.1 / 1_000_000
 }
 
-fn draw(win: &mut Window, checks: &[Check; 13], system: &Option<sys::UtsName>) {
+fn draw(win: &mut Window, checks: &[Check; 16], system: &Option<sys::UtsName>) {
     let (w, h) = (win.width(), win.height());
     win.clear(BG);
     win.fill(0, 0, w, 22, PANEL);
@@ -493,7 +597,7 @@ fn draw(win: &mut Window, checks: &[Check; 13], system: &Option<sys::UtsName>) {
                 WARN
             },
         );
-        y += 15;
+        y += 14;
     }
 
     let passed = checks.iter().filter(|c| c.passed || c.skipped).count();

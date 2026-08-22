@@ -59,6 +59,15 @@ struct Prepared {
     entry: usize,
     end: usize,
     format: BinaryFormat,
+    /// ELF program basliklarinin bellekteki adresi ve olculeri.
+    ///
+    /// Yardimci vektorun (`auxv`) tasidigi bilgi; PE tarafinda karsiligi
+    /// yok, orada ayni soruya PEB cevap verir.
+    phdr: usize,
+    phentsize: usize,
+    phnum: usize,
+    /// Imajin tabani -- iki formatta da yuklendigi en dusuk adres.
+    base: usize,
 }
 
 /// VFS'teki bir yoldan ikili calistirir; format magic baytlarindan secilir
@@ -147,6 +156,10 @@ unsafe fn detect_and_load(image: &[u8]) -> Result<Prepared, SpawnError> {
                     entry: img.entry as usize,
                     end: img.end as usize,
                     format: BinaryFormat::Pe32,
+                    phdr: 0,
+                    phentsize: 0,
+                    phnum: 0,
+                    base: crate::level0a::core::mmu::USER_MEM_START,
                 })
             }
             // Doc S.7: PE basarisiz olursa ELF'e geri dusulur.
@@ -157,6 +170,10 @@ unsafe fn detect_and_load(image: &[u8]) -> Result<Prepared, SpawnError> {
                     entry: img.entry as usize,
                     end: img.end as usize,
                     format: BinaryFormat::Elf32,
+                    phdr: img.phdr as usize,
+                    phentsize: img.phentsize as usize,
+                    phnum: img.phnum as usize,
+                    base: img.base as usize,
                 });
             }
         }
@@ -168,6 +185,10 @@ unsafe fn detect_and_load(image: &[u8]) -> Result<Prepared, SpawnError> {
         entry: img.entry as usize,
         end: img.end as usize,
         format: BinaryFormat::Elf32,
+        phdr: img.phdr as usize,
+        phentsize: img.phentsize as usize,
+        phnum: img.phnum as usize,
+        base: img.base as usize,
     })
 }
 
@@ -183,6 +204,10 @@ unsafe fn detect_and_load(image: &[u8]) -> Result<Prepared, SpawnError> {
                     entry: img.entry as usize,
                     end: img.end as usize,
                     format: BinaryFormat::Pe32Plus,
+                    phdr: 0,
+                    phentsize: 0,
+                    phnum: 0,
+                    base: crate::level0a::core::mmu::USER_MEM_START,
                 })
             }
             Err(pe_err) => {
@@ -195,6 +220,10 @@ unsafe fn detect_and_load(image: &[u8]) -> Result<Prepared, SpawnError> {
                     entry: img.entry,
                     end: img.end,
                     format: BinaryFormat::Elf64,
+                    phdr: img.phdr,
+                    phentsize: img.phentsize,
+                    phnum: img.phnum,
+                    base: img.base,
                 });
             }
         }
@@ -209,6 +238,10 @@ unsafe fn detect_and_load(image: &[u8]) -> Result<Prepared, SpawnError> {
         entry: img.entry,
         end: img.end,
         format: BinaryFormat::Elf64,
+        phdr: img.phdr,
+        phentsize: img.phentsize,
+        phnum: img.phnum,
+        base: img.base,
     })
 }
 
@@ -286,11 +319,12 @@ pub fn command_line_ptr() -> usize {
 /// beklentisini bozardi -- Windows programi `argv` aramaz, Linux
 /// programi tek dize beklemez.
 unsafe fn build_start_stack(
-    format: BinaryFormat,
+    prepared: &Prepared,
     stack_top: usize,
     program: &str,
     args: &str,
 ) -> usize {
+    let format = prepared.format;
     let task = scheduler::current_id();
     COMMAND_LINE[task % scheduler::MAX_TASKS].store(0, core::sync::atomic::Ordering::Relaxed);
     // Imajin yolu her iki ABI'de de gerekli ama **farkli sekilde**:
@@ -305,7 +339,7 @@ unsafe fn build_start_stack(
         BinaryFormat::Pe32 => build_win32_command_line(task, stack_top, program, args),
         #[cfg(target_arch = "x86_64")]
         BinaryFormat::Pe32Plus => build_win32_command_line(task, stack_top, program, args),
-        _ => build_posix_stack(stack_top, program, args),
+        _ => build_posix_stack(prepared, stack_top, program, args),
     }
 }
 
@@ -343,7 +377,12 @@ unsafe fn build_win32_command_line(
 }
 
 /// POSIX: `argc`/`argv`/`envp`, SysV baslangic yigini duzeninde.
-unsafe fn build_posix_stack(stack_top: usize, program: &str, args: &str) -> usize {
+unsafe fn build_posix_stack(
+    prepared: &Prepared,
+    stack_top: usize,
+    program: &str,
+    args: &str,
+) -> usize {
     let word = core::mem::size_of::<usize>();
 
     // Once dizeler yiginin tepesine kopyalanir; isaretcileri saklanir.
@@ -394,11 +433,91 @@ unsafe fn build_posix_stack(stack_top: usize, program: &str, args: &str) -> usiz
         }
     }
 
+    // --- Yardimci vektor (auxv) ---
+    //
+    // Gercek bir Linux ikilisinin baslangic yigininda `envp`nin
+    // NULL'undan sonra `(tur, deger)` ciftleri gelir. Bu, cekirdegin
+    // programa "kendin hakkinda" soyledigi tek yerdir ve **kritiktir**:
+    // glibc'nin baslangic kodu `AT_PHDR`i okuyup kendi ELF basliklarini
+    // bulur, oradan TLS bolumunu ve dinamik bolumu cikarir. Vektor yoksa
+    // gercek bir libc daha `main`e varmadan coker.
+    //
+    // Windows tarafinda ayni soruya PEB cevap verir -- orada bilgi
+    // yiginda degil, bir segment tabanindan ulasilan **yapida** durur.
+    //
+    // Isaretci tasiyan girdiler (`AT_RANDOM`, `AT_EXECFN`, `AT_PLATFORM`)
+    // once yigina yazilir; cift dizisi onlarin adresini tasir.
+    let random_at = {
+        // 16 bayt: `AT_RANDOM` yigin koruyucusu ve `malloc` icin tohum
+        // olarak kullanilir. Kaynak zamanlayici tiki -- gercek bir
+        // entropi havuzu yok, ve bu README'de acikca yazili.
+        let ticks = crate::level0a::pit::ticks() as u32;
+        sp -= 16;
+        let at = sp;
+        for i in 0..16usize {
+            // Basit bir karistirma: her bayt tiktan ve konumdan
+            // turetilir. Ongorulebilir; kriptografik degil.
+            let byte = (ticks.rotate_left((i as u32 * 5) & 31) ^ (i as u32 * 0x9E)) as u8;
+            ((at + i) as *mut u8).write(byte);
+        }
+        at
+    };
+    let platform_at = place(
+        if word == 8 { "x86_64" } else { "i686" },
+        &mut sp,
+    );
+    let execfn_at = place(program, &mut sp);
+
     // Isaretci dizisi kelime hizali olmali.
     sp &= !(word - 1);
 
-    // [argc][argv0..argvN][NULL][envp0..envpM][NULL]
-    let words = 1 + count + 1 + env_count + 1;
+    // Girdiler: `AT_NULL` sonlandirici dahil.
+    const AT_NULL: usize = 0;
+    const AT_PHDR: usize = 3;
+    const AT_PHENT: usize = 4;
+    const AT_PHNUM: usize = 5;
+    const AT_PAGESZ: usize = 6;
+    const AT_BASE: usize = 7;
+    const AT_FLAGS: usize = 8;
+    const AT_ENTRY: usize = 9;
+    const AT_UID: usize = 11;
+    const AT_EUID: usize = 12;
+    const AT_GID: usize = 13;
+    const AT_EGID: usize = 14;
+    const AT_PLATFORM: usize = 15;
+    const AT_CLKTCK: usize = 17;
+    const AT_SECURE: usize = 23;
+    const AT_RANDOM: usize = 25;
+    const AT_EXECFN: usize = 31;
+
+    let auxv: [(usize, usize); 16] = [
+        (AT_PHDR, prepared.phdr),
+        (AT_PHENT, prepared.phentsize),
+        (AT_PHNUM, prepared.phnum),
+        (AT_PAGESZ, 4096),
+        // `AT_BASE` yorumlayicinin (`ld.so`) tabanidir, imajin degil.
+        // TCMK dinamik baglama yapmadigi icin sifir -- ve sifir, "statik
+        // baglanmis" demenin dogru yolu.
+        (AT_BASE, 0),
+        (AT_FLAGS, 0),
+        (AT_ENTRY, prepared.entry),
+        (AT_UID, 0),
+        (AT_EUID, 0),
+        (AT_GID, 0),
+        (AT_EGID, 0),
+        // `AT_SECURE` = 0: surec setuid degil, yani libc ortam
+        // degiskenlerine guvenebilir.
+        (AT_SECURE, 0),
+        // PIT 100 Hz'de kosuyor (bkz. `level0a::pit`); `times()` ve
+        // `sysconf(_SC_CLK_TCK)` bu sayiyi kullanir.
+        (AT_CLKTCK, 100),
+        (AT_PLATFORM, platform_at),
+        (AT_RANDOM, random_at),
+        (AT_EXECFN, execfn_at),
+    ];
+
+    // [argc][argv0..argvN][NULL][envp0..envpM][NULL][auxv...][AT_NULL,0]
+    let words = 1 + count + 1 + env_count + 1 + auxv.len() * 2 + 2;
     sp -= words * word;
     // x86_64 SysV: giriste yigin 16'ya hizali olmali.
     sp &= !15;
@@ -416,7 +535,18 @@ unsafe fn build_posix_stack(stack_top: usize, program: &str, args: &str) -> usiz
         ((sp + slot * word) as *mut usize).write(*pointer);
         slot += 1;
     }
+    // `envp` sonlandiricisi: yardimci vektor hemen ardindan basliyor.
     ((sp + slot * word) as *mut usize).write(0);
+    slot += 1;
+
+    for (kind, value) in auxv {
+        ((sp + slot * word) as *mut usize).write(kind);
+        ((sp + (slot + 1) * word) as *mut usize).write(value);
+        slot += 2;
+    }
+    // `AT_NULL` cifti vektoru bitirir.
+    ((sp + slot * word) as *mut usize).write(AT_NULL);
+    ((sp + (slot + 1) * word) as *mut usize).write(0);
     sp
 }
 
@@ -516,7 +646,7 @@ unsafe fn enter_ring3(
 
     // Argumanlar yiginin **tepesine** yerlestirilir; ESP onlarin altinda
     // baslar. Iki ABI'nin bicimi burada ayrisir (bkz. `build_start_stack`).
-    let sp = build_start_stack(prepared.format, stack_top, program, args);
+    let sp = build_start_stack(&prepared, stack_top, program, args);
     usermode::run_user_program(prepared.entry, sp);
 
     crate::println!("[LEVEL-0b1] Ring 3 programi sonlandi, Ring 0'a donuldu.");

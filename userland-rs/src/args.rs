@@ -50,6 +50,8 @@ static mut CMDLINE: [u8; CMDLINE_MAX] = [0; CMDLINE_MAX];
 /// sonra durur -- bu yuzden onu bulan yer de burasi. `env` modulu
 /// diziyi buradan okur.
 static ENVIRON: AtomicUsize = AtomicUsize::new(0);
+/// Yardimci vektorun basi (bkz. `auxv`).
+static AUXV: AtomicUsize = AtomicUsize::new(0);
 
 fn record(pointer: usize, length: usize) {
     let index = COUNT.load(Ordering::Relaxed);
@@ -90,12 +92,90 @@ pub unsafe fn init_posix(stack: *const usize) {
     // `environ`: argv'nin NULL sonlandiricisindan hemen sonrasi.
     // Konum **gercek** `argc`ye gore hesaplanir; MAX_ARGS budamasi
     // yalnizca kac argumani sakladigimizi etkiler, yigin duzenini degil.
-    ENVIRON.store(stack.add(1 + argc + 1) as usize, Ordering::Relaxed);
+    let environ = stack.add(1 + argc + 1);
+    ENVIRON.store(environ as usize, Ordering::Relaxed);
+
+    // Yardimci vektor: `environ`in NULL sonlandiricisindan sonrasi.
+    // Konumu ancak `environ` gezilerek bulunur, cunku ortam degisken
+    // sayisi baslangicta bilinmiyor.
+    //
+    // `read_volatile`: sifir arayan bu dongu, siradan bir okumayla
+    // yazildiginda LLVM tarafindan `wcslen` cagrisina cevriliyor (i386'da
+    // `usize` dort bayt, yani desen "genis karakter dizisinin sonunu bul"
+    // ile ayni). Baglayacak bir libc olmadigi icin ikili linklenmiyordu.
+    let mut walk = environ;
+    while walk.read_volatile() != 0 {
+        walk = walk.add(1);
+    }
+    AUXV.store(walk.add(1) as usize, Ordering::Relaxed);
 }
 
 /// POSIX `environ` dizisinin basi -- yoksa bos isaretci.
 pub fn environ() -> *const usize {
     ENVIRON.load(Ordering::Relaxed) as *const usize
+}
+
+/// Yardimci vektorden (`auxv`) bir girdiyi okur.
+///
+/// Bu, cekirdegin programa "kendin hakkinda" soyledigi tek yerdir ve
+/// gercek bir libc'nin ilk isi burayi okumaktir. `AT_PHDR`den yola
+/// cikip kendi ELF basliklarini bulur; oradan TLS bolumu, dinamik bolum
+/// ve yigin korumasi cikar.
+///
+/// Windows tarafinda karsiligi PEB'dir -- ama orada bilgi yiginda degil,
+/// bir segment tabanindan ulasilan **yapida** durur ve program onu
+/// istedigi zaman okuyabilir. `auxv` yalnizca **baslangicta**, yiginin
+/// o anki tepesinde vardir; kaciran bir daha bulamaz. `_start`in onu
+/// hemen yakalamasinin sebebi bu.
+pub fn auxv(kind: usize) -> Option<usize> {
+    let base = AUXV.load(Ordering::Relaxed) as *const usize;
+    if base.is_null() {
+        return None;
+    }
+    let mut i = 0usize;
+    // Vektor `AT_NULL` (0) ile biter. Ust sinir, bozuk bir yigin
+    // durumunda sonsuz donguye girmemek icin.
+    while i < 64 {
+        let entry = unsafe { base.add(i * 2).read() };
+        if entry == 0 {
+            return None;
+        }
+        if entry == kind {
+            return Some(unsafe { base.add(i * 2 + 1).read() });
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Yardimci vektor girdi turleri (Linux `elf.h` ile ayni sayilar).
+pub mod at {
+    /// Program basliklarinin **bellekteki** adresi.
+    pub const PHDR: usize = 3;
+    /// Bir program basliginin bayt olcusu.
+    pub const PHENT: usize = 4;
+    /// Kac program basligi var.
+    pub const PHNUM: usize = 5;
+    /// Sayfa boyu.
+    pub const PAGESZ: usize = 6;
+    /// Dinamik yorumlayicinin (`ld.so`) tabani -- statik baglamada 0.
+    pub const BASE: usize = 7;
+    /// Programin giris noktasi.
+    pub const ENTRY: usize = 9;
+    pub const UID: usize = 11;
+    pub const EUID: usize = 12;
+    pub const GID: usize = 13;
+    pub const EGID: usize = 14;
+    /// Mimari adi (`"i686"` / `"x86_64"`).
+    pub const PLATFORM: usize = 15;
+    /// Saniyedeki zamanlayici tiki.
+    pub const CLKTCK: usize = 17;
+    /// Surec setuid mi (0 = hayir).
+    pub const SECURE: usize = 23;
+    /// 16 baytlik tohum -- yigin koruyucusu buradan uretilir.
+    pub const RANDOM: usize = 25;
+    /// Calistirilan dosyanin adi.
+    pub const EXECFN: usize = 31;
 }
 
 /// Win32: `GetCommandLineA`nin dondugu tek dizeyi parcalara ayirir.

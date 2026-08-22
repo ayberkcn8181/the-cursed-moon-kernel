@@ -26,7 +26,7 @@ masaustu sunuyor.
 |---|---|
 | Mimariler | i386 (Multiboot1, `int 0x80`) · x86_64 (Multiboot2, `syscall`) |
 | Ikili bicimleri | ELF32/ELF64 · PE32/PE32+ (ithal tablosu cozulur) |
-| POSIX cagrilari | 60 |
+| POSIX cagrilari | 60 (+ ELF yardimci vektoru) |
 | NT/Win32 cagrilari | 61 (`KERNEL32.dll` 39 ihracat + `TCMKGUI.dll`) |
 | Ring 3 uygulamalari | 26 ELF + 7 PE |
 | Kalici depolama | ATA PIO + MBR + TCMKFS (yazilabilir, i386) |
@@ -40,7 +40,7 @@ tabani (POSIX TLS / Windows TEB), **surec yaratma**
 (`fork`/`execve` -- `CreateProcess`) ve **istisna dagitimi**
 (sinyaller -- SEH/VEH).
 
-Her yetenek QEMU'da **olculerek** dogrulanmistir: `probe` (13 sinav),
+Her yetenek QEMU'da **olculerek** dogrulanmistir: `probe` (16 sinav),
 `winprobe` (12), `winseh` (8), `quoted` (4), `winargv` (4), `bequest`
 (6), `nested` (4), `winenv` (4) gibi programlar sonucu hem ekrana hem
 seri gunluge yaziyor. Olcumler yol boyunca gercek hatalar buldu -- dolan
@@ -3880,6 +3880,64 @@ Hata Ring 0'dan gelirse bu bir cekirdek hatasidir; Level-0b2 Fallback
 Interface devreye girip sistemi guvenli duruma alir.
 
 Kabuktan `faults` komutu istatistikleri gosterir.
+
+## Yardimci vektor: cekirdegin programa kendisi hakkinda soyledigi
+
+Bir ELF baslarken yiginda yalnizca `argc`/`argv`/`envp` yoktur. `envp`nin
+NULL'undan sonra **yardimci vektor** (`auxv`) gelir: `(tur, deger)`
+ciftleri. Bu, cekirdegin programa "kendin hakkinda" soyledigi tek yerdir
+ve gercek bir libc icin **kritiktir** -- glibc'nin baslangic kodu
+`AT_PHDR`i okuyup kendi ELF basliklarini bulur, oradan TLS bolumunu,
+dinamik bolumu ve yigin koruyucusunu cikarir. Vektor yoksa `main`e hic
+varilmaz.
+
+```
+[probe] N auxv var:            gecti (AT_PAGESZ 4096, AT_CLKTCK 100)
+[probe] O AT_PHDR gercek:      gecti (PT_PHDR kendini AT_PHDR ile ayni yerde gosteriyor)
+[probe] P auxv isaretcileri:   gecti (EXECFN ve RANDOM dolu, BASE = 0)
+```
+
+Uretilen girdiler: `AT_PHDR`, `AT_PHENT`, `AT_PHNUM`, `AT_PAGESZ`,
+`AT_BASE`, `AT_FLAGS`, `AT_ENTRY`, `AT_UID`/`EUID`/`GID`/`EGID`,
+`AT_SECURE`, `AT_CLKTCK`, `AT_PLATFORM`, `AT_RANDOM`, `AT_EXECFN`.
+
+### O sinavi neden boyle yazildi
+
+Ilk surumde sinav "AT_PHDR'in gosterdigi yerdeki ilk girdi PT_LOAD mu"
+diye bakiyordu ve **kaldi** -- oysa adres dogruydu. Sebep, `rust-lld`in
+urettigi tablonun ilk girdisinin `PT_LOAD` degil `PT_PHDR` olmasi.
+
+Sinav artik ELF'in **kendi tanimina** dayaniyor: tabloda `PT_PHDR`
+girdisi varsa `p_vaddr` alani tablonun bellekteki adresini soyler, ve o
+adres `AT_PHDR` ile ayni olmali. Cekirdek dosyadaki ofseti verseydi
+ikisi ayrisirdi -- ki `auxv`de en sik yapilan hata tam olarak budur.
+
+Duzeltme cekirdege de girdi: yukleyici artik `PT_PHDR` varsa onu yetkili
+kaynak sayiyor, yoksa tabloyu iceren `PT_LOAD` segmentinin ofsetinden
+hesapliyor.
+
+### PEB ile ayni soru, baska cevap
+
+```text
+  POSIX   auxv    baslangic YIGININDA, (tur, deger) ciftleri
+  Win32   PEB     segment tabanindan ulasilan bir YAPIDA
+```
+
+Ikisi de "nereye yuklendim, sayfa boyum ne, giris noktam nerede"
+sorularina cevap verir. Fark omurlerinde: `auxv` yalnizca **baslangicta**
+vardir ve yigin ilerledikce ustune yazilir -- kaciran bir daha bulamaz.
+PEB ise surec boyunca durur ve istenildigi zaman okunur. `tcmk`nin
+`_start`i bu yuzden vektoru hemen yakalayip adresini sakliyor.
+
+### Bilerek yapilmayanlar
+
+* **`AT_RANDOM` kriptografik degil.** On alti bayt zamanlayici tikinden
+  turetiliyor; gercek bir entropi havuzu yok. Yigin koruyucusu icin
+  "her kosuda farkli" yeterli, ama ongorulemez degil.
+* **`AT_HWCAP` yok.** CPUID bayraklarini raporlamak, olmayan bir seyi
+  var gostermek olurdu.
+* **`AT_BASE` her zaman sifir**: dinamik yorumlayici (`ld.so`) yok,
+  butun ikililer statik baglaniyor.
 
 ## Ayni bilgi, iki temsil: `argv[]` ve komut satiri
 

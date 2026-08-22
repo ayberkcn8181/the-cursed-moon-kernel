@@ -11,6 +11,8 @@ const ELFDATA2LSB: u8 = 1;
 const ET_EXEC: u16 = 2;
 const EM_X86_64: u16 = 62;
 const PT_LOAD: u32 = 1;
+/// Program baslik tablosunun kendisini tarif eden girdi.
+const PT_PHDR: u32 = 6;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -58,6 +60,12 @@ pub enum Elf64Error {
 pub struct LoadedImage {
     pub entry: usize,
     pub end: usize,
+    /// Program basliklarinin **bellekteki** adresi -- bkz. `elf32`.
+    pub phdr: usize,
+    pub phentsize: usize,
+    pub phnum: usize,
+    /// Yuklenen en dusuk adres (imajin tabani).
+    pub base: usize,
 }
 
 /// Imajin ELF64 olup olmadigini ucuz sekilde sinar.
@@ -89,6 +97,8 @@ pub fn load(image: &[u8]) -> Result<LoadedImage, Elf64Error> {
     }
 
     let mut highest = 0usize;
+    let mut lowest = 0usize;
+    let mut phdr_at = 0usize;
 
     for i in 0..ehdr.e_phnum as usize {
         let off = ehdr.e_phoff as usize + i * ehdr.e_phentsize as usize;
@@ -99,6 +109,12 @@ pub fn load(image: &[u8]) -> Result<LoadedImage, Elf64Error> {
         let phdr: Elf64Phdr =
             unsafe { core::ptr::read_unaligned(image.as_ptr().add(off) as *const Elf64Phdr) };
 
+        // PT_PHDR, program baslik tablosunun **bellekteki** adresini
+        // dogrudan soyler ve yetkili kaynak odur. Yoksa asagida
+        // segment ofsetinden hesaplanir.
+        if phdr.p_type == PT_PHDR {
+            phdr_at = phdr.p_vaddr as usize;
+        }
         if phdr.p_type != PT_LOAD || phdr.p_memsz == 0 {
             continue;
         }
@@ -135,6 +151,16 @@ pub fn load(image: &[u8]) -> Result<LoadedImage, Elf64Error> {
         if vend > highest {
             highest = vend;
         }
+        if lowest == 0 || vaddr < lowest {
+            lowest = vaddr;
+        }
+
+        // Program baslik tablosunun bellekteki karsiligi (bkz. `elf32`).
+        let table_end =
+            ehdr.e_phoff as usize + ehdr.e_phnum as usize * ehdr.e_phentsize as usize;
+        if phdr_at == 0 && (ehdr.e_phoff as usize) >= file_start && table_end <= file_end {
+            phdr_at = vaddr + (ehdr.e_phoff as usize - file_start);
+        }
     }
 
     if highest == 0 {
@@ -144,5 +170,9 @@ pub fn load(image: &[u8]) -> Result<LoadedImage, Elf64Error> {
     Ok(LoadedImage {
         entry: ehdr.e_entry as usize,
         end: highest,
+        phdr: phdr_at,
+        phentsize: ehdr.e_phentsize as usize,
+        phnum: ehdr.e_phnum as usize,
+        base: lowest,
     })
 }
