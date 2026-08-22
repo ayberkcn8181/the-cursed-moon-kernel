@@ -46,6 +46,9 @@ static mut EXEC_ARGS: [[u8; MAX_ARGS]; scheduler::MAX_TASKS] =
 static mut EXEC_ARGS_LEN: [usize; scheduler::MAX_TASKS] = [0; scheduler::MAX_TASKS];
 
 /// Gorev icin `execve` istegi kaydeder.
+///
+/// `args` **blok** bicimindedir (`argv[0]` dahil, NUL ayrili) -- bkz.
+/// `level0b1::argv`.
 pub fn request_exec(task: usize, path: &str, args: &str) -> bool {
     if task >= scheduler::MAX_TASKS || path.is_empty() || path.len() >= MAX_PATH {
         return false;
@@ -68,7 +71,11 @@ pub fn request_exec(task: usize, path: &str, args: &str) -> bool {
 }
 
 /// Bekleyen `execve` istegini alir ve yuvayi bosaltir.
-fn take_exec(task: usize) -> Option<(&'static str, &'static str)> {
+///
+/// `pub`: `fork` cocugu da bu yolu kullanir. Cocuk `app_task`ta
+/// kosmadigi icin (giris noktasi `fork::child_task`) kendi exec
+/// zincirini kendi yurutmek zorunda -- bkz. asagidaki not.
+pub fn take_exec(task: usize) -> Option<(&'static str, &'static str)> {
     if task >= scheduler::MAX_TASKS {
         return None;
     }
@@ -127,6 +134,7 @@ static KNOWN_APPS: &[(&str, &str, &str)] = &[
     ("nested", "/bin/nested", "nested"),
     ("bequest", "/bin/bequest", "bequest"),
     ("probe", "/bin/probe", "probe"),
+    ("quoted", "/bin/quoted", "quoted"),
     // Windows ikilisi: yol .exe ile biter, cekirdek bicimi magic'ten
     // anlar (bkz. vfs::format) ve PE yukleyicisine yonlendirir. Yol iki
     // mimaride de aynidir; VFS'te duran ikilinin PE32 mi PE32+ mi oldugu
@@ -137,6 +145,7 @@ static KNOWN_APPS: &[(&str, &str, &str)] = &[
     ("winenv", "/bin/winenv.exe", "winenv"),
     ("winprobe", "/bin/winprobe.exe", "winprobe"),
     ("winseh", "/bin/winseh.exe", "winseh"),
+    ("winargv", "/bin/winargv.exe", "winargv"),
 ];
 
 /// Kabuktan gelen adi tam yola ve gorev adina cevirir.
@@ -169,8 +178,24 @@ pub fn available() -> &'static [(&'static str, &'static str, &'static str)] {
 }
 
 /// Bir uygulamayi yeni bir gorevde Ring 3'te baslatir.
+///
+/// `args` kabugun yazdigi **ham komut satiri kuyrugudur** (`argv[0]`
+/// haric). Windows alintilama kurallariyla bolunur, yani
+/// `run notes "iki kelime"` tek bir arguman gecirir.
 pub fn spawn_user_app(path: &str, args: &str) -> Result<(), &'static str> {
     spawn_user_app_id(path, args).map(|_| ())
+}
+
+/// Komut satiri kuyrugundan tasiyici blogu kurar: `argv[0]` = programin
+/// kendisi, kalani alintilama kurallariyla bolunmus.
+fn block_from_line(program: &str, line: &str, out: &mut [u8]) -> usize {
+    let mut written = program.len().min(out.len());
+    out[..written].copy_from_slice(&program.as_bytes()[..written]);
+    if written < out.len() {
+        out[written] = crate::level0b1::argv::SEP;
+        written += 1;
+    }
+    written + crate::level0b1::argv::split(line, &mut out[written..])
 }
 
 /// Ayni is, ama **gorev kimligini** dondurur.
@@ -180,7 +205,7 @@ pub fn spawn_user_app(path: &str, args: &str) -> Result<(), &'static str> {
 /// `PROCESS_INFORMATION` yapisini dolduracak ve sonra o kimlikle
 /// bekleyecek. POSIX'te ayni bilgi `fork`un donus degeriyle gelir.
 pub fn spawn_user_app_id(path: &str, args: &str) -> Result<usize, &'static str> {
-    spawn_inner_app(path, args, false)
+    spawn_inner_app(path, args, false, false)
 }
 
 /// **Beklenebilir** cocuk olarak baslatir (Win32 `CreateProcess`).
@@ -192,11 +217,22 @@ pub fn spawn_user_app_id(path: &str, args: &str) -> Result<usize, &'static str> 
 ///
 /// POSIX tarafinda ayni isaret `fork` icin kullaniliyor; iki dunyanin
 /// "cocuk kodunu ebeveyn toplar" kurali burada ayni mekanizmaya iniyor.
-pub fn spawn_child_app(path: &str, args: &str) -> Result<usize, &'static str> {
-    spawn_inner_app(path, args, true)
+///
+/// Argumanlar **hazir blok** olarak gelir: `execve` ve `CreateProcessA`
+/// bu yolu kullanir: ikisi de kendi
+/// bicimini (dizi / komut satiri) zaten bloga cevirmis durumda ve blok
+/// `argv[0]`i **iceriyor**. Kabuk yolundan farki tam olarak bu -- orada
+/// `argv[0]` cozulmus yoldan uretilir.
+pub fn spawn_child_app_block(path: &str, block: &str) -> Result<usize, &'static str> {
+    spawn_inner_app(path, block, true, true)
 }
 
-fn spawn_inner_app(path: &str, args: &str, waitable: bool) -> Result<usize, &'static str> {
+fn spawn_inner_app(
+    path: &str,
+    args: &str,
+    args_are_block: bool,
+    waitable: bool,
+) -> Result<usize, &'static str> {
     let mut found = [0u8; MAX_PATH];
     let (resolved, task_name) =
         resolve(path, &mut found).ok_or("bilinmeyen uygulama ('apps'/'ls' ile listeleyin)")?;
@@ -206,6 +242,18 @@ fn spawn_inner_app(path: &str, args: &str, waitable: bool) -> Result<usize, &'st
     if args.len() >= MAX_ARGS {
         return Err("arguman cok uzun");
     }
+
+    // Tasiyici her zaman blok (bkz. `level0b1::argv`). Kabuk yolundan
+    // gelen ham satir burada bolunur; hazir blok oldugu gibi gecer.
+    let mut block = [0u8; MAX_ARGS];
+    let block_len = if args_are_block {
+        let len = args.len().min(MAX_ARGS);
+        block[..len].copy_from_slice(&args.as_bytes()[..len]);
+        len
+    } else {
+        block_from_line(resolved, args, &mut block)
+    };
+    let args = core::str::from_utf8(&block[..block_len]).unwrap_or("");
 
     crate::arch::cpu::without_interrupts(|| unsafe {
         let head = PENDING_HEAD.load(Ordering::Relaxed);
@@ -235,6 +283,9 @@ fn spawn_inner_app(path: &str, args: &str, waitable: bool) -> Result<usize, &'st
         scheduler::spawn(task_name, app_task)
     }
     .ok_or("gorev olusturulamadi")?;
+    // Yuva geri kazanilmis olabilir: onceki sahibinden kalan bir exec
+    // istegi bu surece ait degildir.
+    clear_exec(id);
     crate::level0b2::ipc::post(crate::level0b2::ipc::Kind::AppStart, id, 0, 0, task_name);
     Ok(id)
 }
@@ -263,6 +314,26 @@ fn take_pending() -> Option<(&'static str, &'static str)> {
     })
 }
 
+/// Bir gorev yuvasi yeniden kullanilmadan once bekleyen `execve`
+/// istegini siler.
+///
+/// Sahipsiz bir istek sessiz ama yikici: yuva geri kazanilip baska bir
+/// surece verildiginde o surec, hicbir zaman istemedigi bir imaji
+/// yuklerdi. (Olcumde tam olarak bu oldu -- bkz. README.)
+pub fn clear_exec(task: usize) {
+    if task >= scheduler::MAX_TASKS {
+        return;
+    }
+    crate::arch::cpu::without_interrupts(|| unsafe {
+        (core::ptr::addr_of_mut!(EXEC_LEN) as *mut usize)
+            .add(task)
+            .write(0);
+        (core::ptr::addr_of_mut!(EXEC_ARGS_LEN) as *mut usize)
+            .add(task)
+            .write(0);
+    });
+}
+
 /// Uygulama gorevinin giris noktasi: kuyruktaki yolu alir ve Ring 3'e girer.
 extern "C" fn app_task() -> ! {
     let mut next = take_pending();
@@ -273,10 +344,15 @@ extern "C" fn app_task() -> ! {
     // Dongu `execve` icin: surec yerine baska bir program isterse ayni
     // gorevde, yeni bir adres uzayiyla devam edilir.
     while let Some((path, args)) = next {
-        if args.is_empty() {
+        // Blok NUL icerdigi icin dogrudan basilamaz; gunluge okunabilir
+        // bicimiyle, yani komut satirina cevrilmis haliyle yazilir.
+        let mut shown = [0u8; MAX_ARGS];
+        let shown_len = crate::level0b1::argv::join(args, &mut shown);
+        let shown = core::str::from_utf8(&shown[..shown_len]).unwrap_or("");
+        if crate::level0b1::argv::count(args) <= 1 {
             crate::println!("[launcher] '{}' Ring 3'te baslatiliyor.", path);
         } else {
-            crate::println!("[launcher] '{}' baslatiliyor (arguman: {}).", path, args);
+            crate::println!("[launcher] '{}' baslatiliyor ({}).", path, shown);
         }
         let result = unsafe { crate::level0b1::process::run_from_vfs_dynamic(path, args) };
         match result {

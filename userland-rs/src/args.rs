@@ -100,6 +100,20 @@ pub fn environ() -> *const usize {
 
 /// Win32: `GetCommandLineA`nin dondugu tek dizeyi parcalara ayirir.
 ///
+/// Bu, `CommandLineToArgvW`nin isidir ve kurallari **uydurma degildir**:
+///
+///   * Cift tirnak "tirnak icinde" durumunu degistirir; o durumdayken
+///     bosluk siradan bir karakterdir.
+///   * Bir tirnaktan onceki `2n` ters bolu -> `n` ters bolu + durum
+///     degisir; `2n+1` -> `n` ters bolu + **gercek** bir tirnak.
+///   * Ters bolu yalnizca tirnaktan onceyken ozeldir, yani
+///     `C:\dizin\dosya` hicbir kacisa ugramaz.
+///
+/// Kurallara uymak gerekiyor cunku cekirdek komut satirini kurarken
+/// **ayni** kurallarla alintiliyor (bkz. `level0b1::argv`). Eskiden
+/// burada yalnizca bosluktan bolunuyordu ve `"iki kelime"` iki arguman
+/// oluyordu -- yani bosluklu bir yol yolun yarisina donusuyordu.
+///
 /// # Safety
 /// `line` NUL sonlandirmali gecerli bir dize olmalidir.
 pub unsafe fn init_win32(line: *const u8) {
@@ -119,21 +133,85 @@ pub unsafe fn init_win32(line: *const u8) {
     }
     base.add(length).write(0);
 
-    // Bosluklari NUL'a cevirerek yerinde bol; her parcanin basini kaydet.
-    let mut i = 0usize;
-    while i < length {
-        while i < length && base.add(i).read() == b' ' {
-            base.add(i).write(0);
-            i += 1;
+    // Cozulen metin **ayni tamponun icine**, yerinde yazilir. Kacislar
+    // yalnizca karakter siler (`\"` -> `"`, `""` -> ``), hic eklemez, o
+    // yuzden yazma imleci okuma imlecini asla gecemez.
+    let mut read = 0usize;
+    let mut write = 0usize;
+    let mut in_quotes = false;
+    let mut started = false;
+    let mut start = 0usize;
+
+    let finish = |start: usize, write: usize, base: *mut u8| {
+        if write > start {
+            record(base.add(start) as usize, write - start);
+        } else {
+            // Bos arguman (`""`): gecerli ve korunmali.
+            record(base.add(start) as usize, 0);
         }
-        if i >= length {
-            break;
+    };
+
+    while read < length {
+        let c = base.add(read).read();
+
+        if !in_quotes && (c == b' ' || c == b'\t') {
+            if started {
+                finish(start, write, base);
+                started = false;
+                // Ayirici olarak bir NUL birak, sonraki arguman ondan
+                // sonra baslasin -- dilimler hep bu tampona bakiyor.
+                base.add(write).write(0);
+                write += 1;
+                start = write;
+            }
+            read += 1;
+            continue;
         }
-        let start = i;
-        while i < length && base.add(i).read() != b' ' {
-            i += 1;
+
+        if c == b'\\' {
+            let mut slashes = 0usize;
+            while read + slashes < length && base.add(read + slashes).read() == b'\\' {
+                slashes += 1;
+            }
+            let quote_follows = read + slashes < length && base.add(read + slashes).read() == b'"';
+            let emit = if quote_follows { slashes / 2 } else { slashes };
+            for _ in 0..emit {
+                base.add(write).write(b'\\');
+                write += 1;
+            }
+            if emit > 0 {
+                started = true;
+            }
+            read += slashes;
+            if quote_follows {
+                if slashes % 2 == 1 {
+                    base.add(write).write(b'"');
+                    write += 1;
+                } else {
+                    in_quotes = !in_quotes;
+                }
+                started = true;
+                read += 1;
+            }
+            continue;
         }
-        record(base.add(start) as usize, i - start);
+
+        if c == b'"' {
+            in_quotes = !in_quotes;
+            started = true;
+            read += 1;
+            continue;
+        }
+
+        base.add(write).write(c);
+        write += 1;
+        started = true;
+        read += 1;
+    }
+
+    if started {
+        finish(start, write, base);
+        base.add(write).write(0);
     }
 }
 

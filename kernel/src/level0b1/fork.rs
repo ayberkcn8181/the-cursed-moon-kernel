@@ -95,6 +95,9 @@ pub unsafe fn fork(frame: &SyscallFrame, from_interrupt: bool) -> Result<usize, 
     // oldugu gibi gecerlidir.
     crate::level0a::kernel_api::clone_program_break(child);
 
+    // Yuva geri kazanilmis olabilir; onceki sahibinden kalan bir exec
+    // istegi cocuga ait degildir.
+    crate::level0a::launcher::clear_exec(child);
     // Sinyal isleyicileri kopyalanir (POSIX), bekleyen sinyaller
     // kopyalanmaz -- cocuk temiz baslar.
     crate::level0b1::signal::clone_into(child);
@@ -145,6 +148,32 @@ extern "C" fn child_task() -> ! {
     // cercevesini ezmek demek olurdu.
     unsafe { usermode::resume_user_context(&context) };
 
+    // --- `fork` + `execve` ---
+    //
+    // Ring 3'ten donmenin iki sebebi var: surec cikti, ya da kendini
+    // baska bir imajla **degistirmek** istedi. Ikincisi POSIX'in en cok
+    // kullanilan kalibidir (`fork` sonra `execve`) ve buraya kadar
+    // **calismiyordu**: `execve` istegi kaydediliyor ama kimse
+    // yuklemiyordu, cunku `fork` cocugunun giris noktasi `app_task`
+    // degil bu fonksiyon. Istek yuvada sahipsiz kaliyor, yuva geri
+    // kazanildiginda ise baska bir surec onu yukleniyordu.
+    //
+    // Cozum, ayni dongunun burada da olmasi. Yeni imaj icin adres uzayi
+    // `run_from_vfs_dynamic` tarafindan kuruluyor, o yuzden cocugun
+    // kendi uzayi **once** birakilmali.
+    let mut pending = crate::level0a::launcher::take_exec(id);
+    while let Some((path, args)) = pending {
+        release_space(id);
+        // Yeni imaj eskinin penceresini devralmaz.
+        crate::level0a::wm::close_owned_by(id);
+        crate::println!("[LEVEL-0b1] fork: gorev #{} execve -> '{}'", id, path);
+        if let Err(e) = unsafe { crate::level0b1::process::run_from_vfs_dynamic(path, args) } {
+            crate::println!("[LEVEL-0b1] fork: execve basarisiz: {:?}", e);
+            break;
+        }
+        pending = crate::level0a::launcher::take_exec(id);
+    }
+
     // Cocuk `sys_exit` cagirdi.
     crate::level0a::wm::close_owned_by(id);
 
@@ -162,14 +191,23 @@ extern "C" fn child_task() -> ! {
     // yikilir. Ters sirada yururlukteki CR3'un tablolari havuza geri
     // verilmis olurdu. Cekirdek yigini birebir haritada oldugu icin
     // gecisten etkilenmez.
-    let space = scheduler::address_space_of(id);
-    if space != 0 {
-        scheduler::set_current_address_space(0);
-        unsafe {
-            mmu::switch_to(mmu::kernel_cr3());
-            mmu::destroy_user_space(space);
-        }
-    }
+    release_space(id);
 
     scheduler::terminate_current()
+}
+
+/// Gorevin adres uzayini birakir ve cekirdek uzayina doner.
+///
+/// Cagrilmadigi durumda her `fork` cocugunun uzayi sizardi; `execve`
+/// zincirinde de her halkada bir kez cagrilmasi gerekiyor.
+fn release_space(id: usize) {
+    let space = scheduler::address_space_of(id);
+    if space == 0 {
+        return;
+    }
+    scheduler::set_current_address_space(0);
+    unsafe {
+        mmu::switch_to(mmu::kernel_cr3());
+        mmu::destroy_user_space(space);
+    }
 }

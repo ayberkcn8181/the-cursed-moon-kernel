@@ -65,6 +65,7 @@ pub use x86_64_numbers::*;
 mod i386_numbers {
     pub const SYS_EXIT: u32 = 1;
     pub const SYS_FORK: u32 = 2;
+    pub const SYS_EXECVE_LINUX: u32 = 11;
     pub const SYS_WAITPID: u32 = 7;
     pub const SYS_PIPE: u32 = 42;
     pub const SYS_READ: u32 = 3;
@@ -131,6 +132,7 @@ mod i386_numbers {
 
 #[cfg(target_arch = "x86_64")]
 mod x86_64_numbers {
+    pub const SYS_EXECVE_LINUX: u32 = 59;
     pub const SYS_READ: u32 = 0;
     pub const SYS_WRITE: u32 = 1;
     pub const SYS_OPEN: u32 = 2;
@@ -672,30 +674,47 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
             frame.set_return(0);
             return;
         }
-        SYS_EXECVE => {
-            // arg1 = yol, arg2 = arguman dizesi (NULL olabilir).
-            //
-            // Imaj YERINDE degistirilemez (surec o anda kendi kodunda
-            // kosuyor); istek kaydedilip Ring 3'ten cikilir, launcher
-            // yeni imaji yukler.
-            //
-            // Gercek `execve` bir `char *const argv[]` dizisi alir; TCMK
-            // tek bir dize alip bolmeyi cekirdege birakiyor. Sebep,
-            // ayni dizenin Win32 tarafinda **oldugu gibi** gerekmesi:
-            // `GetCommandLineA` bolunmemis bir komut satiri doner.
+        // Iki numara, tek govde.
+        //
+        //   * `SYS_EXECVE_LINUX` (i386 11 / x86_64 59) **gercek** Linux
+        //     cagrisidir: `execve(yol, argv[], envp[])`. Derleyicinin
+        //     urettigi bir ikili bunu cagirir ve bir **dizi** gecirir.
+        //   * `SYS_EXECVE` (0x509) TCMK'nin kendi, tek dizeli bicimi.
+        //     Kabuk ve eski userland bunu kullaniyordu; kaldirmak
+        //     calisan kodu bozardi, o yuzden duruyor.
+        //
+        // Fark yalnizca **arg2'nin okunmasinda**: dizi mi, dize mi. Bir
+        // dizi elemanindaki bosluk anlamsizdir, dizedeki ayiricidir --
+        // ikisi de ayni bloga cevrilir (bkz. `level0b1::argv`).
+        //
+        // Imaj YERINDE degistirilemez (surec o anda kendi kodunda
+        // kosuyor); istek kaydedilip Ring 3'ten cikilir, launcher yeni
+        // imaji yukler.
+        SYS_EXECVE | SYS_EXECVE_LINUX => {
+            let vector_form = number == SYS_EXECVE_LINUX;
             let mut storage = [0u8; PATH_MAX];
+            let mut line_storage = [0u8; PATH_MAX];
             let mut arg_storage = [0u8; PATH_MAX];
             let mut env_storage = [EnvEntry::EMPTY; env::MAX_VARS];
+
             let path_len = unsafe { copy_user_cstr(arg1, &mut storage) }.map(|p| p.len());
+            // Blok, `argv[0]` disindaki elemanlarla doluyor; `argv[0]`
+            // asagida, yol cozuldukten sonra basa ekleniyor. Dizi
+            // biciminde cagiranin verdigi `argv[0]` korunur.
             let args_len = if arg2 == 0 {
                 Some(0)
+            } else if vector_form {
+                unsafe { crate::level0b1::argv::from_user_vector(arg2, &mut arg_storage) }
             } else {
-                unsafe { copy_user_cstr(arg2, &mut arg_storage) }.map(|a| a.len())
+                // Eski bicim: tek dize once bolunur. Yan etkisi olumlu --
+                // 0x509 de artik alintilamayi anliyor.
+                unsafe { copy_user_cstr(arg2, &mut line_storage) }
+                    .map(|line| crate::level0b1::argv::split(line, &mut arg_storage))
             };
+
             match (path_len, args_len) {
                 (Some(plen), Some(alen)) => {
                     let path = core::str::from_utf8(&storage[..plen]).unwrap_or("");
-                    let args = core::str::from_utf8(&arg_storage[..alen]).unwrap_or("");
                     // Yol `PATH`/`PATHEXT` uzerinden cozuluyor: egik
                     // cizgi iceren adlar oldugu gibi, icermeyenler
                     // aranarak. `execvp`nin yaptigi da budur -- fark su
@@ -708,6 +727,29 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
                     } else {
                         let path = resolved.unwrap();
                         let task = crate::level0a::core::scheduler::current_id();
+
+                        // Tasiyici blok kuruluyor. Dizi biciminde
+                        // cagiranin `argv[0]`i zaten iceride; dize
+                        // biciminde yol basa yaziliyor.
+                        let mut block = [0u8; PATH_MAX];
+                        let block_len = if vector_form {
+                            let n = alen.min(block.len());
+                            block[..n].copy_from_slice(&arg_storage[..n]);
+                            n
+                        } else {
+                            let head = path.len().min(block.len());
+                            block[..head].copy_from_slice(&path.as_bytes()[..head]);
+                            let mut n = head;
+                            if n < block.len() {
+                                block[n] = crate::level0b1::argv::SEP;
+                                n += 1;
+                            }
+                            let tail = alen.min(block.len() - n);
+                            block[n..n + tail].copy_from_slice(&arg_storage[..tail]);
+                            n + tail
+                        };
+                        let block = core::str::from_utf8(&block[..block_len]).unwrap_or("");
+
                         // arg3 = `envp`. Sifirsa ortam **korunur** (yuva
                         // ayni kaldigi icin kendiliginden); doluysa
                         // tablonun **yerine gecer** -- gercek `execve`de
@@ -724,7 +766,7 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
                         match environment {
                             None => -EFAULT,
                             Some(entries) => {
-                                if crate::level0a::launcher::request_exec(task, path, args) {
+                                if crate::level0a::launcher::request_exec(task, path, block) {
                                     if arg3 != 0 {
                                         apply_user_env(task, &env_storage[..entries]);
                                     }

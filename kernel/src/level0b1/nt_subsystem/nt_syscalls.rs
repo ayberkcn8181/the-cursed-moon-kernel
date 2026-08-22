@@ -1293,34 +1293,60 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
 
             let mut program = [0u8; PATH_MAX];
             let mut program_len = 0usize;
-            let mut arguments = [0u8; PATH_MAX];
-            let mut arguments_len = 0usize;
+            // Tasiyici blok: `argv[0]` dahil, NUL ayrili (bkz.
+            // `level0b1::argv`). Komut satiri **burada** Windows'un
+            // alintilama kurallariyla bolunur, boylece bosluklu bir yol
+            // ("C:\Program Files\x") tek arguman kalir. Eskiden bolme
+            // ilk boslukta yapiliyordu ve o yolu ikiye ayiriyordu.
+            let mut block = [0u8; PATH_MAX];
+            let mut block_len = 0usize;
 
             match application {
                 Some(path) => {
                     program_len = path.len().min(PATH_MAX);
                     program[..program_len].copy_from_slice(&path.as_bytes()[..program_len]);
-                    // Komut satirinin tamami arguman olarak gecer.
-                    if let Some(len) = command {
-                        arguments_len = len.min(PATH_MAX);
-                        arguments[..arguments_len]
-                            .copy_from_slice(&line_storage[..arguments_len]);
+                    match command {
+                        // Ikisi de doluysa Windows'un kurali: **calisan**
+                        // imaj `lpApplicationName`, ama `argv[0]` dahil
+                        // butun komut satiri cocuga oldugu gibi gecer.
+                        Some(len) => {
+                            let line =
+                                core::str::from_utf8(&line_storage[..len]).unwrap_or("");
+                            block_len = crate::level0b1::argv::split(line, &mut block);
+                        }
+                        // Komut satiri yoksa `argv[0]` programin kendisi.
+                        None => {
+                            block[..program_len]
+                                .copy_from_slice(&program[..program_len]);
+                            block_len = program_len;
+                            if block_len < block.len() {
+                                block[block_len] = crate::level0b1::argv::SEP;
+                                block_len += 1;
+                            }
+                        }
                     }
                 }
                 None => match command {
                     Some(len) => {
-                        let line = normalize_win_path(&mut line_storage, len);
-                        // Ilk kelime program, kalani arguman.
-                        let (first, rest) = match line.find(' ') {
-                            Some(i) => (&line[..i], line[i + 1..].trim_start()),
-                            None => (line, ""),
-                        };
-                        program_len = first.len().min(PATH_MAX);
-                        program[..program_len]
-                            .copy_from_slice(&first.as_bytes()[..program_len]);
-                        arguments_len = rest.len().min(PATH_MAX);
-                        arguments[..arguments_len]
-                            .copy_from_slice(&rest.as_bytes()[..arguments_len]);
+                        let line = core::str::from_utf8(&line_storage[..len]).unwrap_or("");
+                        block_len = crate::level0b1::argv::split(line, &mut block);
+                        // Ilk eleman calistirilacak imaj. Yol cevirisi
+                        // (`C:\bin\x` -> `/bin/x`) **bolmeden sonra**
+                        // yapiliyor: once bolup sonra cevirmek, bosluklu
+                        // bir yolun cevrilmeden bolunmesini onluyor.
+                        let block_str =
+                            core::str::from_utf8(&block[..block_len]).unwrap_or("");
+                        if let Some(first) = crate::level0b1::argv::iter(block_str).next() {
+                            let mut first_storage = [0u8; PATH_MAX];
+                            let first_len = first.len().min(PATH_MAX);
+                            first_storage[..first_len]
+                                .copy_from_slice(&first.as_bytes()[..first_len]);
+                            let normalized =
+                                normalize_win_path(&mut first_storage, first_len);
+                            program_len = normalized.len().min(PATH_MAX);
+                            program[..program_len]
+                                .copy_from_slice(&normalized.as_bytes()[..program_len]);
+                        }
                     }
                     // Ne uygulama adi ne komut satiri verilmis:
                     // `program_len` sifir kalir ve asagida yakalanir.
@@ -1329,15 +1355,45 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
             }
 
             let program = core::str::from_utf8(&program[..program_len]).unwrap_or("");
-            let arguments = core::str::from_utf8(&arguments[..arguments_len]).unwrap_or("");
+            let block = core::str::from_utf8(&block[..block_len]).unwrap_or("");
 
             if program.is_empty() {
                 set_last_error(ERROR_INVALID_PARAMETER);
                 return_win32(frame, WIN32_FALSE);
                 return;
             }
-            match crate::level0a::launcher::spawn_child_app(program, arguments) {
+
+            // `lpEnvironment` (arg6) ve `lpCurrentDirectory` (arg7).
+            //
+            // Windows ortami **duz bir blok** olarak gecirir:
+            // `AD=deger\0AD=deger\0\0`. POSIX ayni bilgiyi `char *[]`
+            // dizisiyle gecirir (bkz. `execve`). Ayni bilgi, iki temsil
+            // -- ve ikisi de ayni tabloya yaziliyor.
+            //
+            // Cocugun tablosu **once** oturumdan/ebeveynden kopyalanir
+            // (bkz. `env::reset`), o yuzden ozel ortam gorev
+            // yaratildiktan SONRA uygulanmali.
+            let environment = arg_ptr(args, 6).unwrap_or(0);
+            let directory = arg_ptr(args, 7)
+                .filter(|p| *p != 0)
+                .and_then(|p| unsafe { copy_user_cstr(p, &mut path_storage) })
+                .map(|p| p.len())
+                .map(|len| normalize_win_path(&mut path_storage, len));
+
+            match crate::level0a::launcher::spawn_child_app_block(program, block) {
                 Ok(id) => {
+                    if environment != 0 {
+                        apply_environment_block(id, environment);
+                    }
+                    if let Some(dir) = directory {
+                        // Calisma dizini surece aittir (bkz.
+                        // `core::cwd`), yani cocuga ayrica verilmesi
+                        // gerekiyor. POSIX'te bunun karsiligi yok:
+                        // orada cocuk `fork` aninda ebeveynin dizinini
+                        // devralir ve degistirmek isteyen `chdir`
+                        // cagirir.
+                        let _ = crate::level0a::core::cwd::set(id, dir);
+                    }
                     // `PROCESS_INFORMATION`: hProcess, hThread,
                     // dwProcessId, dwThreadId. TCMK'de is parcacigi yok,
                     // yani ikinci ikili birinciyle ayni deger -- bir
@@ -1870,6 +1926,53 @@ pub fn clear_reaped_exit(task: usize) {
         REAPED_EXIT[task].store(u32::MAX, core::sync::atomic::Ordering::Relaxed);
     }
 }
+
+/// Windows'un duz ortam blogunu bir gorevin tablosuna yazar.
+///
+/// Bicim: `AD=deger\0AD=deger\0\0` -- yani girdiler NUL ile ayrilir ve
+/// **cift NUL** blogu bitirir. POSIX ayni bilgiyi `char *[]` dizisiyle
+/// tasir; ikisi de burada ayni tabloya iniyor.
+///
+/// Blok verildiginde cocugun devraldigi tablo **tamamen** silinir:
+/// `CreateProcessA`in sozlesmesi "bu ortamin yerine gecer", "buna
+/// eklenir" degil.
+fn apply_environment_block(task: usize, block: usize) {
+    let mut at = block;
+    let mut entry = [0u8; ENV_ENTRY_MAX];
+    let mut wrote_any = false;
+
+    loop {
+        let mut len = 0usize;
+        loop {
+            if !mmu::is_user_accessible(at) {
+                return;
+            }
+            let byte = unsafe { (at as *const u8).read() };
+            at += 1;
+            if byte == 0 {
+                break;
+            }
+            if len < entry.len() {
+                entry[len] = byte;
+                len += 1;
+            }
+        }
+        // Bos girdi = cift NUL = blogun sonu.
+        if len == 0 {
+            return;
+        }
+        if !wrote_any {
+            crate::level0a::core::env::clear(task);
+            wrote_any = true;
+        }
+        if let Ok(text) = core::str::from_utf8(&entry[..len]) {
+            let _ = crate::level0a::core::env::set_entry(task, text);
+        }
+    }
+}
+
+/// Bir ortam girdisi icin ayrilan azami uzunluk.
+const ENV_ENTRY_MAX: usize = 64;
 
 /// Win32 araligindan **erken** donmek icin.
 ///

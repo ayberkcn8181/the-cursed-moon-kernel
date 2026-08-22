@@ -215,6 +215,13 @@ unsafe fn detect_and_load(image: &[u8]) -> Result<Prepared, SpawnError> {
 /// En fazla arguman sayisi (`argv[0]` dahil).
 const MAX_ARGV: usize = 8;
 
+/// Win32 komut satiri icin ayrilan azami uzunluk.
+///
+/// Blok yeniden birlestirilirken alintilama uzunlugu artirabilir
+/// (`a"b` -> `"a\"b"`), o yuzden tasiyicidan (`launcher::MAX_ARGS`)
+/// bir tik genis.
+const MAX_COMMAND_LINE: usize = 160;
+
 /// Win32 surecinin komut satirinin adresi -- **surec basina**.
 ///
 /// `GetCommandLineA` bunu doner. POSIX tarafinda karsiligi yok: orada
@@ -303,29 +310,32 @@ unsafe fn build_start_stack(
 }
 
 /// Win32: tek bir dize, yiginin tepesine yazilir.
+///
+/// Blok (bkz. `level0b1::argv`) burada **geri** birlestirilir: bosluk ya
+/// da tirnak iceren elemanlar alintilanir, boylece `GetCommandLineA`
+/// donusunu `CommandLineToArgvW` ile ayristiran bir program ayni
+/// elemanlari geri alir. Bosluklu bir yolu duz birlestirmek iki
+/// argumana bolunmesine yol acardi.
 unsafe fn build_win32_command_line(
     task: usize,
     stack_top: usize,
     program: &str,
     args: &str,
 ) -> usize {
-    // "program args" + NUL
-    let total = program.len() + if args.is_empty() { 0 } else { args.len() + 1 } + 1;
-    let start = (stack_top - total) & !3;
-    let mut at = start;
-    for byte in program.bytes() {
-        (at as *mut u8).write(byte);
-        at += 1;
+    let mut line = [0u8; MAX_COMMAND_LINE];
+    let mut length = crate::level0b1::argv::join(args, &mut line);
+    if length == 0 {
+        // Blok bos: en azindan program adi gorunmeli. Gercek Windows'ta
+        // da `GetCommandLineA` hicbir zaman bos dize dondurmez.
+        length = program.len().min(MAX_COMMAND_LINE);
+        line[..length].copy_from_slice(&program.as_bytes()[..length]);
     }
-    if !args.is_empty() {
-        (at as *mut u8).write(b' ');
-        at += 1;
-        for byte in args.bytes() {
-            (at as *mut u8).write(byte);
-            at += 1;
-        }
+
+    let start = (stack_top - (length + 1)) & !3;
+    for (i, byte) in line[..length].iter().enumerate() {
+        ((start + i) as *mut u8).write(*byte);
     }
-    (at as *mut u8).write(0);
+    ((start + length) as *mut u8).write(0);
 
     COMMAND_LINE[task % scheduler::MAX_TASKS].store(start, core::sync::atomic::Ordering::Relaxed);
     // ESP hizalanmis olarak dizenin altinda baslar.
@@ -352,14 +362,21 @@ unsafe fn build_posix_stack(stack_top: usize, program: &str, args: &str) -> usiz
         at
     };
 
-    pointers[0] = place(program, &mut sp);
-    count += 1;
-    for token in args.split_whitespace() {
+    // Blok `argv[0]` dahil geliyor (bkz. `level0b1::argv`). Gercek
+    // `execve`de `argv[0]` yolun kendisi olmak zorunda degildir --
+    // busybox'in tek ikilide onlarca komut sunmasi tam da bunu kullanir
+    // -- o yuzden cagiranin verdigi deger korunuyor. Yalnizca blok
+    // bossa yol adi yerine gecer.
+    for token in crate::level0b1::argv::iter(args) {
         if count >= MAX_ARGV {
             break;
         }
         pointers[count] = place(token, &mut sp);
         count += 1;
+    }
+    if count == 0 {
+        pointers[0] = place(program, &mut sp);
+        count = 1;
     }
 
     // Ortam: **calisan gorevin kendi tablosu** (bkz. `core::env`). Yuva

@@ -146,6 +146,17 @@ pub const SYS_YIELD: usize = 0x506;
 pub const SYS_WIN_POS: usize = 0x507;
 pub const SYS_SLEEP: usize = 0x508;
 pub const SYS_EXECVE: usize = 0x509;
+
+/// **Gercek** Linux `execve` numarasi -- mimariye gore degisir.
+///
+/// 0x509 TCMK'nin kendi bicimidir (tek dize). Bu numara ise
+/// `execve(yol, argv[], envp[])` bekler: derleyicinin urettigi bir Linux
+/// ikilisi bunu cagirir. Ikisi de calisir; farklari argumanlarin
+/// **dizi** mi **dize** mi oldugu.
+#[cfg(target_arch = "x86")]
+pub const SYS_EXECVE_LINUX: usize = 11;
+#[cfg(target_arch = "x86_64")]
+pub const SYS_EXECVE_LINUX: usize = 59;
 /// `setenv`/`unsetenv`. Linux'ta boyle bir sistem cagrisi yoktur --
 /// orada ortam surecin kendi belleginde ve libc'nin isidir. TCMK'de
 /// tablo cekirdekte oldugu icin cagri gerekiyor; numaranin TCMK
@@ -943,6 +954,74 @@ pub fn execve_env(path: &str, args: &str, env: Option<&[&str]>) -> isize {
         ) as isize
     }
 }
+
+/// `argv[]` dizisiyle `execve` -- **gercek** POSIX bicimi.
+///
+/// `execve_args`ten farki kozmetik degil: bir dizide `"iki kelime"`
+/// **tek** bir elemandir ve icindeki bosluk hicbir sey ifade etmez. Tek
+/// dizede ise bosluk ayiricidir. Yol adlarinda bosluk oldugunda ayrim
+/// gerceklesir.
+///
+/// `argv[0]` gelenege gore programin adidir ama **yol olmak zorunda
+/// degildir**: busybox'in tek ikilide onlarca komut sunmasi tam da bunu
+/// kullanir. TCMK cagiranin verdigi degeri korur.
+///
+/// `env` `None` ise ortam korunur (bkz. `execve_env`).
+pub fn execve_argv(path: &str, argv: &[&str], env: Option<&[&str]>) -> isize {
+    let mut path_buf = [0u8; 64];
+    if path.len() >= path_buf.len() || argv.len() > ARGV_MAX {
+        return -22; // -EINVAL
+    }
+    path_buf[..path.len()].copy_from_slice(path.as_bytes());
+
+    // Hem `argv` hem `envp` icin ayni desen: NUL sonlandirmali kopyalar
+    // ve NULL ile biten bir isaretci dizisi. Hepsi yiginda -- cagri
+    // basarili olursa bu cerceve zaten birakiliyor.
+    let mut arg_entries = [[0u8; ENV_ENTRY_MAX]; ARGV_MAX];
+    let mut arg_pointers = [0usize; ARGV_MAX + 1];
+    let mut argc = 0usize;
+    for text in argv.iter() {
+        if text.len() >= ENV_ENTRY_MAX {
+            return -22;
+        }
+        arg_entries[argc][..text.len()].copy_from_slice(text.as_bytes());
+        arg_pointers[argc] = arg_entries[argc].as_ptr() as usize;
+        argc += 1;
+    }
+    arg_pointers[argc] = 0;
+
+    let mut entries = [[0u8; ENV_ENTRY_MAX]; ENVP_MAX];
+    let mut pointers = [0usize; ENVP_MAX + 1];
+    let mut count = 0usize;
+    if let Some(list) = env {
+        for text in list.iter() {
+            if count >= ENVP_MAX || text.len() >= ENV_ENTRY_MAX {
+                continue;
+            }
+            entries[count][..text.len()].copy_from_slice(text.as_bytes());
+            pointers[count] = entries[count].as_ptr() as usize;
+            count += 1;
+        }
+    }
+    pointers[count] = 0;
+
+    unsafe {
+        syscall3(
+            SYS_EXECVE_LINUX,
+            path_buf.as_ptr() as usize,
+            arg_pointers.as_ptr() as usize,
+            if env.is_some() {
+                pointers.as_ptr() as usize
+            } else {
+                0
+            },
+        ) as isize
+    }
+}
+
+/// `argv` dizisinde tasinabilecek eleman sayisi -- cekirdegin
+/// `MAX_ARGV`si ile ayni.
+const ARGV_MAX: usize = 8;
 
 /// Sureci en az `ms` milisaniye uyutur.
 ///

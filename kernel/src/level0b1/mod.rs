@@ -10,6 +10,9 @@
 //!   - `nt_subsystem`     : Faz 7 (NtWriteFile vb.)
 //!   - `binary_loader`    : Faz 3 (ELF), Faz 7 (PE)
 
+/// Arguman vektoru: POSIX `argv[]` ile Win32 komut satiri arasindaki
+/// ortak tasiyici ve alintilama kurallari.
+pub mod argv;
 pub mod binary_loader;
 pub mod linux_subsystem;
 pub mod nt_subsystem;

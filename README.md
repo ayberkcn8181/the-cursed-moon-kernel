@@ -26,9 +26,9 @@ masaustu sunuyor.
 |---|---|
 | Mimariler | i386 (Multiboot1, `int 0x80`) · x86_64 (Multiboot2, `syscall`) |
 | Ikili bicimleri | ELF32/ELF64 · PE32/PE32+ (ithal tablosu cozulur) |
-| POSIX cagrilari | 59 |
+| POSIX cagrilari | 60 |
 | NT/Win32 cagrilari | 61 (`KERNEL32.dll` 39 ihracat + `TCMKGUI.dll`) |
-| Ring 3 uygulamalari | 25 ELF + 6 PE |
+| Ring 3 uygulamalari | 26 ELF + 7 PE |
 | Kalici depolama | ATA PIO + MBR + TCMKFS (yazilabilir, i386) |
 | Kod | ~23 bin satir cekirdek + ~9,5 bin satir userland |
 
@@ -41,12 +41,13 @@ tabani (POSIX TLS / Windows TEB), **surec yaratma**
 (sinyaller -- SEH/VEH).
 
 Her yetenek QEMU'da **olculerek** dogrulanmistir: `probe` (13 sinav),
-`winprobe` (12), `winseh` (8), `bequest` (6), `nested` (4), `winenv` (4)
-gibi programlar sonucu hem ekrana hem seri gunluge yaziyor. Olcumler yol
-boyunca gercek hatalar buldu -- dolan VFS tablosu, `CreateFileA`'nin
-cevrilmeyen Windows yollari, `GDT` siniri, x86_64'te segment secicisinin
-taban MSR'sini silmesi, kesme ve `syscall` kapilarinin farkli cerceve
-duzeni -- ve her biri README'de kendi bolumunde yazili.
+`winprobe` (12), `winseh` (8), `quoted` (4), `winargv` (4), `bequest`
+(6), `nested` (4), `winenv` (4) gibi programlar sonucu hem ekrana hem
+seri gunluge yaziyor. Olcumler yol boyunca gercek hatalar buldu -- dolan
+VFS tablosu, `CreateFileA`'nin cevrilmeyen Windows yollari, `GDT`
+siniri, x86_64'te segment secicisinin taban MSR'sini silmesi, kesme ve
+`syscall` kapilarinin farkli cerceve duzeni, hic calismamis olan
+`fork`+`execve` kalibi -- ve her biri README'de kendi bolumunde yazili.
 
 **Tamamlanan fazlar:**
 
@@ -3879,6 +3880,143 @@ Hata Ring 0'dan gelirse bu bir cekirdek hatasidir; Level-0b2 Fallback
 Interface devreye girip sistemi guvenli duruma alir.
 
 Kabuktan `faults` komutu istatistikleri gosterir.
+
+## Ayni bilgi, iki temsil: `argv[]` ve komut satiri
+
+Bir programa arguman vermenin iki gelenegi var ve **ikisi de cekirdegin
+kapisina kadar geliyor**:
+
+```text
+  POSIX    execve(yol, argv[], envp[])            -> ayrilmis DIZILER
+  Win32    CreateProcessA(.., lpCommandLine,         tek DIZE
+                          .., lpEnvironment, ..)     duz BLOK
+```
+
+Fark kozmetik degil. Dizide `"iki kelime"` **tek** bir elemandir ve
+icindeki bosluk hicbir sey ifade etmez; dizede bosluk **ayiricidir**, o
+yuzden Windows'un alintilama kurallari vardir.
+
+Buraya kadar TCMK yalnizca ikinci bicimi tasiyordu: `execve` kendi
+numarasindan (`0x509`) ve tek bir dizeden ibaretti, cekirdek onu
+`split_whitespace` ile boluyordu. Sonucu bir cumleyle soylemek mumkun --
+**bosluklu bir yol, yolun yarisina donusuyordu.**
+
+```
+[quoted] A bosluklu eleman:    gecti (dizide tek arguman kaldi)
+[quoted] B argv[0] ve sayi:    gecti (verilen ad korundu, 4 arguman geldi)
+[quoted] C envp yerine gecti:  gecti (yeni ortam var, eskisi yok)
+[quoted] D eski bicim + tirnak: gecti (tirnak korundu, argv[0] = yol)
+
+[winargv] A alintilanmis eleman: gecti (tirnak korundu, tek arguman)
+[winargv] B ters bolulu yol:     gecti (C:\yol\x oldugu gibi geldi)
+[winargv] C lpEnvironment:       gecti (blok ortamin yerine gecti)
+[winargv] D argv[0] ve sayi:     gecti (verilen ad korundu, 4 arguman geldi)
+```
+
+![argv](docs/screenshot-argv.png)
+
+### Ortadaki tasiyici
+
+Iki bicimin ortasinda tek bir sey var: elemanlarin **NUL ile ayrildigi**
+duz bir blok (`level0b1::argv`).
+
+```text
+  "browse\0/boot/msg.txt\0iki kelime\0"
+```
+
+Bosluk ayirici olmadigi icin alintilama sorunu **bir kez**, giriste
+cozuluyor. Sonrasinda:
+
+| yon | ne yapiyor |
+|---|---|
+| `execve(argv[])` | diziyi oldugu gibi bloga yazar |
+| `CreateProcessA` | komut satirini Windows kurallariyla boler |
+| kabuk (`run x y`) | ayni kurallarla boler, `argv[0]`i yoldan uretir |
+| ELF baslangici | blogu `argv[]` dizisine acar |
+| `GetCommandLineA` | blogu **yeniden alintilayarak** birlestirir |
+
+Son satir onemli: birlestirme duz degil. Bosluk ya da tirnak iceren
+elemanlar tirnaga alinir, tirnaktan onceki ters bolular ikilenir. Yoksa
+bir PE'nin `CreateProcessA` ile baslattigi ELF, bosluklu argumani ikiye
+bolunmus gorurdu.
+
+### Windows'un ters bolu tuhafligi
+
+Kurallar `CommandLineToArgvW`nin kurallaridir, uydurma degil:
+
+  * Cift tirnak "tirnak icinde" durumunu **degistirir**.
+  * Bir tirnaktan onceki `2n` ters bolu -> `n` ters bolu + durum degisir.
+  * `2n+1` ters bolu -> `n` ters bolu + **gercek** bir tirnak karakteri.
+
+Ucuncu maddenin sebebi Windows'un yol ayiricisi ile kacis karakterini
+**ayni** yapmis olmasi. Kural ters boluyu yalnizca bir tirnaktan
+onceyken ozel sayarak bunu cozuyor: `C:\yol\x` hicbir sey kaybetmez
+(sinav B), ama `C:\yol\"` kaybeder.
+
+### `argv[0]` yol olmak zorunda degil
+
+Gercek `execve`de `argv[0]` calistirilan dosyanin adi olmak zorunda
+degildir. Busybox'in tek ikilide onlarca komut sunmasi tam da bunu
+kullanir: `ls` diye cagrildiginda `ls` olur. `argv[0]`i yola esitleyen
+bir cekirdek onu calistiramazdi.
+
+TCMK artik cagiranin verdigi degeri koruyor -- sinav B ve D bunu iki
+ayri yoldan olcuyor (dizi biciminde korunur, eski dize biciminde yoldan
+uretilir).
+
+### Ortam: dizi mi, blok mu
+
+`envp` bir `char *[]`dir; `lpEnvironment` ise `AD=deger\0AD=deger\0\0`
+seklinde duz bir bloktur. Ikisinin de sozlesmesi ayni: verilen sey
+ortamin **tamami**dir, eskisine eklenmez.
+
+Sinav C bunu, ebeveynde kurulmus bir degiskenin cocukta **kaybolmasini**
+bekleyerek olcuyor. Yalnizca "yeni degisken geldi mi" diye baksaydi
+"ekledi" ile "yerine gecti" ayirt edilemezdi.
+
+### Olcumun buldugu hata: `fork` + `execve` calismiyormus
+
+Ilk kosuda `quoted`in dort sinavi da kaldi ve ayrintilar tuhafti: cocuk
+gunluge `maske=63` (tam gecti) yaziyor, ebeveyn `Some(0)` okuyordu.
+Gunlukte de sahipsiz bir satir vardi:
+
+```
+[launcher] '/bin/winargv.exe' sonlandi.
+[launcher] execve -> '/bin/quoted'      <- winargv'nin yuvasinda?!
+```
+
+Sebep, POSIX'in **en cok kullanilan kalibinin** hic calismamis olmasiydi.
+`execve` imaji yerinde degistiremez (surec o anda kendi kodunda kosuyor),
+o yuzden istek kaydedilip Ring 3'ten cikiliyor ve `launcher::app_task`
+dongusu yeni imaji yukluyor. Ama bir `fork` cocugunun giris noktasi
+`app_task` **degil**, `fork::child_task`. Yani:
+
+  * cocuk `execve` cagiriyor, istek yuvasina yaziliyor,
+  * `child_task` donuyor ve gorevi sonlandiriyor -- kimse yuklemiyor,
+  * istek yuvada **sahipsiz** kaliyor,
+  * yuva geri kazanildiginda baska bir surec o imaji yukluyor.
+
+Son madde `winargv`in sinavlarini da dusurmustu: `quoted`in sahipsiz
+istegi, `winargv`in cocugunun yuvasina dusup cikis kodunu 63'ten 3'e
+cevirdi. Iki ayri programin iki ayri sinavi, tek bir sebep.
+
+Iki duzeltme: `child_task` artik kendi `execve` zincirini yuruyor
+(adres uzayini her halkada birakarak), ve bir gorev yuvasi yeniden
+kullanilirken bekleyen istek siliniyor (`launcher::clear_exec`).
+
+Bu hatanin gorulmemis olmasi rastlanti degil: `heir` `execve`yi
+**fork'suz** sinar (program kendini `browse` ile degistirir), o yol hep
+calisiyordu. Kalibin iki yarisini ayri ayri sinamak, birlesimini
+sinamak degil.
+
+### Bilerek yapilmayanlar
+
+* **`argv` sekiz elemanla sinirli**, blok 96 bayt. Cekirdekte surec
+  basina dinamik tahsis yapmamak genel tercih.
+* **`CreateProcessA` hala `STARTUPINFO`yu ve `bInheritHandles`i yok
+  sayiyor.** TCMK'de pencere/konsol devralma kavrami yok.
+* **Ortam blogunda genisletme yok**: Windows `%AD%` bicimini
+  `ExpandEnvironmentStrings` ile acar, TCMK acmaz.
 
 ## Coken surec olmek zorunda degil -- SEH ve VEH
 

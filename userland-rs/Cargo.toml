@@ -29,8 +29,16 @@ name = "winenv"
 path = "src/win/envtest.rs"
 
 [[bin]]
+name = "quoted"
+path = "src/bin/quoted.rs"
+
+[[bin]]
 name = "winprobe"
 path = "src/win/probe.rs"
+
+[[bin]]
+name = "winargv"
+path = "src/win/argv.rs"
 
 [[bin]]
 name = "winseh"
