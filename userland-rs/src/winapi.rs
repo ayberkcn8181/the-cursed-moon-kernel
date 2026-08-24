@@ -366,7 +366,26 @@ extern "system" {
     /// Gorunumu kaldirir. **Yalnizca adres** alir -- uzunlugu cekirdek
     /// hatirlar. POSIX `munmap`in ikisini birden istemesinin tersi.
     pub fn UnmapViewOfFile(base: *const u8) -> Bool;
+
+    /// Zincirin **sonundaki** son savunma hattini kurar.
+    ///
+    /// Hicbir isleyici (VEH ya da SEH) sahiplenmezse bu filtre calisir.
+    /// Gercek programlar oraya bir cokme raporlayicisi takar.
+    ///
+    /// Donus, Windows'un sozlesmesi geregi **onceki** filtredir --
+    /// zincirlemek isteyen kod onu saklar ve kendi filtresi
+    /// sahiplenmezse cagirir.
+    ///
+    /// Filtrenin donus degerleri VEH'ten farkli:
+    /// `EXCEPTION_EXECUTE_HANDLER` (1) surec sonlansin,
+    /// `EXCEPTION_CONTINUE_EXECUTION` (-1) yurutme surdurulsun.
+    pub fn SetUnhandledExceptionFilter(
+        filter: Option<unsafe extern "system" fn(*mut crate::seh::ExceptionPointers) -> i32>,
+    ) -> *mut c_void;
 }
+
+/// `UnhandledExceptionFilter`in "sonlandir" donusu.
+pub const EXCEPTION_EXECUTE_HANDLER: i32 = 1;
 
 /// `CreateFileMappingA`nin koruma degerleri (Win32 ile ayni).
 pub const PAGE_READONLY: Dword = 0x02;

@@ -42,7 +42,13 @@
 //!   F  SEH zinciri         -> fs:[0] kaydi calisir  (x64'te atlandi)
 //!   G  sifira bolme        -> isleyici BOLENI duzeltir, komut tekrarlanir
 //!   H  zincir geri alma    -> kayit dustugunde fs:[0] eski haline doner
+//!   I  sahipsiz filtre     -> kimse sahiplenmezse SON filtre calisir
 //! ```
+//!
+//! I, zincirin sonundaki son savunma hattini olcuyor. Gercek programlar
+//! oraya bir cokme raporlayicisi takar; burada filtre CONTEXT'i duzeltip
+//! sureci **kurtariyor** -- yani `EXCEPTION_CONTINUE_EXECUTION` yolunun
+//! da calistigi gorunuyor.
 //!
 //! G ve A birlikte tek bir seyi soyluyor: isleyici CONTEXT'i
 //! degistirebiliyor. Degistiremeseydi "devam et" demenin anlami olmazdi
@@ -101,6 +107,28 @@ static RAISED_ARG1: AtomicUsize = AtomicUsize::new(0);
 
 /// Cagrilma sirasini damgalamak icin.
 static SEQUENCE: AtomicU32 = AtomicU32::new(1);
+
+/// Sahipsiz istisna filtresinin kac kez cagrildigi.
+static FILTER_HITS: AtomicU32 = AtomicU32::new(0);
+
+/// Zincirin sonundaki son savunma hatti.
+///
+/// Imzasi VEH ile ayni ama **donus degerleri farkli**: burada `1`
+/// "sureci sonlandir" demek, VEH'te ise "sirakine gec". Ayni sayinin
+/// iki mekanizmada iki anlami olmasi Windows'un kendi tuhafligi.
+unsafe extern "system" fn last_resort(info: *mut ExceptionPointers) -> i32 {
+    let record = &*(*info).exception_record;
+    FILTER_HITS.fetch_add(1, Ordering::Relaxed);
+    if record.code == seh::STATUS_ACCESS_VIOLATION {
+        seh::set_reg(
+            (*info).context_record,
+            Reg::C,
+            core::ptr::addr_of_mut!(SCRATCH) as usize,
+        );
+        return seh::EXCEPTION_CONTINUE_EXECUTION;
+    }
+    winapi::EXCEPTION_EXECUTE_HANDLER
+}
 
 /// Zincir isleyicisinin gordukleri (yalnizca i386).
 #[cfg(target_arch = "x86")]
@@ -238,7 +266,7 @@ fn result(check: &Check) -> &'static str {
 
 fn main() {
     let mut console = winapi::Console;
-    let mut checks = [EMPTY; 8];
+    let mut checks = [EMPTY; 9];
 
     let fixer_handle = unsafe { winapi::AddVectoredExceptionHandler(0, Some(fixer)) };
     if fixer_handle.is_null() {
@@ -414,6 +442,34 @@ fn main() {
     checks[5] = f;
     checks[7] = h;
 
+    // --- I: sahipsiz istisna filtresi ---
+    //
+    // Bu noktada ne vektorlu isleyici ne zincir kaydi var. Yani hata
+    // dogrudan son savunma hattina duser. Filtre hatali registeri
+    // duzeltip "devam et" diyor: hem cagrildigi hem de sureci
+    // kurtarabildigi olculuyor.
+    let previous = unsafe { winapi::SetUnhandledExceptionFilter(Some(last_resort)) };
+    unsafe {
+        SCRATCH = 0;
+        write_through_null(MARK);
+    }
+    let landed = unsafe { core::ptr::read_volatile(core::ptr::addr_of!(SCRATCH)) };
+    let i = FILTER_HITS.load(Ordering::Relaxed) == 1 && landed == MARK;
+    checks[8] = Check {
+        name: "I sahipsiz filtre",
+        detail: if FILTER_HITS.load(Ordering::Relaxed) == 0 {
+            "filtre HIC cagrilmadi"
+        } else if landed != MARK {
+            "cagrildi ama duzeltme uygulanmadi"
+        } else {
+            "son savunma hatti sureci kurtardi"
+        },
+        passed: i,
+        skipped: false,
+    };
+    // Onceki filtre NULL'di; Windows'un sozlesmesi geregi o doner.
+    let _ = previous;
+
     for check in &checks {
         let _ = core::fmt::Write::write_str(&mut console, "[winseh] ");
         let _ = core::fmt::Write::write_str(&mut console, check.name);
@@ -501,7 +557,7 @@ fn chain_checks() -> (Check, Check) {
     (skipped("F SEH zinciri"), skipped("H zincir geri alma"))
 }
 
-fn draw(win: &mut Window, checks: &[Check; 8]) {
+fn draw(win: &mut Window, checks: &[Check; 9]) {
     let (w, h) = (win.width(), win.height());
     win.clear(BG);
     win.fill(0, 0, w, 22, PANEL);

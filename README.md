@@ -27,7 +27,7 @@ masaustu sunuyor.
 | Mimariler | i386 (Multiboot1, `int 0x80`) · x86_64 (Multiboot2, `syscall`) |
 | Ikili bicimleri | ELF32/ELF64 · PE32/PE32+ (ithal tablosu cozulur) |
 | POSIX cagrilari | 60 (+ ELF yardimci vektoru, dosya destekli `mmap`) |
-| NT/Win32 cagrilari | 68 (`KERNEL32.dll` 46 ihracat + `TCMKGUI.dll`) |
+| NT/Win32 cagrilari | 69 (`KERNEL32.dll` 47 ihracat + `TCMKGUI.dll`) |
 | Ring 3 uygulamalari | 27 ELF + 9 PE |
 | Kalici depolama | ATA PIO + MBR + TCMKFS (yazilabilir, i386) |
 | Kod | ~23 bin satir cekirdek + ~9,5 bin satir userland |
@@ -41,7 +41,7 @@ tabani (POSIX TLS / Windows TEB), **surec yaratma**
 (sinyaller -- SEH/VEH).
 
 Her yetenek QEMU'da **olculerek** dogrulanmistir: `probe` (16 sinav),
-`winprobe` (12), `winseh` (8), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `bequest`
+`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `bequest`
 (6), `nested` (4), `winenv` (4) gibi programlar sonucu hem ekrana hem
 seri gunluge yaziyor. Olcumler yol boyunca gercek hatalar buldu -- dolan
 VFS tablosu, `CreateFileA`'nin cevrilmeyen Windows yollari, `GDT`
@@ -4300,6 +4300,7 @@ Artik degil.
 [winseh] F SEH zinciri:         gecti (fs:[0] kaydi calisti, 100/4 = 25)
 [winseh] G sifira bolme:        gecti (bolen 4 yapildi, 100/4 = 25)
 [winseh] H zincir geri alma:    gecti (kayit dustu, fs:[0] eski haline dondu)
+[winseh] I sahipsiz filtre:     gecti (son savunma hatti sureci kurtardi)
 ```
 
 ![SEH/VEH](docs/screenshot-seh.png)
@@ -4425,8 +4426,11 @@ komutunu kullandigi icin hic gorunmemisti. Simdi ikisi de dogru.
 * **Surec basina dort vektorlu isleyici.** Gercek Windows'ta liste
   sinirsiz; burada sabit dizi, cunku cekirdekte surec basina dinamik
   tahsis yapmamak genel tercih.
-* **`UnhandledExceptionFilter` yok.** Zincirin sonuna gelinip kimse
-  sahiplenmezse surec dogrudan sonlaniyor.
+* ~~`UnhandledExceptionFilter` yok.~~ Artik var:
+  `SetUnhandledExceptionFilter` ile kurulan filtre, hicbir isleyici
+  sahiplenmezse calisiyor ve CONTEXT'i duzeltip sureci **kurtarabiliyor**
+  (sinav I). Filtre yalnizca bir kez cagriliyor -- kendisi de
+  sahiplenmezse surec sonlanir, yoksa dongu olusurdu.
 
 ## Alfa'nin bilinen sinirlari
 
@@ -4481,6 +4485,12 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
 
 AArch64 portu (Faz 6), ext2/tmpfs ve genis POSIX (Faz 9-10),
 musl/busybox + shell (Faz 11-12), framebuffer/virtio-net (Faz 13-14).
+
+## Dosya rehberi
+
+Deponun her kaynak dosyasinin ne ise yaradigi ayri bir belgede:
+[docs/DOSYALAR.md](docs/DOSYALAR.md). Bir sey degistirmek istediginde
+nereye bakacagini gosteren bir harita -- API referansi degil.
 
 ## Lisans
 

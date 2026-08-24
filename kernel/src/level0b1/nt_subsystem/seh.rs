@@ -97,6 +97,22 @@ pub const MAX_VEH: usize = 4;
 /// zincirin cekirdegi sonsuz donguye sokmasini engeller.
 const MAX_CHAIN: usize = 16;
 
+/// Zincirin **sonundaki** son savunma hatti.
+///
+/// Windows'ta hicbir isleyici sahiplenmezse `UnhandledExceptionFilter`
+/// calisir; programlar oraya bir cokme raporlayicisi takar
+/// (`SetUnhandledExceptionFilter`). Donus degeri ne yapilacagini soyler:
+///
+/// ```text
+///   EXCEPTION_EXECUTE_HANDLER    (1)  -> surec sonlansin
+///   EXCEPTION_CONTINUE_SEARCH    (0)  -> varsayilan davranis (yine sonlanma)
+///   EXCEPTION_CONTINUE_EXECUTION (-1) -> yurutme surdurulsun
+/// ```
+///
+/// Ucuncusu, filtrenin CONTEXT'i duzeltip sureci kurtarabilmesi demek --
+/// yani filtre siradan bir isleyici gibi de davranabilir.
+const EXCEPTION_EXECUTE_HANDLER: u32 = 1;
+
 // --- Kullanici cercevesinin olculeri ----------------------------------
 #[cfg(target_arch = "x86")]
 mod sizes {
@@ -192,6 +208,15 @@ mod ctx {
 
 // --- Gorev basina dagitim durumu --------------------------------------
 
+/// Sahipsiz istisna filtresi (`SetUnhandledExceptionFilter`).
+static FILTER: [AtomicUsize; scheduler::MAX_TASKS] =
+    [const { AtomicUsize::new(0) }; scheduler::MAX_TASKS];
+
+/// Filtre **calisti mi**? Iki kez cagirmamak icin: filtre de sahiplenmezse
+/// surec sonlanmali, yoksa dongu olusurdu.
+static FILTER_RAN: [AtomicUsize; scheduler::MAX_TASKS] =
+    [const { AtomicUsize::new(0) }; scheduler::MAX_TASKS];
+
 /// Vektorlu isleyiciler; sifir = bos yuva.
 static VEH: [[AtomicUsize; MAX_VEH]; scheduler::MAX_TASKS] =
     [const { [const { AtomicUsize::new(0) }; MAX_VEH] }; scheduler::MAX_TASKS];
@@ -211,6 +236,8 @@ static POINTERS_AT: [AtomicUsize; scheduler::MAX_TASKS] =
 /// Yurumede kalinan yer: once vektorlu liste, sonra (i386'da) zincir.
 const PHASE_VECTORED: usize = 0;
 const PHASE_CHAIN: usize = 1;
+/// Sahipsiz istisna filtresi calisiyor.
+const PHASE_FILTER: usize = 2;
 static PHASE: [AtomicUsize; scheduler::MAX_TASKS] =
     [const { AtomicUsize::new(0) }; scheduler::MAX_TASKS];
 static NEXT_VEH: [AtomicUsize; scheduler::MAX_TASKS] =
@@ -252,6 +279,17 @@ pub fn reset(task: usize) {
     }
     ACTIVE[task].store(0, Ordering::Relaxed);
     PHASE[task].store(PHASE_VECTORED, Ordering::Relaxed);
+    FILTER[task].store(0, Ordering::Relaxed);
+    FILTER_RAN[task].store(0, Ordering::Relaxed);
+}
+
+/// `SetUnhandledExceptionFilter`. Doner: **onceki** filtre (Windows'un
+/// sozlesmesi; programlar zincirlemek icin onu saklar).
+pub fn set_filter(task: usize, handler: usize) -> usize {
+    if task >= scheduler::MAX_TASKS {
+        return 0;
+    }
+    FILTER[task].swap(handler, Ordering::Relaxed)
 }
 
 /// `AddVectoredExceptionHandler`. `first` sifirdan farkliysa isleyici
@@ -474,6 +512,7 @@ unsafe fn begin(
     CONTEXT_AT[task].store(context_at, Ordering::Relaxed);
     POINTERS_AT[task].store(pointers_at, Ordering::Relaxed);
     PHASE[task].store(PHASE_VECTORED, Ordering::Relaxed);
+    FILTER_RAN[task].store(0, Ordering::Relaxed);
     FLAGS[task].store(flags as usize, Ordering::Relaxed);
     NEXT_VEH[task].store(0, Ordering::Relaxed);
     NEXT_RECORD[task].store(chain_head(teb_at), Ordering::Relaxed);
@@ -539,17 +578,17 @@ unsafe fn advance(task: usize, base: usize) -> Option<UserContext> {
     loop {
         let record = NEXT_RECORD[task].load(Ordering::Relaxed);
         if record == usize::MAX || record == 0 {
-            return None;
+            return last_resort(task, base, pointers_at);
         }
         let steps = CHAIN_STEPS[task].fetch_add(1, Ordering::Relaxed);
         if steps >= MAX_CHAIN {
-            return None;
+            return last_resort(task, base, pointers_at);
         }
         // Kayit iki kelimedir: {Next, Handler}. Yiginda durur, yani
         // surec onu bozmus olabilir -- okumadan once dogrula.
         let word = core::mem::size_of::<usize>();
         if !writable(record, word * 2) {
-            return None;
+            return last_resort(task, base, pointers_at);
         }
         let next = (record as *const usize).read_unaligned();
         let handler = ((record + word) as *const usize).read_unaligned();
@@ -562,6 +601,30 @@ unsafe fn advance(task: usize, base: usize) -> Option<UserContext> {
         // isleyici yerel degiskenlerine oradan ulasir.
         return build_frame(task, base, handler, &[record_at, record, context_at, 0]);
     }
+}
+
+/// Zincir bitti, kimse sahiplenmedi: son savunma hatti.
+///
+/// Windows'ta bu noktada `UnhandledExceptionFilter` calisir. Programlar
+/// oraya bir cokme raporlayicisi takar -- gunluge yazan, ekrana pencere
+/// cikaran, ya da CONTEXT'i duzeltip sureci kurtaran bir kod.
+///
+/// Filtre yalnizca **bir kez** cagrilir: filtrenin kendisi de
+/// sahiplenmezse surec sonlanmali, yoksa "sahipsiz -> filtre -> sahipsiz"
+/// dongusu olusurdu.
+unsafe fn last_resort(task: usize, base: usize, pointers_at: usize) -> Option<UserContext> {
+    if FILTER_RAN[task].load(Ordering::Relaxed) != 0 {
+        return None;
+    }
+    let filter = FILTER[task].load(Ordering::Relaxed);
+    if filter == 0 {
+        return None;
+    }
+    FILTER_RAN[task].store(1, Ordering::Relaxed);
+    // Filtrenin imzasi VEH ile ayni: tek arguman, EXCEPTION_POINTERS*.
+    // Donus degerleri ise farkli -- bkz. `continue_dispatch`.
+    PHASE[task].store(PHASE_FILTER, Ordering::Relaxed);
+    build_frame(task, base, filter, &[pointers_at])
 }
 
 /// Isleyiciye girilecek yigin cercevesini kurar.
@@ -666,11 +729,22 @@ pub unsafe fn continue_dispatch(
     // zincir 0. Ayni sayiyi ikisinde de kabul etmek, zincirdeki bir
     // "sirakine gec" (1) yanitini yanlis okumak olurdu.
     let decision = disposition as u32;
-    let continue_execution = if phase == PHASE_VECTORED {
-        decision == EXCEPTION_CONTINUE_EXECUTION
-    } else {
-        decision == DISPOSITION_CONTINUE_EXECUTION
+    // Uc mekanizma, uc ayri sayi kumesi. Filtrenin "devam et"i VEH ile
+    // ayni (-1), ama "sonlandir" icin ayri bir degeri var (1) -- ve o
+    // deger zincirde "sirakine gec" anlamina geliyor. Ayni cagriyi tek
+    // kumeyle okumak, uc yerden birini yanlis yorumlamak olurdu.
+    let continue_execution = match phase {
+        PHASE_VECTORED | PHASE_FILTER => decision == EXCEPTION_CONTINUE_EXECUTION,
+        _ => decision == DISPOSITION_CONTINUE_EXECUTION,
     };
+    // Filtre "isleyiciyi calistir" derse (ya da bir sey sahiplenmezse)
+    // surec sonlanir; filtreden sonra gidilecek baska yer yok.
+    if phase == PHASE_FILTER && !continue_execution {
+        let _ = EXCEPTION_EXECUTE_HANDLER;
+        ACTIVE[task].store(0, Ordering::Relaxed);
+        UNHANDLED.fetch_add(1, Ordering::Relaxed);
+        return false;
+    }
 
     // `EXCEPTION_NONCONTINUABLE`: istisnayi ureten taraf "bu noktadan
     // devam edilemez" demis. Windows'ta bir isleyici yine de "devam et"

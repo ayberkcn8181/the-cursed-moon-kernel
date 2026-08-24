@@ -120,6 +120,7 @@ pub const NT_FREE_LIBRARY: u32 = 0x3032;
 pub const NT_CREATE_FILE_MAPPING_A: u32 = 0x3033;
 pub const NT_MAP_VIEW_OF_FILE: u32 = 0x3034;
 pub const NT_UNMAP_VIEW_OF_FILE: u32 = 0x3035;
+pub const NT_SET_UNHANDLED_EXCEPTION_FILTER: u32 = 0x3036;
 
 pub const NT_USER_CREATE_WINDOW_W32: u32 = 0x3010;
 pub const NT_GDI_GET_BITS_W32: u32 = 0x3011;
@@ -1724,6 +1725,18 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
                 set_last_error(ERROR_INVALID_HANDLE);
                 WIN32_FALSE
             }
+        }
+
+        // SetUnhandledExceptionFilter(lpTopLevelFilter) -> onceki filtre
+        //
+        // Zincirin **sonundaki** son savunma hatti. Hicbir isleyici
+        // sahiplenmezse bu filtre calisir; programlar oraya bir cokme
+        // raporlayicisi takar. Donus degeri Windows'un sozlesmesi geregi
+        // **onceki** filtredir -- programlar zincirlemek icin saklar.
+        NT_SET_UNHANDLED_EXCEPTION_FILTER => {
+            let handler = arg_ptr(args, 0).unwrap_or(0);
+            let task = crate::level0a::core::scheduler::current_id();
+            seh::set_filter(task, handler)
         }
 
         // --- Dosya esleme (bkz. `mapping.rs`) ---

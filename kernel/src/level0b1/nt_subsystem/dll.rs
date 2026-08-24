@@ -386,6 +386,12 @@ static KERNEL32: &[Export] = &[
         service: nt::NT_UNMAP_VIEW_OF_FILE,
         stack_bytes: 4,
     },
+    Export {
+        name: "SetUnhandledExceptionFilter",
+        ordinal: 47,
+        service: nt::NT_SET_UNHANDLED_EXCEPTION_FILTER,
+        stack_bytes: 4,
+    },
 ];
 
 /// `TCMKGUI.dll` -- win32k cagrilarinin kullanici modundaki yuzu.
