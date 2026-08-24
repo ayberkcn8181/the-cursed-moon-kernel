@@ -333,7 +333,48 @@ extern "system" {
     /// Basvuru sayaci olmadigi icin serbest birakilacak bir sey yok;
     /// gecerli bir tanitici icin yine de TRUE doner.
     pub fn FreeLibrary(module: Hmodule) -> Bool;
+
+    /// Bir dosya icin **esleme nesnesi** yaratir.
+    ///
+    /// POSIX'te bu adim yok: `mmap` tek cagridir. Windows'ta aradaki
+    /// nesne, eslemenin adlandirilip surecler arasinda paylasilabilmesi
+    /// icin var -- TCMK adlandirmayi desteklemiyor (`lpName` doluysa
+    /// hata), ama iki adimli yapiyi koruyor.
+    ///
+    /// `max_size_low` sifirsa dosyanin tamami eslenir.
+    pub fn CreateFileMappingA(
+        file: Handle,
+        attributes: *mut c_void,
+        protect: Dword,
+        max_size_high: Dword,
+        max_size_low: Dword,
+        name: *const u8,
+    ) -> Handle;
+
+    /// Esleme nesnesinin bir parcasini adres uzayina koyar.
+    ///
+    /// `bytes` sifirsa nesnenin ofsetten sonraki tamami eslenir.
+    /// Basarisizlikta NULL doner.
+    pub fn MapViewOfFile(
+        mapping: Handle,
+        desired_access: Dword,
+        offset_high: Dword,
+        offset_low: Dword,
+        bytes: usize,
+    ) -> *mut u8;
+
+    /// Gorunumu kaldirir. **Yalnizca adres** alir -- uzunlugu cekirdek
+    /// hatirlar. POSIX `munmap`in ikisini birden istemesinin tersi.
+    pub fn UnmapViewOfFile(base: *const u8) -> Bool;
 }
+
+/// `CreateFileMappingA`nin koruma degerleri (Win32 ile ayni).
+pub const PAGE_READONLY: Dword = 0x02;
+pub const PAGE_READWRITE: Dword = 0x04;
+
+/// `MapViewOfFile`in erisim degerleri.
+pub const FILE_MAP_READ: Dword = 0x0004;
+pub const FILE_MAP_WRITE: Dword = 0x0002;
 
 /// Modul taniticisi. Gercek Windows'ta DLL'in yuklendigi tabandir;
 /// TCMK'de gomulu DLL'ler icin etiketlenmis bir sayidir (ortada imaj

@@ -4,6 +4,8 @@
 // (x86_64) yukleyicileri ayni ihracat tablosunu kullanir, yalnizca
 // urettikleri thunk'in cagri gelenegi degisir (bkz. dll::emit_thunk).
 pub mod dll;
+/// Dosya esleme nesneleri: CreateFileMapping / MapViewOfFile.
+pub mod mapping;
 /// Modul tablosu: GetModuleHandleA / GetProcAddress / LoadLibraryA.
 pub mod modules;
 pub mod nt_syscalls;

@@ -210,6 +210,103 @@ macro_rules! syscall_asm {
     }};
 }
 
+/// Alti argumanli sistem cagrisi (`mmap`).
+///
+/// i386'da bu **elle yazilmis** olmak zorunda: altinci arguman EBP'ye
+/// gider ve EBP derleyicinin cerceve isaretcisidir; Rust'in satir ici
+/// assembly'si onu arguman olarak vermeye izin vermez. glibc de ayni
+/// sebeple `mmap` icin ayri bir stub tutar -- EBP'yi kaydedip cagriyi
+/// yapip geri yukleyen bir sarmalayici.
+///
+/// x86_64'te boyle bir sorun yok: alti arguman da (RDI, RSI, RDX, R10,
+/// R8, R9) siradan registerlar.
+///
+/// # Safety
+/// Bkz. [`syscall3`].
+#[cfg(target_arch = "x86")]
+#[inline(always)]
+pub unsafe fn syscall6(
+    n: usize,
+    a1: usize,
+    a2: usize,
+    a3: usize,
+    a4: usize,
+    a5: usize,
+    a6: usize,
+) -> usize {
+    extern "C" {
+        fn tcmk_syscall6(
+            n: usize,
+            a1: usize,
+            a2: usize,
+            a3: usize,
+            a4: usize,
+            a5: usize,
+            a6: usize,
+        ) -> usize;
+    }
+    tcmk_syscall6(n, a1, a2, a3, a4, a5, a6)
+}
+
+#[cfg(target_arch = "x86")]
+core::arch::global_asm!(
+    r#"
+.section .text
+.globl tcmk_syscall6
+.type tcmk_syscall6, @function
+tcmk_syscall6:
+    push ebp
+    push ebx
+    push esi
+    push edi
+    /* Dort register itildi: argumanlar donus adresinin ustunde,
+       yani esp + 16 + 4 = esp + 20'den baslar. */
+    mov eax, [esp + 20]
+    mov ebx, [esp + 24]
+    mov ecx, [esp + 28]
+    mov edx, [esp + 32]
+    mov esi, [esp + 36]
+    mov edi, [esp + 40]
+    mov ebp, [esp + 44]
+    int 0x80
+    pop edi
+    pop esi
+    pop ebx
+    pop ebp
+    ret
+"#
+);
+
+/// # Safety
+/// Bkz. [`syscall3`].
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+pub unsafe fn syscall6(
+    n: usize,
+    a1: usize,
+    a2: usize,
+    a3: usize,
+    a4: usize,
+    a5: usize,
+    a6: usize,
+) -> usize {
+    let ret: usize;
+    asm!(
+        "syscall",
+        inlateout("rax") n => ret,
+        in("rdi") a1,
+        in("rsi") a2,
+        in("rdx") a3,
+        in("r10") a4,
+        in("r8") a5,
+        in("r9") a6,
+        lateout("rcx") _,
+        lateout("r11") _,
+        options(nostack),
+    );
+    ret
+}
+
 /// # Safety
 /// Cagiran, verilen numaranin ve argumanlarin cekirdek sozlesmesine
 /// uydugunu garanti etmelidir (ornegin isaretciler gecerli olmalidir).
@@ -811,16 +908,75 @@ pub unsafe fn rename(old: *const u8, new: *const u8) -> isize {
 /// `brk`'ten farki: `brk` tek bir siniri iter, `mmap` bagimsiz bloklar
 /// verir ve `munmap` **cerceveleri havuza geri dondurur**.
 ///
-/// TCMK yalnizca anonim/ozel eslemeyi destekler: `addr` sifir olmak
-/// zorunda, `prot` yok sayilir, dosya destekli esleme yok.
+/// `addr` sifir olmak zorunda (TCMK pencereyi kendi secer) ve `prot`
+/// yok sayilir.
 pub fn mmap(len: usize) -> Option<*mut u8> {
-    let r = unsafe { syscall3(SYS_MMAP, 0, len, 0) as isize };
+    mmap_file(len, -1, 0)
+}
+
+/// `MAP_ANONYMOUS`
+pub const MAP_ANONYMOUS: usize = 0x20;
+/// `MAP_PRIVATE`
+pub const MAP_PRIVATE: usize = 0x02;
+
+/// **Dosya destekli** esleme: dosyanin `offset`ten baslayan `len` bayti.
+///
+/// Bir dosyayi okumak yerine **adreslemenin** yolu budur. `fd` negatifse
+/// esleme anonimdir (bos sayfa).
+///
+/// Windows'ta ayni is iki cagriyla yapilir: once `CreateFileMappingA`
+/// ile bir esleme **nesnesi**, sonra `MapViewOfFile` ile adres. Aradaki
+/// nesne, eslemenin adlandirilip surecler arasinda paylasilabilmesi
+/// icin var.
+///
+/// TCMK'de esleme **ozeldir** (`MAP_PRIVATE`): yazmalar dosyaya gitmez.
+/// Sayfa onbellegi olmadigi icin icerik esleme aninda okunur.
+///
+/// Ofsetin cekirdege gidis birimi mimariye gore degisir (i386'da sayfa,
+/// x86_64'te bayt); burada her zaman **bayt** verilir ve donusum
+/// asagida yapilir.
+pub fn mmap_file(len: usize, fd: isize, offset: usize) -> Option<*mut u8> {
+    // POSIX'in kurali: ofset **sayfa hizali** olmak zorunda. i386'da bu
+    // zaten ABI'ye gomulu (`mmap2` ofseti sayfa cinsinden alir), ama
+    // bolmeden once reddetmek gerekiyor -- yoksa 8 bayt sessizce sifira
+    // yuvarlanir ve cagiran dosyanin basini gordugunu fark etmez.
+    // glibc de bu kontrolu cekirdege gitmeden yapar.
+    if offset % 4096 != 0 {
+        return None;
+    }
+    let flags = if fd < 0 {
+        MAP_PRIVATE | MAP_ANONYMOUS
+    } else {
+        MAP_PRIVATE
+    };
+    // i386'da cagri `mmap2`dir ve ofset sayfa cinsindendir.
+    #[cfg(target_arch = "x86")]
+    let raw_offset = offset / 4096;
+    #[cfg(target_arch = "x86_64")]
+    let raw_offset = offset;
+
+    let r = unsafe {
+        syscall6(
+            SYS_MMAP,
+            0,
+            len,
+            PROT_READ | PROT_WRITE,
+            flags,
+            fd as usize,
+            raw_offset,
+        ) as isize
+    };
     if r < 0 {
         None
     } else {
         Some(r as usize as *mut u8)
     }
 }
+
+/// `mmap`in koruma bayraklari. TCMK hepsini okuma+yazma olarak
+/// esler -- sayfa duzeyinde ayri izin yok.
+pub const PROT_READ: usize = 0x1;
+pub const PROT_WRITE: usize = 0x2;
 
 /// Ayrilan bolgeyi birakir; cerceveler havuza doner.
 pub fn munmap(addr: *mut u8, len: usize) -> isize {

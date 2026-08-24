@@ -434,7 +434,7 @@ fn errno_of(err: KernelError) -> i32 {
 /// frame'in EAX alanina yazar (i386 Linux ABI).
 pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
     let number = frame.number();
-    let [arg1, arg2, arg3, _, _] = frame.args();
+    let [arg1, arg2, arg3, arg4, arg5] = frame.args();
 
     let result: i32 = match number {
         // `exit` ve `exit_group` ayni yere iner.
@@ -918,15 +918,77 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
         // (butun kullanici sayfalari okuma+yazma) ve dosya alanlari hic
         // gelmez. Desteklenmeyen bir cagriyi sessizce baska bir sey gibi
         // davranmak yerine reddetmek dogru olan.
+        // `mmap(addr, len, prot, flags, fd, offset)`
+        //
+        // Iki bicim var ve ikisi de burada:
+        //
+        //   * **Anonim** (`MAP_ANONYMOUS`, ya da `fd = -1`): bos sayfa.
+        //     Ilk gunden beri destekleniyordu.
+        //   * **Dosya destekli**: dosyanin `offset`ten baslayan kismi.
+        //     Bir dosyayi okumak yerine **adreslemenin** yolu budur ve
+        //     gercek yazilimlarda cok yaygin.
+        //
+        // Ofsetin birimi mimariye gore degisir: i386'da cagri `mmap2`dir
+        // ve ofset **sayfa** cinsindendir (boylece 32 bit ile 44 bitlik
+        // dosya adreslenebilir); x86_64'te bayttir. Bu ayrimi yapmamak,
+        // 4096 kat yanlis yerden okumak demek olurdu.
         SYS_MMAP => {
+            const MAP_ANONYMOUS: usize = 0x20;
             let space = crate::level0a::core::scheduler::address_space_of(
                 crate::level0a::core::scheduler::current_id(),
             );
-            if arg1 != 0 || space == 0 {
+            let flags = arg4;
+            let fd = arg5 as isize;
+            #[cfg(target_arch = "x86")]
+            let offset = frame.arg6().wrapping_mul(4096);
+            #[cfg(target_arch = "x86_64")]
+            let offset = frame.arg6();
+
+            // `addr` ipucu yok sayilmiyor, **reddediliyor**: TCMK
+            // pencereyi kendi seciyor ve istenen adrese yerlestirmek
+            // gibi bir yetenegi yok. Sessizce baska bir adres dondurmek,
+            // `MAP_FIXED` bekleyen kodu bozardi.
+            // Ofset sayfa hizali olmak zorunda (POSIX). i386'da birim
+            // zaten sayfa, yani kontrol x86_64'te anlamli -- ama iki
+            // mimaride de ayni kod yolundan geciyor.
+            if arg1 != 0 || space == 0 || arg2 == 0 || offset % 4096 != 0 {
                 -EINVAL
             } else {
+                let anonymous = flags & MAP_ANONYMOUS != 0 || fd < 0;
                 match unsafe { mmu::mmap_user(space, arg2) } {
                     Some(addr) => {
+                        if !anonymous {
+                            // Icerik **simdi** dolduruluyor: TCMK'de
+                            // sayfa onbellegi yok, yani "dosyadan tembel
+                            // oku" diyecek bir katman da yok. Yazma
+                            // sirasinda talep uzerine sayfalama devreye
+                            // giriyor (bkz. `mmu::handle_demand_fault`),
+                            // yani cerceveler yine ilk dokunusta
+                            // veriliyor.
+                            let filled = unsafe {
+                                kernel_api::pread(fd as u32, addr as *mut u8, arg2, offset)
+                            };
+                            match filled {
+                                Ok(read) => {
+                                    // Dosyanin sonundan sonrasi sifir
+                                    // kalir -- POSIX de boyle soyler.
+                                    if read < arg2 {
+                                        unsafe {
+                                            core::ptr::write_bytes(
+                                                (addr + read) as *mut u8,
+                                                0,
+                                                arg2 - read,
+                                            );
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    unsafe { mmu::munmap_user(space, addr, arg2) };
+                                    return_errno(frame, errno_of(e));
+                                    return;
+                                }
+                            }
+                        }
                         frame.set_return(addr);
                         return;
                     }

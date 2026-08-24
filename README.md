@@ -26,9 +26,9 @@ masaustu sunuyor.
 |---|---|
 | Mimariler | i386 (Multiboot1, `int 0x80`) · x86_64 (Multiboot2, `syscall`) |
 | Ikili bicimleri | ELF32/ELF64 · PE32/PE32+ (ithal tablosu cozulur) |
-| POSIX cagrilari | 60 (+ ELF yardimci vektoru) |
-| NT/Win32 cagrilari | 65 (`KERNEL32.dll` 43 ihracat + `TCMKGUI.dll`) |
-| Ring 3 uygulamalari | 26 ELF + 8 PE |
+| POSIX cagrilari | 60 (+ ELF yardimci vektoru, dosya destekli `mmap`) |
+| NT/Win32 cagrilari | 68 (`KERNEL32.dll` 46 ihracat + `TCMKGUI.dll`) |
+| Ring 3 uygulamalari | 27 ELF + 9 PE |
 | Kalici depolama | ATA PIO + MBR + TCMKFS (yazilabilir, i386) |
 | Kod | ~23 bin satir cekirdek + ~9,5 bin satir userland |
 
@@ -41,7 +41,7 @@ tabani (POSIX TLS / Windows TEB), **surec yaratma**
 (sinyaller -- SEH/VEH).
 
 Her yetenek QEMU'da **olculerek** dogrulanmistir: `probe` (16 sinav),
-`winprobe` (12), `winseh` (8), `winmods` (6), `quoted` (4), `winargv` (4), `bequest`
+`winprobe` (12), `winseh` (8), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `bequest`
 (6), `nested` (4), `winenv` (4) gibi programlar sonucu hem ekrana hem
 seri gunluge yaziyor. Olcumler yol boyunca gercek hatalar buldu -- dolan
 VFS tablosu, `CreateFileA`'nin cevrilmeyen Windows yollari, `GDT`
@@ -3880,6 +3880,110 @@ Interface devreye girip sistemi guvenli duruma alir.
 
 Kabuktan `faults` komutu istatistikleri gosterir.
 
+## Dosyayi okumak yerine adreslemek
+
+`mmap` buraya kadar yalnizca **anonimdi**: bos sayfa veriyordu,
+`brk`in yapamadigi seyi (cerceveleri geri verme) yapiyordu, ama bir
+dosyayla ilgisi yoktu. Artik dosya destekli esleme de var -- iki
+dunyada da.
+
+```
+[mapped] A eslenen icerik:   gecti (eslenen baytlar read() ile ayni)
+[mapped] B hizasiz ofset:    gecti (sayfa hizali olmayan ofset reddedildi)
+[mapped] C dosya sonu:       gecti (sinirin otesi sifir geldi)
+[mapped] D munmap + anonim:  gecti (bolge birakildi, anonim esleme saglam)
+
+[winmap] A eslenen icerik:       gecti (eslenen baytlar ReadFile ile ayni)
+[winmap] B adlandirilmis esleme: gecti (reddedildi, ERROR_NOT_SUPPORTED)
+[winmap] C nesne kapandi:        gecti (nesne kapandi, gorunum yasiyor)
+[winmap] D UnmapViewOfFile:      gecti (bir kez kaldirildi, ikincisi reddedildi)
+```
+
+![dosya esleme](docs/screenshot-mapping.png)
+
+### Farkli sozlesme, ayni is
+
+Bir dosyayi adreslemek onu okumaktan **baska bir sozlesmedir**:
+
+```text
+  read()  -> tampona KOPYALA, imleci ilerlet
+  mmap()  -> dosyanin kendisini ADRESLE, imlec yok
+```
+
+Iki ABI ayni ise farkli sayida adimla variyor:
+
+```text
+  POSIX   mmap(NULL, len, PROT_READ, MAP_PRIVATE, fd, offset)
+            -> tek cagri, dogrudan adres
+
+  Win32   CreateFileMappingA(hFile, ..) -> esleme NESNESI
+          MapViewOfFile(nesne, ..)      -> adres
+          UnmapViewOfFile(adres)
+          CloseHandle(nesne)
+```
+
+Aradaki nesne bosuna degil: Windows'ta **adlandirilabilir** ve baska
+surecler ayni adla acip ayni belleği paylasabilir. POSIX'te ayni is
+`shm_open` ile ayri bir yoldan yapilir. TCMK paylasimli bellek
+desteklemedigi icin adlandirilmis eslemeyi **reddediyor** -- sinav B
+tam olarak bunu olcuyor. Sessizce adsiz gibi davranmak, iki surecin ayni
+adla **ayri** bellek gormesi olurdu; yani sessiz bir veri hatasi.
+
+Bir asimetri daha:
+
+```text
+  munmap(addr, len)      -> uzunlugu CAGIRAN sayar
+  UnmapViewOfFile(addr)  -> uzunlugu CEKIRDEK hatirlar
+```
+
+Ikincisi cekirdege gorunum basina bir kayit tutturuyor; birincisi
+tutturmuyor.
+
+### Altinci arguman: i386'nin EBP sorunu
+
+`mmap`in alti parametresi var ve i386'da altincisi **EBP**'ye gidiyor.
+EBP derleyicinin cerceve isaretcisi; Rust'in satir ici assembly'si onu
+arguman olarak vermeye izin vermiyor. Cozum, glibc'nin yaptiginin
+aynisi: EBP'yi kaydedip cagriyi yapip geri yukleyen elle yazilmis bir
+stub.
+
+```asm
+tcmk_syscall6:
+    push ebp
+    ...
+    mov ebp, [esp + 44]
+    int 0x80
+    ...
+    pop ebp
+    ret
+```
+
+x86_64'te boyle bir sorun yok: alti arguman da (RDI, RSI, RDX, R10, R8,
+R9) siradan registerlar.
+
+### Ofsetin birimi mimariye gore degisiyor
+
+i386'da cagri `mmap2`dir ve ofset **sayfa** cinsindendir -- boylece 32
+bitlik bir sayiyla 44 bitlik dosya adreslenebilir. x86_64'te bayttir.
+Bunu karistirmak 4096 kat yanlis yerden okumak demek.
+
+Iki mimaride de ofset **sayfa hizali** olmak zorunda; hizasiz istek
+reddediliyor (sinav B'nin POSIX tarafi). Kontrol bolmeden once
+yapiliyor, yoksa sekiz bayt sessizce sifira yuvarlanir ve cagiran
+dosyanin basini gordugunu fark etmezdi.
+
+### Bilerek yapilmayanlar
+
+* **Sayfa onbellegi yok.** Icerik esleme aninda okunuyor, tembel degil.
+  Dosyalar RAMFS'te ya da 160 KiB'lik TCMKFS dosyalari oldugu icin fark
+  olculebilir degil, ama gercek bir cekirdek bunu sayfa hatasinda yapar.
+* **Esleme her zaman ozel** (`MAP_PRIVATE`). `PAGE_READWRITE` ile
+  yapilan bir yazma dosyaya **gitmez**; `MAP_SHARED` ve `msync` yok.
+* **Adlandirilmis esleme yok** (yukari bkz.), yani surecler arasi
+  paylasimli bellek de yok.
+* **Gorev basina dort esleme nesnesi ve dort gorunum.** Cekirdekte
+  surec basina dinamik tahsis yapmamak genel tercih.
+
 ## PEB ve modul tablosu: `GetProcAddress` calisiyor
 
 Yardimci vektorun Windows'taki karsiligi PEB'dir. Buraya kadar PEB
@@ -4340,7 +4444,9 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
 - **Diske takas (swap) yok.** `munmap` cerceveleri geri veriyor (yukari
   bkz.) ama kullanilan bir sayfayi diske atip yerini bosaltmak yok;
   havuz dolarsa `fork`/`execve` reddedilir. `mmap` penceresi de surec
-  basina sabit 512 KiB ve yalnizca anonim -- dosya destekli esleme yok.
+  basina sabit 512 KiB. Dosya destekli esleme artik var (yukari bkz.)
+  ama **ozel** ve tembel degil: `MAP_SHARED`/`msync` yok, icerik esleme
+  aninda okunuyor.
 - **Boru okumasi bloke etmez** ve boru sayisi dorttur. `dup`/`dup2` ve
   `poll` var (yukari bkz.); `select` yok -- `poll` onu kapsadigi icin
   ayrica yazilmadi. `poll` bir bekleme kuyrugu degil, tik cozunurluklu

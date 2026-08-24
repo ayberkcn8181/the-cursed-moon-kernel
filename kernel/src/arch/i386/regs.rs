@@ -55,6 +55,16 @@ impl SyscallFrame {
         ]
     }
 
+    /// Altinci arguman: EBP.
+    ///
+    /// `args()` bes taneyle yetiniyor cunku cagrilarin nerdeyse hepsi o
+    /// kadarini kullaniyor. `mmap` istisna: Linux'ta alti parametresi
+    /// var ve sonuncusu dosya ofseti. EBP'yi genel listeye katmak butun
+    /// cagrilari bir kelime daha genis yapardi, o yuzden ayri.
+    pub fn arg6(&self) -> usize {
+        self.ebp as usize
+    }
+
     /// Donus degeri EAX uzerinden verilir.
     pub fn set_return(&mut self, value: usize) {
         self.eax = value as u32;

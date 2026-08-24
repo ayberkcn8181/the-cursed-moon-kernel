@@ -555,6 +555,35 @@ pub const SEEK_END: usize = 2;
 /// isaretsiz kelime tasidigi icin `SEEK_CUR`/`SEEK_END` yalnizca **ileri**
 /// ya da sifir olabilir; `SEEK_END` ile sifir vermek dosya sonuna gitmek
 /// demektir ki "ekleme" kalibinin ihtiyaci da budur.
+/// Bir dosyanin `offset` baytindan baslayan `len` baytini `dst`ye okur
+/// ve **imleci bozmaz**.
+///
+/// Dosya destekli eslemenin (`mmap`/`MapViewOfFile`) ihtiyaci tam olarak
+/// bu: esleme, dosyayi okuyan koddan bagimsizdir; cagiranin imleci
+/// kaymamali. POSIX'te bunun adi `pread`dir.
+///
+/// Doner: gercekten okunan bayt (dosya kisaysa istenenden az).
+///
+/// # Safety
+/// `dst`, `len` bayt yazilabilir olmalidir.
+pub unsafe fn pread(
+    fd_num: u32,
+    dst: *mut u8,
+    len: usize,
+    offset: usize,
+) -> Result<usize, KernelError> {
+    // Imleci sakla, ofsete git, oku, geri koy. Uc adimin arasinda baska
+    // bir gorev ayni tanimlayiciyi kullanamaz: TCMK tek cekirdekli ve bu
+    // yol kesme almadan tamamlaniyor.
+    let saved = file_offset(fd_num)?;
+    lseek(fd_num, offset, 0)?;
+    let read = read(fd_num, dst, len);
+    // Hata olsa bile imlec geri konur; aksi halde cagiranin bir sonraki
+    // okumasi baska bir yerden gelirdi.
+    let _ = lseek(fd_num, saved, 0);
+    read
+}
+
 pub fn lseek(fd_num: u32, offset: usize, whence: usize) -> Result<usize, KernelError> {
     let entry = fd::get(fd_num as usize).ok_or(KernelError::BadFileDescriptor)?;
     if entry.kind != fd::FdKind::File {

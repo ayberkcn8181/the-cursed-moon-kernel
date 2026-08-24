@@ -32,6 +32,7 @@ use crate::level0a::core::mmu;
 use crate::level0a::kernel_api::{self, KernelError};
 use crate::level0a::{gui_api, wm};
 
+use super::mapping;
 use super::modules;
 use super::seh;
 
@@ -116,6 +117,9 @@ pub const NT_GET_MODULE_HANDLE_A: u32 = 0x302F;
 pub const NT_GET_PROC_ADDRESS: u32 = 0x3030;
 pub const NT_LOAD_LIBRARY_A: u32 = 0x3031;
 pub const NT_FREE_LIBRARY: u32 = 0x3032;
+pub const NT_CREATE_FILE_MAPPING_A: u32 = 0x3033;
+pub const NT_MAP_VIEW_OF_FILE: u32 = 0x3034;
+pub const NT_UNMAP_VIEW_OF_FILE: u32 = 0x3035;
 
 pub const NT_USER_CREATE_WINDOW_W32: u32 = 0x3010;
 pub const NT_GDI_GET_BITS_W32: u32 = 0x3011;
@@ -174,6 +178,8 @@ const ERROR_ACCESS_DENIED: u32 = 5;
 const ERROR_INVALID_HANDLE: u32 = 6;
 /// Istenen DLL yuklu degil (`GetModuleHandleA`/`LoadLibraryA`).
 const ERROR_MOD_NOT_FOUND: u32 = 126;
+/// Bellek yetmedi.
+const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
 /// DLL var ama fonksiyon yok (`GetProcAddress`).
 const ERROR_PROC_NOT_FOUND: u32 = 127;
 /// `FindNextFileA` dizin bittiginde bunu birakir -- Windows'ta dongunun
@@ -545,8 +551,21 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
             // nesne sayaci yok, gorev yuvasi zaten cikista geri veriliyor.
             // Hata dondurmek, tutamacini duzgunce kapatan bir programi
             // yaniltirdi.
+            //
+            // Ucuncu tur esleme nesnesi (`CreateFileMapping`). Onu
+            // kapatmak **gorunumleri kaldirmaz**: Windows'ta da bellek,
+            // son gorunum `UnmapViewOfFile` ile kaldirilana kadar durur.
             match arg(args, 0) {
                 Some(handle) if handle as usize & PROCESS_HANDLE_FLAG != 0 => WIN32_TRUE,
+                Some(handle) if mapping::is_mapping(handle as usize) => {
+                    let task = crate::level0a::core::scheduler::current_id();
+                    if mapping::close(task, handle as usize) {
+                        WIN32_TRUE
+                    } else {
+                        set_last_error(ERROR_INVALID_HANDLE);
+                        WIN32_FALSE
+                    }
+                }
                 Some(handle) => match kernel_api::close(handle) {
                     Ok(()) => WIN32_TRUE,
                     Err(_) => WIN32_FALSE,
@@ -1704,6 +1723,138 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
             } else {
                 set_last_error(ERROR_INVALID_HANDLE);
                 WIN32_FALSE
+            }
+        }
+
+        // --- Dosya esleme (bkz. `mapping.rs`) ---
+
+        // CreateFileMappingA(hFile, lpAttributes, flProtect,
+        //                    dwMaximumSizeHigh, dwMaximumSizeLow, lpName)
+        //
+        // POSIX'te bu adim **yok**: `mmap` tek cagridir. Windows'ta
+        // aradaki nesne, eslemenin adlandirilip surecler arasinda
+        // paylasilabilmesi icin var. TCMK adlandirmayi desteklemiyor ama
+        // iki adimli yapiyi koruyor -- tek cagriya indirmek, gercek bir
+        // Windows programinin bekledigi sirayi bozardi.
+        NT_CREATE_FILE_MAPPING_A => {
+            let file = arg(args, 0).unwrap_or(0) as usize;
+            let size_low = arg(args, 4).unwrap_or(0) as usize;
+            let name = arg_ptr(args, 5).unwrap_or(0);
+            let task = crate::level0a::core::scheduler::current_id();
+
+            if name != 0 {
+                // Adlandirilmis esleme paylasimli bellek demek; TCMK'de
+                // yok. Sessizce adsiz gibi davranmak, iki surecin ayni
+                // adla ayri bellek gormesi olurdu.
+                set_last_error(ERROR_NOT_SUPPORTED);
+                return_win32(frame, 0);
+                return;
+            }
+            // `hFile` gecerli bir dosya tanimlayicisi olmali.
+            if file == INVALID_HANDLE_VALUE || mapping::is_mapping(file) {
+                set_last_error(ERROR_INVALID_HANDLE);
+                return_win32(frame, 0);
+                return;
+            }
+            // Boy sifirsa dosyanin tamami (Windows'un kurali).
+            let size = if size_low == 0 {
+                match kernel_api::file_size(file as u32) {
+                    Ok(size) => size,
+                    Err(e) => {
+                        set_last_error(win32_error_of(e));
+                        return_win32(frame, 0);
+                        return;
+                    }
+                }
+            } else {
+                size_low
+            };
+            let handle = mapping::create(task, file as u32, size);
+            if handle == 0 {
+                set_last_error(ERROR_INVALID_PARAMETER);
+            }
+            handle
+        }
+
+        // MapViewOfFile(hMapping, dwAccess, dwOffsetHigh, dwOffsetLow, dwBytes)
+        //
+        // `dwBytes` sifirsa nesnenin ofsetten sonraki tamami eslenir.
+        NT_MAP_VIEW_OF_FILE => {
+            let handle = arg(args, 0).unwrap_or(0) as usize;
+            let offset = arg(args, 3).unwrap_or(0) as usize;
+            let requested = arg(args, 4).unwrap_or(0) as usize;
+            let task = crate::level0a::core::scheduler::current_id();
+
+            let Some((fd, size)) = mapping::object(task, handle) else {
+                set_last_error(ERROR_INVALID_HANDLE);
+                return_win32(frame, 0);
+                return;
+            };
+            if offset >= size {
+                set_last_error(ERROR_INVALID_PARAMETER);
+                return_win32(frame, 0);
+                return;
+            }
+            let length = if requested == 0 {
+                size - offset
+            } else {
+                requested.min(size - offset)
+            };
+
+            let space = crate::level0a::core::scheduler::address_space_of(task);
+            if space == 0 {
+                set_last_error(ERROR_INVALID_PARAMETER);
+                return_win32(frame, 0);
+                return;
+            }
+            let Some(addr) = (unsafe { mmu::mmap_user(space, length) }) else {
+                set_last_error(ERROR_NOT_ENOUGH_MEMORY);
+                return_win32(frame, 0);
+                return;
+            };
+            // Icerik simdi okunuyor: sayfa onbellegi yok (bkz.
+            // `mapping.rs`). POSIX tarafinda `mmap` de ayni yoldan
+            // geciyor.
+            match unsafe { kernel_api::pread(fd, addr as *mut u8, length, offset) } {
+                Ok(read) => {
+                    if read < length {
+                        unsafe {
+                            core::ptr::write_bytes((addr + read) as *mut u8, 0, length - read);
+                        }
+                    }
+                }
+                Err(e) => {
+                    unsafe { mmu::munmap_user(space, addr, length) };
+                    set_last_error(win32_error_of(e));
+                    return_win32(frame, 0);
+                    return;
+                }
+            }
+            if !mapping::remember_view(task, addr, length) {
+                unsafe { mmu::munmap_user(space, addr, length) };
+                set_last_error(ERROR_NOT_ENOUGH_MEMORY);
+                return_win32(frame, 0);
+                return;
+            }
+            addr
+        }
+
+        // UnmapViewOfFile(lpBaseAddress) -> BOOL
+        //
+        // Yalnizca **adres** aliyor. Uzunlugu cekirdek hatirliyor --
+        // POSIX `munmap`in ikisini birden istemesinin tam tersi.
+        NT_UNMAP_VIEW_OF_FILE => {
+            let addr = arg_ptr(args, 0).unwrap_or(0);
+            let task = crate::level0a::core::scheduler::current_id();
+            let space = crate::level0a::core::scheduler::address_space_of(task);
+            match mapping::forget_view(task, addr) {
+                Some(length) if space != 0 && unsafe { mmu::munmap_user(space, addr, length) } => {
+                    WIN32_TRUE
+                }
+                _ => {
+                    set_last_error(ERROR_INVALID_PARAMETER);
+                    WIN32_FALSE
+                }
             }
         }
 

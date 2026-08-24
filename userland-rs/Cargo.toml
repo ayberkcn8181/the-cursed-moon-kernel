@@ -29,12 +29,20 @@ name = "winenv"
 path = "src/win/envtest.rs"
 
 [[bin]]
+name = "mapped"
+path = "src/bin/mapped.rs"
+
+[[bin]]
 name = "quoted"
 path = "src/bin/quoted.rs"
 
 [[bin]]
 name = "winprobe"
 path = "src/win/probe.rs"
+
+[[bin]]
+name = "winmap"
+path = "src/win/mapping.rs"
 
 [[bin]]
 name = "winmods"

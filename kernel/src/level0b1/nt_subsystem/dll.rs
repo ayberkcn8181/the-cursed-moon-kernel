@@ -364,6 +364,28 @@ static KERNEL32: &[Export] = &[
         service: nt::NT_FREE_LIBRARY,
         stack_bytes: 4,
     },
+    Export {
+        name: "CreateFileMappingA",
+        ordinal: 44,
+        service: nt::NT_CREATE_FILE_MAPPING_A,
+        // hFile, lpAttributes, flProtect, dwMaximumSizeHigh,
+        // dwMaximumSizeLow, lpName
+        stack_bytes: 24,
+    },
+    Export {
+        name: "MapViewOfFile",
+        ordinal: 45,
+        service: nt::NT_MAP_VIEW_OF_FILE,
+        // hFileMappingObject, dwDesiredAccess, dwFileOffsetHigh,
+        // dwFileOffsetLow, dwNumberOfBytesToMap
+        stack_bytes: 20,
+    },
+    Export {
+        name: "UnmapViewOfFile",
+        ordinal: 46,
+        service: nt::NT_UNMAP_VIEW_OF_FILE,
+        stack_bytes: 4,
+    },
 ];
 
 /// `TCMKGUI.dll` -- win32k cagrilarinin kullanici modundaki yuzu.

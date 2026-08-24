@@ -53,3 +53,6 @@ GetModuleHandleA@4 @40
 GetProcAddress@8 @41
 LoadLibraryA@4 @42
 FreeLibrary@4 @43
+CreateFileMappingA@24 @44
+MapViewOfFile@20 @45
+UnmapViewOfFile@4 @46

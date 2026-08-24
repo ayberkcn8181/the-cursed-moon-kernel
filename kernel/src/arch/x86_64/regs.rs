@@ -191,6 +191,11 @@ impl SyscallFrame {
         ]
     }
 
+    /// Altinci arguman: R9 (bkz. i386 ikizi).
+    pub fn arg6(&self) -> usize {
+        self.r9 as usize
+    }
+
     pub fn set_return(&mut self, value: usize) {
         self.rax = value as u64;
     }
