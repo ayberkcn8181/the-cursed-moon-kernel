@@ -26,28 +26,30 @@ masaustu sunuyor.
 |---|---|
 | Mimariler | i386 (Multiboot1, `int 0x80`) · x86_64 (Multiboot2, `syscall`) |
 | Ikili bicimleri | ELF32/ELF64 · PE32/PE32+ (ithal tablosu cozulur) |
-| POSIX cagrilari | 60 (+ ELF yardimci vektoru, dosya destekli `mmap`) |
-| NT/Win32 cagrilari | 69 (`KERNEL32.dll` 47 ihracat + `TCMKGUI.dll`) |
-| Ring 3 uygulamalari | 27 ELF + 9 PE |
+| POSIX cagrilari | 62 (+ ELF yardimci vektoru, dosya destekli `mmap`, `clone`) |
+| NT/Win32 cagrilari | 71 (`KERNEL32.dll` 49 ihracat + `TCMKGUI.dll`) |
+| Ring 3 uygulamalari | 28 ELF + 10 PE |
 | Kalici depolama | ATA PIO + MBR + TCMKFS (yazilabilir, i386) |
-| Kod | ~23 bin satir cekirdek + ~9,5 bin satir userland |
+| Kod | ~28 bin satir cekirdek + ~13 bin satir userland |
 
 Uyumluluk yuzeyi su alanlarda **iki ABI'de birden** kurulu: dosya
 sistemi (acma/okuma/yazma/kesme/gezinme/yeniden adlandirma), surec
 (`fork`/`execve`/`waitpid`/sinyaller), ortam degiskenleri, calisma
 dizini, program argumanlari, saat, `stat`, `PATH` aramasi, is-parcacigi
 tabani (POSIX TLS / Windows TEB), **surec yaratma**
-(`fork`/`execve` -- `CreateProcess`) ve **istisna dagitimi**
-(sinyaller -- SEH/VEH).
+(`fork`/`execve` -- `CreateProcess`), **istisna dagitimi**
+(sinyaller -- SEH/VEH) ve **is parcaciklari**
+(`clone` -- `CreateThread`).
 
 Her yetenek QEMU'da **olculerek** dogrulanmistir: `probe` (16 sinav),
-`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `bequest`
+`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `bequest`
 (6), `nested` (4), `winenv` (4) gibi programlar sonucu hem ekrana hem
 seri gunluge yaziyor. Olcumler yol boyunca gercek hatalar buldu -- dolan
 VFS tablosu, `CreateFileA`'nin cevrilmeyen Windows yollari, `GDT`
 siniri, x86_64'te segment secicisinin taban MSR'sini silmesi, kesme ve
 `syscall` kapilarinin farkli cerceve duzeni, hic calismamis olan
-`fork`+`execve` kalibi -- ve her biri README'de kendi bolumunde yazili.
+`fork`+`execve` kalibi, hala kullanilan bir adres uzayinin yikilmasi --
+ve her biri README'de kendi bolumunde yazili.
 
 **Tamamlanan fazlar:**
 
@@ -2715,8 +2717,11 @@ tek bir kaynaga bakmak, ayrisma durumunu hic gormezdi.
   Windows'un istedigi gibi `-1` (zincir sonu) ile basliyor **ve** bir
   istisna gerceklestiginde zincir yurutuluyor. Bkz.
   [Coken surec olmek zorunda degil](#coken-surec-olmek-zorunda-degil--seh-ve-veh).
-* **Is-parcacigi yok**, yalnizca tabanlar var: TCMK'de bir gorev = bir
-  surec = bir akis.
+* ~~**Is-parcacigi yok**, yalnizca tabanlar var.~~ Artik var:
+  `CreateThread`/`ExitThread` ile bir surec birden fazla akis
+  tasiyabiliyor, `GetCurrentThreadId` ile `GetCurrentProcessId`
+  ayrisiyor. Bkz. [Bir surec, birden fazla
+  akis](#bir-surec-birden-fazla-akis--clone-ve-createthread).
 * **`set_thread_area` tek girdi ayiriyor**: Linux uc TLS girdisi tutar
   (GDT 6-8), TCMK bir tane -- ikinci bir istek ayni girdiyi yeniden
   yazar.
@@ -2757,10 +2762,15 @@ donus **toplam**: tek parca yazip donen bir uygulama ciktinin yarisini
 kaybederdi. `probe` H tam olarak bunu sinar.
 
 Win32 tarafinda bu batinin karsiligi `GetCurrentProcessId` /
-`GetCurrentThreadId`. Ikisi de **ayni** sayiyi donduruyor ve bu bir
-eksiklik degil: POSIX'te `getpid`/`gettid` ayrisir cunku bir surecte cok
-is parcacigi olur; TCMK'de bir gorev = bir surec = bir akis. Ayri sayilar
-uydurmak, is parcacigi varmis gibi gorunmek olurdu.
+`GetCurrentThreadId`. Bu bati yazildiginda ikisi de **ayni** sayiyi
+donduruyordu ve bu bilincli bir tercihti: POSIX'te `getpid`/`gettid`
+ayrisir cunku bir surecte cok is parcacigi olur; TCMK'de o zaman bir
+gorev = bir surec = bir akis idi ve ayri sayilar uydurmak, is parcacigi
+varmis gibi gorunmek olurdu.
+
+Simdi gercekten ayrisiyorlar -- cunku gercekten iki akis olabiliyor.
+Bkz. [Bir surec, birden fazla
+akis](#bir-surec-birden-fazla-akis--clone-ve-createthread).
 
 ### Bilerek yapilmayanlar
 
@@ -4432,6 +4442,224 @@ komutunu kullandigi icin hic gorunmemisti. Simdi ikisi de dogru.
   (sinav I). Filtre yalnizca bir kez cagriliyor -- kendisi de
   sahiplenmezse surec sonlanir, yoksa dongu olusurdu.
 
+## Bir surec, birden fazla akis -- `clone` ve `CreateThread`
+
+Bu README uzun sure su cumleyi tasidi: **bir gorev = bir surec = bir
+akis**. `gettid` ile `getpid` ayni sayiyi donduruyordu cunku ayirt
+edecek bir sey yoktu. Windows tarafinda ayni bosluk
+`GetCurrentThreadId() == GetCurrentProcessId()` olarak goruluyordu.
+
+Artik degil. Iki dunyanin da is-parcacigi cagrisi calisiyor ve ayni
+cekirdek yoluna iniyor:
+
+```
+[threads]   A bellek paylasimi:      gecti (yazdigi deger ana akista gorundu)
+[threads]   B kimlikler:             gecti (tid ayri, pid ayni)
+[threads]   C tanimlayici paylasimi: gecti (kardesin actigi dosya ana akista okundu)
+[threads]   D fork ile karsit:       gecti (cocugun yazdigi ebeveyne sizmadi)
+[threads]   E once ana akis:         gecti (ana akis cikti, kardes yazmaya devam etti)
+
+[winthread] A bellek paylasimi:      gecti (lpParameter ile yazilan deger ana akista gorundu)
+[winthread] B kimlikler:             gecti (tid ayri, pid ayni, lpThreadId dogru)
+[winthread] C tanitici paylasimi:    gecti (kardesin actigi dosya ana akista okundu)
+[winthread] D WaitForSingleObject:   gecti (tanitici beklendi, is parcacigi bitmisti)
+```
+
+![threads](docs/screenshot-threads.png)
+![winthread](docs/screenshot-winthread.png)
+
+### Is parcacigi nedir: paylasilan uc sey
+
+Cekirdek acisindan is parcacigi hala **bir gorev**. Fark, gorevin neyi
+kendine ait tuttugunda:
+
+| | `fork` cocugu | is parcacigi |
+|---|---|---|
+| adres uzayi (CR3) | kopyalanir (COW) | **paylasilir** |
+| tanimlayici tablosu | kopyalanir | **paylasilir** |
+| calisma dizini | kopyalanir | **paylasilir** |
+| ortam degiskenleri | kopyalanir | **paylasilir** |
+| yigin | kopyalanir | ayri |
+| TLS / TEB | kopyalanir | ayri |
+| `gettid` | ayrisir | ayrisir |
+| `getpid` | ayrisir | **ayni kalir** |
+
+Son iki satir sinav B'nin tamami. Yalnizca birine bakmak "ayri surec mi
+ayri akis mi" sorusunu cevaplamazdi: `gettid` ayrisiyor cunku iki akis
+var, `getpid` ayni kaliyor cunku tek surec var.
+
+### `Task.group`: tek alanla iki kavram
+
+Zahmetin buyuk kismi bu tek alanda:
+
+```rust
+pub struct Task {
+    ...
+    /// **Is parcacigi grubu**: bu gorevin ait oldugu surecin kimligi.
+    pub group: usize,
+}
+```
+
+Yeni bir surec dogunca `group = kendi indeksi`; yeni bir is parcacigi
+dogunca `group = yaratanin grubu`. `getpid` artik `current_group()`
+donduruyor, `gettid` ise `current_id()`. Linux'un `tgid`/`pid` ayrimi
+bire bir bu.
+
+Asil sonuc, kaynak tablolarinin indeksinin degismesi oldu:
+
+```rust
+// once:  gorev indeksine gore
+fd::table_of(scheduler::current_id())
+// simdi: gruba gore
+fd::table_of(scheduler::current_group())
+```
+
+Bu tek satir `CLONE_FILES`/`CLONE_FS` semantiginin **tamami**: kardesin
+actigi dosyayi ana akis gorur (sinav C), cunku ikisi ayni tabloyu
+adresliyor. Kopyalayip senkronize etmek gerekmedi -- kopya hic olmadi.
+
+### Adres uzayi ne zaman yikilir
+
+Bir gorev olurken adres uzayini yikiyordu. Is parcaciklari geldiginde
+bu, kardesin altindan zemini cekmek olurdu. Yikim artik sayima bagli:
+
+```rust
+if address_space_users(space) == 0 {
+    crate::level0a::core::fd::close_all(group_of(index));
+}
+if space != 0 && address_space_users(space) == 0 {
+    unsafe { crate::level0a::core::mmu::destroy_user_space(space) };
+}
+```
+
+`address_space_users` ayni CR3'u tasiyan canli gorevleri sayar. Ayri
+bir sayac tutmak yerine tablodan saymak bilincli: sayac ile gercek
+arasinda ayrisma ihtimali kalmiyor.
+
+`ExitProcess` ise tersini yapiyor -- `terminate_group(group, except)`
+ile butun kardesleri birlikte sonlandiriyor. POSIX'te ayni ayrimin adi
+zaten var: `exit` ile `exit_group` bu batida ayrildi.
+
+### Iki cagri, iki sozlesme
+
+```text
+clone(CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_THREAD, yigin, ...)
+    -> yigini CAGIRAN ayirir ve adresini verir
+    -> geriye bir SAYI (tid) doner
+    -> beklemek icin ayri bir yol gerekir (futex / pthread_join)
+
+CreateThread(attrs, dwStackSize, start, param, flags, &tid)
+    -> yigini CEKIRDEK ayirir; cagiran yalnizca boyu soyler (0 = varsayilan)
+    -> geriye beklenebilir bir TANITICI doner
+    -> WaitForSingleObject dogrudan calisir
+```
+
+Ikinci satir Windows'un kendi tercihini yansitiyor: is parcacigi orada
+bir **nesne**, yani surecle ayni bekleme yuzeyini kullanir. TCMK'de is
+parcacigi da bir gorev oldugu icin bu bedavaya geldi -- `CreateThread`
+donen taniticiya surec taniticilariyla ayni bayragi koyuyor ve
+`WaitForSingleObject` hicbir degisiklik gerektirmeden calisiyor
+(sinav D).
+
+POSIX tarafinda ayni kolaylik yok: `waitpid` yalnizca cocuklari gorur,
+is parcacigi cocuk degildir. `threads` bu yuzden bir bayrak yokluyor ve
+sinir asagida acikca yazili.
+
+### Donen bir is parcacigi ne yapar: 13 baytlik tramplen
+
+`worker` fonksiyonu `return` ettiginde nereye doner? Cagiran yok --
+gorevi cekirdek baslatti. Cekirdek bu yuzden yigina bir **donus adresi**
+koyuyor ve o adrese kucuk bir cikis dizisi yaziyor:
+
+```text
+  ELF bicimi:   mov eax, SYS_EXIT ; int 0x80
+  PE bicimi:    mov eax, NT_EXIT_THREAD ; int 0x2E
+```
+
+Onceki degeri (EAX/RAX) bilerek bozulmuyor: is parcaciginin donus
+degeri dogrudan cikis kodu oluyor. Tramplen kullanicinin **kendi**
+yiginin tepesinde duruyor, cekirdekte degil -- Ring 3 kodunun
+calistirabilmesi icin baska turlusu olmazdi.
+
+Giris cercevesi iki ABI'yi ayni anda memnun ediyor:
+
+```rust
+// x86_64
+const SHADOW: usize = 32;              // Win64'un golge alani
+let sp = ((top - word - SHADOW) & !0xF) - word;
+context.rcx = param as u64;            // Win64'un ilk argumani
+context.rdi = param as u64;            // System V'nin ilk argumani
+```
+
+Golge alani System V'de zararsiz bir bosluktur, iki register birden
+kurmak da oyle. Tek cerceve, iki dunya.
+
+### Olcumun buldugu hata: uzayi kim yikar
+
+Kod ilk halinde iki sinavdan (A-D) geciyordu, ama bir sey eksikti: ana
+akis **once** cikarsa ne olur?
+
+Surecin normal cikis yolu adres uzayini kosulsuz yikiyordu:
+
+```rust
+unsafe fn release_space(space: Option<usize>) {
+    if let Some(cr3) = space {
+        ...
+        mmu::destroy_user_space(cr3);   // <- kardes hala kosuyor olabilir
+    }
+}
+```
+
+Is parcaciklari yokken bu dogruydu; artik degil. Yikim `fork`un
+copy-on-write cerceveleri uzerinden ebeveyne kadar uzaniyordu -- yani
+hata yalnizca is parcacigini degil, **onu doguran surec agacini**
+dusuruyordu.
+
+Duzeltme her iki cikis yolunda ayni: uzay ancak son kullanici cikinca
+yikiliyor (`scheduler::address_space_users`). Ayni sey tanimlayici
+tablosu icin de gecerli -- o da gruba ait, o da yalnizca son uye
+cikarken bosaltiliyor (`scheduler::group_members`).
+
+Asil ders sinavin **kendisinde**. E'nin ilk hali "ebeveyn hala calisiyor
+mu" diye soruyordu ve hatali cekirdekte de **geciyordu**: hata
+izolasyonu coken gorevi durdurup gerisini ayakta tutuyor, yani sinav her
+iki durumda da ayni cevabi aliyordu. Sinav bu yuzden yeniden yazildi --
+kardes, ana akis ciktiktan **sonra** bir boruya bir bayt yaziyor:
+
+```text
+  ebeveyn        pipe() -> [okuma, yazma]
+    fork
+      cocuk      clone_thread(lingering, yazma) ; exit(0)
+      kardes     150 ms bekle ; write(yazma, "T")
+  ebeveyn        waitpid ; 400 ms bekle ; read(okuma)
+```
+
+O bayt geldiyse kardes gercekten yasamistir. Korumasiz cekirdekte
+`threads` hic ciktiverememisti; korumali cekirdekte bes sinav da
+geciyor. Bir sinavin gecmesi, olctugunu sandigi seyi olctugu anlamina
+gelmiyor -- once **hatali** surumde basarisiz oldugunu gormek gerekiyor.
+
+### Bilerek yapilmayanlar
+
+* **`pthread_join` / `futex` yok.** POSIX tarafinda is parcaciginin
+  bitmesini beklemenin yolu yok; `threads` bu yuzden paylasilan bir
+  bayragi yokluyor. Win32 tarafinda `WaitForSingleObject` calisiyor --
+  asimetri gercek ve olculuyor.
+* **`GetExitCodeThread` yok.** Cikis kodu tramplen uzerinden cekirdege
+  ulasiyor ama disaridan sorulamiyor.
+* **`dwStackSize` yok sayiliyor**: yigin her zaman sabit 8 KiB.
+  Istenen boyu tutmak, tutulamayacak bir soz vermek olurdu.
+* **`CREATE_SUSPENDED` yok** (`ResumeThread` de yok): is parcacigi
+  dogar dogmaz kosmaya baslar.
+* **Oncelik cagrilari yok**: `SetThreadPriority`/`GetThreadPriority`
+  yerine zamanlayicinin `nice` alani var, ama Win32 yuzu baglanmadi.
+* **`clone`un butun bayraklari desteklenmiyor.** `CLONE_VM|CLONE_FS|
+  CLONE_FILES|CLONE_THREAD` bekleniyor; `CLONE_SETTLS`,
+  `CLONE_PARENT_SETTID`, `CLONE_CHILD_CLEARTID` yok -- sonuncusu gercek
+  bir glibc `pthread_create` icin gerekli olurdu.
+* **Is parcacigi basina TEB var, TLS geri kazanimi yok**: is parcacigi
+  olunce TEB blogu birakiliyor ama surecin TLS girdisi tek.
+
 ## Alfa'nin bilinen sinirlari
 
 Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
@@ -4470,7 +4698,14 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
   ve `sigsuspend`/`sigwait` yok.
 - **Surec gruplari yok.** `waitpid` belirli bir cocugu ve `-1`
   ("herhangi bir cocuk") bicimlerini destekler, ama `pid < -1` (surec
-  grubu) ve `WUNTRACED`/`WCONTINUED` yok.
+  grubu) ve `WUNTRACED`/`WCONTINUED` yok. Is-parcacigi grubu (`tgid`)
+  ayri bir kavram ve o **var** (yukari bkz.); eksik olan **surec**
+  grubu.
+- **Is parcaciklarinin bekleme yolu asimetrik.** `CreateThread` donen
+  tanitici `WaitForSingleObject` ile beklenebilir; POSIX tarafinda
+  `pthread_join`/`futex` karsiligi yok, bekleyen tarafin paylasilan bir
+  bayrak yoklamasi gerekiyor (yukari bkz.). Ayrica is-parcacigi yigini
+  sabit 8 KiB: `dwStackSize` yok sayiliyor.
 - **Surec basina 512 KiB eslenir**, talep uzerine sayfalama yok.
 - **TCMKFS'te toplam 64 inode var** (dizinler de sayilir), dosya basina
   160 KiB (yalnizca dogrudan blok isaretcileri) ve azami 8 seviye

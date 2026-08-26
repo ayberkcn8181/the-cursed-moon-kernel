@@ -387,6 +387,30 @@ extern "system" {
 /// `UnhandledExceptionFilter`in "sonlandir" donusu.
 pub const EXCEPTION_EXECUTE_HANDLER: i32 = 1;
 
+#[link(name = "kernel32")]
+extern "system" {
+    /// Yeni bir **is parcacigi** baslatir.
+    ///
+    /// POSIX `clone`dan farki, yigini **cekirdegin** ayirmasi: cagiran
+    /// yalnizca istedigi boyu soyler (sifir = varsayilan). `clone`da
+    /// yigini cagiran ayirir.
+    ///
+    /// Donen tanitici `WaitForSingleObject` ile beklenebilir --
+    /// TCMK'de is parcacigi da bir gorev.
+    pub fn CreateThread(
+        attributes: *mut c_void,
+        stack_size: usize,
+        start: Option<unsafe extern "system" fn(*mut c_void) -> Dword>,
+        parameter: *mut c_void,
+        creation_flags: Dword,
+        thread_id: *mut Dword,
+    ) -> Handle;
+
+    /// **Yalnizca cagiran akisi** bitirir; surec kardesleriyle yasamaya
+    /// devam eder. `ExitProcess` ile arasindaki tek fark budur.
+    pub fn ExitThread(exit_code: Dword) -> !;
+}
+
 /// `CreateFileMappingA`nin koruma degerleri (Win32 ile ayni).
 pub const PAGE_READONLY: Dword = 0x02;
 pub const PAGE_READWRITE: Dword = 0x04;

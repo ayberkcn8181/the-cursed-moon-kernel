@@ -392,6 +392,20 @@ static KERNEL32: &[Export] = &[
         service: nt::NT_SET_UNHANDLED_EXCEPTION_FILTER,
         stack_bytes: 4,
     },
+    Export {
+        name: "CreateThread",
+        ordinal: 48,
+        service: nt::NT_CREATE_THREAD,
+        // lpThreadAttributes, dwStackSize, lpStartAddress, lpParameter,
+        // dwCreationFlags, lpThreadId
+        stack_bytes: 24,
+    },
+    Export {
+        name: "ExitThread",
+        ordinal: 49,
+        service: nt::NT_EXIT_THREAD,
+        stack_bytes: 4,
+    },
 ];
 
 /// `TCMKGUI.dll` -- win32k cagrilarinin kullanici modundaki yuzu.

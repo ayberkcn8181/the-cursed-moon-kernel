@@ -208,6 +208,10 @@ fn release_space(id: usize) {
     scheduler::set_current_address_space(0);
     unsafe {
         mmu::switch_to(mmu::kernel_cr3());
-        mmu::destroy_user_space(space);
+        // Cocuk da is parcacigi yaratmis olabilir; uzay ancak son
+        // kullanici cikinca yikilir (bkz. `process::release_space`).
+        if scheduler::address_space_users(space) == 0 {
+            mmu::destroy_user_space(space);
+        }
     }
 }

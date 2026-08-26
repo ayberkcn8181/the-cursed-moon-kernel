@@ -121,6 +121,8 @@ pub const NT_CREATE_FILE_MAPPING_A: u32 = 0x3033;
 pub const NT_MAP_VIEW_OF_FILE: u32 = 0x3034;
 pub const NT_UNMAP_VIEW_OF_FILE: u32 = 0x3035;
 pub const NT_SET_UNHANDLED_EXCEPTION_FILTER: u32 = 0x3036;
+pub const NT_CREATE_THREAD: u32 = 0x3037;
+pub const NT_EXIT_THREAD: u32 = 0x3038;
 
 pub const NT_USER_CREATE_WINDOW_W32: u32 = 0x3010;
 pub const NT_GDI_GET_BITS_W32: u32 = 0x3011;
@@ -517,8 +519,19 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
     let args = arg_block(frame);
 
     let value: usize = match number {
+        // `ExitProcess` **butun grubu** sonlandirir: bir is parcacigi
+        // bunu cagirdiginda kardesleri de durur. Windows'un sozlesmesi
+        // de budur ve `ExitThread` ile arasindaki tek fark bu.
         NT_EXIT_PROCESS_W32 => {
             // ExitProcess(UINT uExitCode) -- geri donmez.
+            //
+            // Kardes is parcaciklari da durur: sozlesme "surec bitsin",
+            // "bu akis bitsin" degil. Ayrimi yapmamak, bir akisin
+            // cikisinda otekilerin paylasilan adres uzayinda yasamaya
+            // devam etmesi olurdu.
+            let task = crate::level0a::core::scheduler::current_id();
+            let group = crate::level0a::core::scheduler::group_of(task);
+            crate::level0a::core::scheduler::terminate_group(group, task);
             kernel_api::exit_current_task(arg(args, 0).unwrap_or(0));
         }
 
@@ -1191,7 +1204,13 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
         // Bu yuzden ikisi de ayni sayiyi donduruyor, ve bu bir eksiklik
         // degil dogru cevap: sistemde gercekten tek bir akis var. Ayri
         // sayilar uydurmak, is parcacigi varmis gibi gorunmek olurdu.
-        NT_GET_CURRENT_PROCESS_ID | NT_GET_CURRENT_THREAD_ID => {
+        // Iki cagri artik **ayrilmis** sayilar dondurur: surec kimligi
+        // grup lideri, is parcacigi kimligi gorevin kendisi. Tek akisli
+        // bir surecte ikisi hala esit -- ve bu dogru cevap.
+        NT_GET_CURRENT_PROCESS_ID => {
+            crate::level0a::core::scheduler::current_group()
+        }
+        NT_GET_CURRENT_THREAD_ID => {
             crate::level0a::core::scheduler::current_id()
         }
 
@@ -1737,6 +1756,51 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
             let handler = arg_ptr(args, 0).unwrap_or(0);
             let task = crate::level0a::core::scheduler::current_id();
             seh::set_filter(task, handler)
+        }
+
+        // --- Is parcaciklari (bkz. `thread.rs`) ---
+
+        // CreateThread(lpAttributes, dwStackSize, lpStartAddress,
+        //              lpParameter, dwCreationFlags, lpThreadId) -> HANDLE
+        //
+        // POSIX `clone`dan farki, yigini **cekirdegin** ayirmasi: cagiran
+        // yalnizca istedigi boyu soyler (sifir = varsayilan). `clone`da
+        // ise yigini cagiran ayirir ve isaretcisini verir.
+        //
+        // Desteklenmeyenler bilerek yok sayiliyor: guvenlik
+        // tanimlayicilari ve `CREATE_SUSPENDED` (durdurulmus baslatma
+        // icin zamanlayicida bir "askida" durumu gerekir).
+        NT_CREATE_THREAD => {
+            let start = arg_ptr(args, 2).unwrap_or(0);
+            let parameter = arg_ptr(args, 3).unwrap_or(0);
+            let out_id = arg_ptr(args, 5).unwrap_or(0);
+
+            match unsafe { crate::level0b1::thread::create(start, parameter, 0, true) } {
+                Ok(id) => {
+                    if out_id != 0 && mmu::is_user_accessible(out_id) {
+                        unsafe { (out_id as *mut u32).write_unaligned(id as u32) };
+                    }
+                    // Tanitici surec taniticilariyla ayni araligi
+                    // kullaniyor: TCMK'de is parcacigi da bir gorev, yani
+                    // `WaitForSingleObject` ikisinde de calisiyor.
+                    id | PROCESS_HANDLE_FLAG
+                }
+                Err(_) => {
+                    set_last_error(ERROR_NOT_ENOUGH_MEMORY);
+                    0
+                }
+            }
+        }
+
+        // ExitThread(dwExitCode)
+        //
+        // `ExitProcess`ten farki net: bu yalnizca **cagiran akisi**
+        // bitirir, surec kardesleriyle yasamaya devam eder. Ayrimi
+        // yapmamak, bir is parcacigi bittiginde butun sureci
+        // dusurmek olurdu.
+        NT_EXIT_THREAD => {
+            let code = arg(args, 0).unwrap_or(0);
+            kernel_api::exit_current_task(code & 0xFF);
         }
 
         // --- Dosya esleme (bkz. `mapping.rs`) ---

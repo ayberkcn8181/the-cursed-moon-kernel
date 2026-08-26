@@ -136,6 +136,7 @@ static KNOWN_APPS: &[(&str, &str, &str)] = &[
     ("probe", "/bin/probe", "probe"),
     ("quoted", "/bin/quoted", "quoted"),
     ("mapped", "/bin/mapped", "mapped"),
+    ("threads", "/bin/threads", "threads"),
     // Windows ikilisi: yol .exe ile biter, cekirdek bicimi magic'ten
     // anlar (bkz. vfs::format) ve PE yukleyicisine yonlendirir. Yol iki
     // mimaride de aynidir; VFS'te duran ikilinin PE32 mi PE32+ mi oldugu
@@ -149,6 +150,7 @@ static KNOWN_APPS: &[(&str, &str, &str)] = &[
     ("winargv", "/bin/winargv.exe", "winargv"),
     ("winmods", "/bin/winmods.exe", "winmods"),
     ("winmap", "/bin/winmap.exe", "winmap"),
+    ("winthread", "/bin/winthread.exe", "winthread"),
 ];
 
 /// Kabuktan gelen adi tam yola ve gorev adina cevirir.

@@ -57,3 +57,5 @@ CreateFileMappingA@24 @44
 MapViewOfFile@20 @45
 UnmapViewOfFile@4 @46
 SetUnhandledExceptionFilter@4 @47
+CreateThread@24 @48
+ExitThread@4 @49

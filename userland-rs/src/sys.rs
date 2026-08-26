@@ -157,6 +157,16 @@ pub const SYS_EXECVE: usize = 0x509;
 pub const SYS_EXECVE_LINUX: usize = 11;
 #[cfg(target_arch = "x86_64")]
 pub const SYS_EXECVE_LINUX: usize = 59;
+
+/// `clone` ve `gettid` -- numaralar yine mimariye gore degisir.
+#[cfg(target_arch = "x86")]
+pub const SYS_CLONE: usize = 120;
+#[cfg(target_arch = "x86")]
+pub const SYS_GETTID: usize = 224;
+#[cfg(target_arch = "x86_64")]
+pub const SYS_CLONE: usize = 56;
+#[cfg(target_arch = "x86_64")]
+pub const SYS_GETTID: usize = 186;
 /// `setenv`/`unsetenv`. Linux'ta boyle bir sistem cagrisi yoktur --
 /// orada ortam surecin kendi belleginde ve libc'nin isidir. TCMK'de
 /// tablo cekirdekte oldugu icin cagri gerekiyor; numaranin TCMK
@@ -747,6 +757,15 @@ pub fn getppid() -> usize {
     unsafe { syscall0(SYS_GETPPID) }
 }
 
+/// POSIX `getpid`: **surecin** kimligi.
+///
+/// Is parcaciklari cagirinca hepsi ayni sayiyi dondurur; ayrisan kimlik
+/// icin `gettid` var. Ikisinin farki, bir surecin birden fazla akisi
+/// olabildiginin kanitidir.
+pub fn getpid() -> usize {
+    unsafe { syscall0(SYS_GETPID) }
+}
+
 /// POSIX `nanosleep` -- `sleep_ms`in **gercek Linux numarasi** uzerinden
 /// yuzu.
 ///
@@ -1186,6 +1205,50 @@ const ARGV_MAX: usize = 8;
 /// hizina baglidir (100 Hz -> 10 ms).
 pub fn sleep_ms(ms: usize) {
     unsafe { syscall1(SYS_SLEEP, ms) };
+}
+
+/// `clone` bayraklari (Linux ile ayni sayilar).
+pub const CLONE_VM: usize = 0x0000_0100;
+pub const CLONE_FS: usize = 0x0000_0200;
+pub const CLONE_FILES: usize = 0x0000_0400;
+pub const CLONE_SIGHAND: usize = 0x0000_0800;
+pub const CLONE_THREAD: usize = 0x0001_0000;
+
+/// `pthread_create`in cekirdege gecirdigi bayrak kumesi.
+pub const CLONE_THREAD_FLAGS: usize =
+    CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD;
+
+/// Yeni bir **is parcacigi** baslatir.
+///
+/// `fork`tan farki tek cumlede: `fork` kopyalar, bu **paylasir**. Adres
+/// uzayi, dosya tanimlayicilari, calisma dizini ve ortam ortak; yigin ve
+/// is-parcacigi tabani ayri.
+///
+/// `stack` sifirsa cekirdek ayirir. Doner: yeni akisin kimligi (`tid`),
+/// ya da negatif errno.
+///
+/// Windows tarafinda karsiligi `CreateThread` -- orada yigini her zaman
+/// cekirdek ayirir, burada cagiran da verebilir.
+pub fn clone_thread(entry: extern "C" fn(usize) -> usize, param: usize, stack: usize) -> isize {
+    unsafe {
+        syscall6(
+            SYS_CLONE,
+            CLONE_THREAD_FLAGS,
+            stack,
+            entry as usize,
+            param,
+            0,
+            0,
+        ) as isize
+    }
+}
+
+/// POSIX `gettid`: **is parcaciginin** kimligi.
+///
+/// `getpid` grup liderini dondurur; tek akisli bir surecte ikisi esittir.
+/// Ayrim ancak `clone` sonrasi gorunur.
+pub fn gettid() -> usize {
+    unsafe { syscall0(SYS_GETTID) }
 }
 
 /// Sureci ikiye ayirir.

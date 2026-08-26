@@ -74,7 +74,9 @@ fn table_of(task: usize) -> *mut FileDescriptor {
 }
 
 fn current_table() -> *mut FileDescriptor {
-    table_of(scheduler::current_id())
+    // **Grup** basina: kardes is parcaciklari ayni tabloyu gorur, bir
+    // `fork` cocugu gormez. `CLONE_FILES`in anlami tam olarak budur.
+    table_of(scheduler::current_group())
 }
 
 pub fn init() {

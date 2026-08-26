@@ -1523,6 +1523,9 @@ fn execute(line: &str) {
             // Windows tarafi: dagitilan istisnalar sonlandirilan
             // sureclerin **disindadir** -- isleyici sahiplendiyse surec
             // yasamaya devam eder.
+            write_str("is parcacigi yaratildi: ");
+            write_num(crate::level0b1::thread::created());
+            newline();
             use crate::level0b1::nt_subsystem::seh;
             write_str("SEH dagitildi: ");
             write_num(seh::dispatched());

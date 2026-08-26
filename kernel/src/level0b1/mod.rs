@@ -19,3 +19,5 @@ pub mod nt_subsystem;
 pub mod fork;
 pub mod process;
 pub mod signal;
+/// Is parcaciklari: clone ve CreateThread.
+pub mod thread;

@@ -249,8 +249,8 @@ pub fn resolve_program<'a>(name: &str, buf: &'a mut [u8]) -> Option<&'a str> {
         return core::str::from_utf8(&buf[..len]).ok();
     }
 
-    let path = env::get(scheduler::current_id(), "PATH").unwrap_or("/bin");
-    let extensions = env::get(scheduler::current_id(), "PATHEXT").unwrap_or("");
+    let path = env::get(scheduler::current_group(), "PATH").unwrap_or("/bin");
+    let extensions = env::get(scheduler::current_group(), "PATHEXT").unwrap_or("");
 
     for directory in path.split(':') {
         if directory.is_empty() {
@@ -308,7 +308,7 @@ fn try_candidate<'a>(
 /// Win32 tarafi (`GetEnvironmentVariableA`) ise adla soruyor; cagri
 /// onun icin var.
 pub fn getenv(name: &str) -> Option<&'static str> {
-    env::get(scheduler::current_id(), name)
+    env::get(scheduler::current_group(), name)
 }
 
 /// Surecin ortamindaki bir degiskeni degistirir.
@@ -323,7 +323,7 @@ pub fn setenv(name: &str, value: &str) -> Result<(), KernelError> {
     if name.is_empty() || name.contains('=') {
         return Err(KernelError::NotSupported);
     }
-    if env::set(scheduler::current_id(), name, value) {
+    if env::set(scheduler::current_group(), name, value) {
         Ok(())
     } else {
         Err(KernelError::NoSpace)

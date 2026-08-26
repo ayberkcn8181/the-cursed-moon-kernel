@@ -113,6 +113,21 @@ pub struct Task {
     /// yariyor mu sorusunun tek dogru cevabi budur -- uygulamanin kendi
     /// sayaci uyku/G-C ile bozulabilir, bu sayac bozulmaz.
     pub cpu_ticks: u32,
+    /// **Is parcacigi grubu**: bu gorevin ait oldugu surecin kimligi.
+    ///
+    /// Siradan bir surecte kendi indeksine esittir. Bir is parcacigi
+    /// yaratildiginda ise yaratanin grubunu devralir -- yani grup, POSIX
+    /// terminolojisiyle `tgid`dir.
+    ///
+    /// Ayrimin somut sonucu: **dosya tanimlayicilari, calisma dizini ve
+    /// ortam grup basina** tutulur (bkz. `fd`, `cwd`, `env`). Bir is
+    /// parcaciginin actigi dosyayi kardesi gorur; bir `fork` cocugununki
+    /// ise ayri kalir. Gercek `clone` bayraklarinin (`CLONE_FILES`,
+    /// `CLONE_FS`) anlami tam olarak budur.
+    ///
+    /// Is parcacigi tabanlari (TLS/TEB) **grup basina degil gorev
+    /// basina**dir; her akisin kendi TEB'i olmak zorunda.
+    pub group: usize,
 }
 
 impl Task {
@@ -134,6 +149,7 @@ impl Task {
             waitable: false,
             stack_top: 0,
             exit_code: 0,
+            group: 0,
         }
     }
 }
@@ -204,6 +220,31 @@ pub fn spawn_child(name: &'static str, entry: extern "C" fn() -> !) -> Option<us
     spawn_inner(name, entry, true)
 }
 
+/// **Is parcacigi** olarak baslatir: adres uzayini, tanimlayicilari,
+/// calisma dizinini ve ortami yaratanla paylasir.
+///
+/// `fork`tan farki tek cumlede: `fork` kopyalar, is parcacigi
+/// **paylasir**. Kopyalama yok demek, cocugun yazdiginin ebeveynde de
+/// gorunmesi demek -- gercek `clone(CLONE_VM|CLONE_FILES|CLONE_FS)`in
+/// anlami budur.
+///
+/// Grup yaratanin grubudur, yani `getpid`/`GetCurrentProcessId` ayni
+/// sayiyi dondurmeye devam eder; degisen `gettid`/`GetCurrentThreadId`.
+pub fn spawn_thread(name: &'static str, entry: extern "C" fn() -> !) -> Option<usize> {
+    let group = current_group();
+    let space = address_space_of(current_id());
+    let index = spawn_inner(name, entry, true)?;
+    crate::arch::cpu::without_interrupts(|| unsafe {
+        let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+        (*tasks.add(index)).group = group;
+        // Adres uzayi **kopyalanmaz**, ayni CR3 paylasilir. Yikim
+        // `address_space_users` ile korunuyor: son gorev cikana kadar
+        // uzay ayakta kalir.
+        (*tasks.add(index)).address_space = space;
+    });
+    Some(index)
+}
+
 fn spawn_inner(
     name: &'static str,
     entry: extern "C" fn() -> !,
@@ -271,6 +312,9 @@ fn spawn_inner(
         (*tasks.add(index)).exit_code = 0;
         (*tasks.add(index)).parent = CURRENT.load(Ordering::Relaxed);
         (*tasks.add(index)).waitable = waitable;
+        // Siradan bir gorev kendi grubunun lideridir. Is parcaciklari
+        // bunu `spawn_thread` icinde yaratanin grubuyla degistirir.
+        (*tasks.add(index)).group = index;
 
         // Calisma dizini yuvaya baglidir, imaja degil. Sifirlamanin
         // burada olmasi `execve`nin cwd'yi **korumasini** kendiliginden
@@ -630,7 +674,15 @@ pub fn yield_now() {
 pub fn terminate_current() -> ! {
     // Tanimlayicilari birak. Boru uclari icin sart: kapanmayan bir yazma
     // ucu, okuyan tarafta "dosya sonu"nun hic gorunmemesi demektir.
-    crate::level0a::core::fd::close_all(CURRENT.load(Ordering::Relaxed));
+    //
+    // Tablo **gruba** ait: kardes is parcaciklari onu paylasir. Bu yuzden
+    // yalnizca grubun son uyesi cikarken bosaltiliyor -- erken bosaltmak,
+    // hala kosan bir kardesin acik dosyalarini altindan cekmek olurdu.
+    let leaving = CURRENT.load(Ordering::Relaxed);
+    let group = group_of(leaving);
+    if group_members(group) == 1 {
+        crate::level0a::core::fd::close_all(group);
+    }
 
     crate::arch::cpu::without_interrupts(|| unsafe {
         let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
@@ -952,6 +1004,88 @@ pub fn current_id() -> usize {
     CURRENT.load(Ordering::Relaxed)
 }
 
+/// Gorevin ait oldugu is parcacigi grubu (POSIX'te `tgid`).
+///
+/// Siradan bir surecte kendi indeksi; bir is parcaciginda yaratanin
+/// grubu. Dosya tanimlayicilari, calisma dizini ve ortam **bu** numarayla
+/// indekslenir -- yani kardes is parcaciklari onlari paylasir.
+pub fn group_of(task: usize) -> usize {
+    if task >= MAX_TASKS {
+        return task;
+    }
+    unsafe {
+        let tasks = core::ptr::addr_of!(TASKS) as *const Task;
+        let group = (*tasks.add(task)).group;
+        // Sifir hem "idle gorev" hem "kurulmamis" demek olabilirdi;
+        // kurulmamis yuvalarda kendi indeksine dusmek dogru cevap.
+        if group < MAX_TASKS {
+            group
+        } else {
+            task
+        }
+    }
+}
+
+/// Calisan gorevin grubu.
+pub fn current_group() -> usize {
+    group_of(current_id())
+}
+
+/// Bir gruptaki canli gorev sayisi.
+///
+/// Tanimlayici tablosu, calisma dizini ve ortam gruba ait; bunlari
+/// bosaltmak ancak **son** uyeye kalmisken dogru. Adres uzayi sayimi
+/// (`address_space_users`) benzer bir soru sorar ama ayni soru degildir:
+/// cekirdek gorevlerinin adres uzayi yoktur, grubu vardir.
+pub fn group_members(group: usize) -> usize {
+    crate::arch::cpu::without_interrupts(|| {
+        (0..MAX_TASKS)
+            .filter(|i| state_of(*i) != TaskState::Unused && group_of(*i) == group)
+            .count()
+    })
+}
+
+/// Bir adres uzayini kac gorev kullaniyor?
+///
+/// Is parcaciklari adres uzayini **paylasir**, yani uzay ancak son
+/// kullanici cikinca yikilabilir. Ayri bir sayac tablosu yerine gorev
+/// tablosunu taramak yeterli: tablo kucuk ve bu yol yalnizca gorev
+/// sonlanirken calisiyor.
+pub fn address_space_users(space: usize) -> usize {
+    if space == 0 {
+        return 0;
+    }
+    crate::arch::cpu::without_interrupts(|| unsafe {
+        let tasks = core::ptr::addr_of!(TASKS) as *const Task;
+        (0..MAX_TASKS)
+            .filter(|i| {
+                (*tasks.add(*i)).state != TaskState::Unused
+                    && (*tasks.add(*i)).address_space == space
+            })
+            .count()
+    })
+}
+
+/// Bir gruptaki butun gorevleri sonlandirir (`exit_group` / `ExitProcess`).
+///
+/// Cagiran **kendisi haric** herkesi durdurur; kendi cikisini normal
+/// yoldan yapar. Sirasi onemli: once kardesler, sonra kendisi -- aksi
+/// halde adres uzayi hala kullanilirken yikilirdi.
+pub fn terminate_group(group: usize, except: usize) {
+    for index in 0..MAX_TASKS {
+        if index == except {
+            continue;
+        }
+        if state_of(index) == TaskState::Unused {
+            continue;
+        }
+        if group_of(index) != group {
+            continue;
+        }
+        let _ = terminate(index);
+    }
+}
+
 /// Verilen gorevin adi (gorev yoksa bos dize).
 pub fn name_of(index: usize) -> &'static str {
     if index >= MAX_TASKS {
@@ -1011,8 +1145,17 @@ pub fn terminate(index: usize) -> Result<(), &'static str> {
     // Normal cikista bunlari surecin kendi yolu yapar (bkz.
     // `level0b1::process`), disaridan oldurmede buraya duser.
     crate::level0a::wm::close_owned_by(index);
-    crate::level0a::core::fd::close_all(index);
-    if space != 0 {
+    // Tanimlayicilar **gruba** ait: bir is parcacigini oldurmek
+    // kardeslerinin acik dosyalarini kapatmamali. Yalnizca grubun son
+    // gorevi cikarken tablo bosaltilir.
+    let group = group_of(index);
+    if group_members(group) == 1 {
+        crate::level0a::core::fd::close_all(group);
+    }
+    // Adres uzayi paylasilmis olabilir (is parcaciklari). Ancak son
+    // kullanici cikinca yikilir; erken yikmak kardeslerin ayaginin
+    // altindaki halyi cekmek olurdu.
+    if space != 0 && address_space_users(space) == 0 {
         unsafe { crate::level0a::core::mmu::destroy_user_space(space) };
     }
     Ok(())

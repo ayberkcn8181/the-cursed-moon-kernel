@@ -146,11 +146,19 @@ pub unsafe fn run_image(name: &str, image: &[u8], args: &str) -> Result<(), Spaw
 }
 
 /// Surecin adres uzayini birakir ve gorevi cekirdek uzayina dondurur.
+///
+/// Uzay **paylasilmis** olabilir: is parcaciklari yaratanla ayni CR3'u
+/// kullanir. Bu yuzden yikim kosullu -- hala kullanan bir kardes varsa
+/// uzay ayakta birakilir, son cikan onu yikar (bkz. `thread::thread_task`
+/// ve `scheduler::terminate`). Kosulsuz yikmak, `exit` ile cikan bir ana
+/// akisin hala kosan kardesinin altindan zemini cekmesi olurdu.
 unsafe fn release_space(space: Option<usize>) {
     if let Some(cr3) = space {
         scheduler::set_current_address_space(0);
         mmu::switch_to(mmu::kernel_cr3());
-        mmu::destroy_user_space(cr3);
+        if scheduler::address_space_users(cr3) == 0 {
+            mmu::destroy_user_space(cr3);
+        }
     }
 }
 
@@ -454,7 +462,7 @@ unsafe fn build_posix_stack(
     // `setenv` ile degistirilmis olabilir -- yigina yazilan o son
     // halidir. Her girdi `AD=deger` biciminde, tipki gercek `environ`
     // gibi.
-    let table = crate::level0a::core::scheduler::current_id();
+    let table = crate::level0a::core::scheduler::current_group();
     let mut environment = [0usize; env::MAX_VARS];
     let mut env_count = 0usize;
     for i in 0..env::count(table) {

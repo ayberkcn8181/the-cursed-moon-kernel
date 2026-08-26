@@ -66,6 +66,8 @@ mod i386_numbers {
     pub const SYS_EXIT: u32 = 1;
     pub const SYS_FORK: u32 = 2;
     pub const SYS_EXECVE_LINUX: u32 = 11;
+    pub const SYS_CLONE: u32 = 120;
+    pub const SYS_GETTID: u32 = 224;
     pub const SYS_WAITPID: u32 = 7;
     pub const SYS_PIPE: u32 = 42;
     pub const SYS_READ: u32 = 3;
@@ -133,6 +135,8 @@ mod i386_numbers {
 #[cfg(target_arch = "x86_64")]
 mod x86_64_numbers {
     pub const SYS_EXECVE_LINUX: u32 = 59;
+    pub const SYS_CLONE: u32 = 56;
+    pub const SYS_GETTID: u32 = 186;
     pub const SYS_READ: u32 = 0;
     pub const SYS_WRITE: u32 = 1;
     pub const SYS_OPEN: u32 = 2;
@@ -445,8 +449,22 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
         // ayrim pratikte kayboluyor -- ama numarayi tanimayan bir
         // cekirdek, gercek bir Linux ikilisini **cikamaz** hale
         // getirirdi.
-        SYS_EXIT | SYS_EXIT_GROUP => {
-            // Geri donmez.
+        // Iki numara, iki **farkli** anlam -- ve fark ancak is
+        // parcaciklari varken gorunur:
+        //
+        //   exit()        -> yalnizca bu akis biter
+        //   exit_group()  -> surecin butun akislari biter
+        //
+        // glibc'nin `_exit`i ikincisini cagirir; birincisi
+        // `pthread_exit`in indigi yerdir. Ayrimi yapmamak, bir is
+        // parcaciginin cikisinda butun sureci dusurmek olurdu.
+        SYS_EXIT => {
+            kernel_api::exit_current_task(arg1 as u32);
+        }
+        SYS_EXIT_GROUP => {
+            let task = crate::level0a::core::scheduler::current_id();
+            let group = crate::level0a::core::scheduler::group_of(task);
+            crate::level0a::core::scheduler::terminate_group(group, task);
             kernel_api::exit_current_task(arg1 as u32);
         }
 
@@ -768,7 +786,10 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
                             Some(entries) => {
                                 if crate::level0a::launcher::request_exec(task, path, block) {
                                     if arg3 != 0 {
-                                        apply_user_env(task, &env_storage[..entries]);
+                                        apply_user_env(
+                                            crate::level0a::core::scheduler::group_of(task),
+                                            &env_storage[..entries],
+                                        );
                                     }
                                     unsafe { kernel_api::exit_to_exec() }
                                 }
@@ -780,6 +801,81 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
                 _ => -EFAULT,
             }
         }
+        // `clone(flags, cocuk_yigini, ptid, ctid, tls)`
+        //
+        // `fork`un genellestirilmisi: neyin **paylasilacagini** bayraklar
+        // soyler. `pthread_create` bunu su kumeyle cagirir:
+        //
+        // ```text
+        //   CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD
+        // ```
+        //
+        // TCMK'de paylasim tek bir mekanizmayla saglaniyor (gorevin
+        // `group` alani), o yuzden bayraklar tek tek degil **birlikte**
+        // yorumlaniyor: `CLONE_VM` varsa is parcacigi, yoksa `fork`.
+        // Ara kumeleri desteklemek (ornegin adres uzayini paylasip
+        // tanimlayicilari kopyalamak) bugun mumkun degil ve uydurmak
+        // yerine acikca reddediliyor.
+        //
+        // Yigini **cagiran** verir -- POSIX'in kalibi budur ve
+        // `CreateThread`ten ayrildigi nokta da burasi.
+        SYS_CLONE => {
+            const CLONE_VM: usize = 0x0000_0100;
+            const CLONE_FS: usize = 0x0000_0200;
+            const CLONE_FILES: usize = 0x0000_0400;
+            const CLONE_THREAD: usize = 0x0001_0000;
+
+            let flags = arg1;
+            let child_stack = arg2;
+
+            if flags & CLONE_VM == 0 {
+                // Adres uzayi paylasilmiyorsa istenen sey `fork`.
+                match unsafe { crate::level0b1::fork::fork(frame, from_interrupt) } {
+                    Ok(child) => {
+                        frame.set_return(child);
+                        return;
+                    }
+                    Err(_) => -EAGAIN,
+                }
+            } else if flags & (CLONE_FS | CLONE_FILES | CLONE_THREAD)
+                != (CLONE_FS | CLONE_FILES | CLONE_THREAD)
+            {
+                // Yarim paylasim: TCMK'nin tek mekanizmasi bunu ayirt
+                // edemiyor. Kabul edip yanlis davranmaktansa reddetmek.
+                -EINVAL
+            } else {
+                // Yigin isaretcisi verilmemisse cekirdek ayirir; gercek
+                // `clone` bunu istemez ama zararsiz bir kolaylik.
+                //
+                // Giris noktasi: POSIX'te `clone` **cagiranin dondugu
+                // yerden** devam eder, yani yeni akis da ayni komuttan
+                // baslar. TCMK'de giris `arg3` ile veriliyor (glibc'nin
+                // sarmalayicisi da bir giris fonksiyonu kurar), boylece
+                // cekirdek yigin uzerinde bir cerceve kurabiliyor.
+                let entry = arg3;
+                let param = arg4;
+                match unsafe {
+                    crate::level0b1::thread::create(entry, param, child_stack, false)
+                } {
+                    Ok(id) => {
+                        frame.set_return(id);
+                        return;
+                    }
+                    Err(_) => -EAGAIN,
+                }
+            }
+        }
+
+        // `gettid` -- **is parcaciginin** kimligi.
+        //
+        // `getpid` grup liderini dondurur; tek akisli bir surecte ikisi
+        // esittir. Ayrim ancak `clone` sonrasi gorunur -- ve gercek
+        // Linux'ta da tam olarak boyledir.
+        SYS_GETTID => {
+            frame.set_return(crate::level0a::core::scheduler::current_id());
+            return;
+        }
+
         // `poll(pollfd[], nfds, timeout_ms)` -- "hangisi hazir?"
         //
         // Bu cagriya kadar cevap yoklamaktan geciyordu: uygulama her
@@ -1604,7 +1700,7 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
             }
         }
 
-        SYS_GETPID => crate::level0a::core::scheduler::current_id() as i32,
+        SYS_GETPID => crate::level0a::core::scheduler::current_group() as i32,
 
         // `getppid()` -- ebeveynin kimligi.
         //

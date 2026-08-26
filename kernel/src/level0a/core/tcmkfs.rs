@@ -15,10 +15,10 @@
 //!    0        superblock
 //!    1..32    inode tablosu   (64 inode x 256 bayt)
 //!   33..36    blok bitmap'i   (16384 bit -> 16384 blok -> 64 MiB)
-//!   40..4095  ONYUKLEYICI ALANI (2 MiB, dosya sistemi disi)
+//!   40..8191  ONYUKLEYICI ALANI (4 MiB, dosya sistemi disi)
 //!               40..71    2. asama (16 KiB)
-//!               72..4095  cekirdek imaji (ham bellek blogu)
-//! 4096..      veri bloklari   (blok = 4096 bayt = 8 sektor)
+//!               72..8191  cekirdek imaji (ham bellek blogu)
+//! 8192..      veri bloklari   (blok = 4096 bayt = 8 sektor)
 //! ```
 //!
 //! Onyukleyici alani bilerek dosya sisteminin **icinde** ayrildi: boylece
@@ -79,8 +79,13 @@ pub const STAGE2_SECTORS: u32 = 32;
 pub const KERNEL_BLOB_SECTOR: u32 = BOOT_AREA_SECTOR + STAGE2_SECTORS;
 
 /// Veri bloklarinin basladigi sektor. Onyukleyici alaninin hemen ardindan,
-/// 2 MiB sinirinda baslar.
-const DATA_START_SECTOR: u32 = 4096;
+/// 4 MiB sinirinda baslar.
+///
+/// Alan basta 2 MiB idi; gomulu Ring 3 uygulamalari cogaldikca cekirdek
+/// imaji oraya sigmaz oldu (`make disk` acikca hata verir, sessizce
+/// bozulmaz). Sinir bu yuzden ikiye katlandi -- `tools/make_disk.py`
+/// icindeki ayni adli sabitle birlikte degistirilmeli.
+const DATA_START_SECTOR: u32 = 8192;
 
 /// Dosya basina dogrudan blok isaretcisi sayisi.
 pub const DIRECT_BLOCKS: usize = 40;

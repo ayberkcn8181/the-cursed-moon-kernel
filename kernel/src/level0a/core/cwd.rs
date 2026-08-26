@@ -49,7 +49,9 @@ pub fn of(task: usize) -> &'static str {
 
 /// Calisan gorevin calisma dizini.
 pub fn current() -> &'static str {
-    of(scheduler::current_id())
+    // Calisma dizini de gruba ait (`CLONE_FS`): bir is parcaciginin
+    // `chdir`i kardeslerini de tasir.
+    of(scheduler::current_group())
 }
 
 /// Bir gorevin calisma dizinini ayarlar.

@@ -29,6 +29,10 @@ name = "winenv"
 path = "src/win/envtest.rs"
 
 [[bin]]
+name = "threads"
+path = "src/bin/threads.rs"
+
+[[bin]]
 name = "mapped"
 path = "src/bin/mapped.rs"
 
@@ -55,6 +59,10 @@ path = "src/win/argv.rs"
 [[bin]]
 name = "winseh"
 path = "src/win/seh.rs"
+
+[[bin]]
+name = "winthread"
+path = "src/win/thread.rs"
 
 [profile.dev]
 panic = "abort"
