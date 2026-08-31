@@ -406,6 +406,37 @@ static KERNEL32: &[Export] = &[
         service: nt::NT_EXIT_THREAD,
         stack_bytes: 4,
     },
+    Export {
+        name: "GetExitCodeThread",
+        ordinal: 50,
+        service: nt::NT_GET_EXIT_CODE_THREAD,
+        // hThread, lpExitCode
+        stack_bytes: 8,
+    },
+    // Adres uzerinde bekleme. Gercek Windows'ta bu ucu
+    // `api-ms-win-core-synch-l1-2-0.dll` ihrac eder ve KERNEL32 onu
+    // yonlendirir; TCMK yonlendirme zinciri kurmadigi icin dogrudan
+    // burada duruyorlar. Adlar ve imzalar aynidir, yani ithal tablosunda
+    // KERNEL32'yi arayan bir ikili onlari bulur.
+    Export {
+        name: "WaitOnAddress",
+        ordinal: 51,
+        service: nt::NT_WAIT_ON_ADDRESS,
+        // Address, CompareAddress, AddressSize, dwMilliseconds
+        stack_bytes: 16,
+    },
+    Export {
+        name: "WakeByAddressSingle",
+        ordinal: 52,
+        service: nt::NT_WAKE_BY_ADDRESS_SINGLE,
+        stack_bytes: 4,
+    },
+    Export {
+        name: "WakeByAddressAll",
+        ordinal: 53,
+        service: nt::NT_WAKE_BY_ADDRESS_ALL,
+        stack_bytes: 4,
+    },
 ];
 
 /// `TCMKGUI.dll` -- win32k cagrilarinin kullanici modundaki yuzu.

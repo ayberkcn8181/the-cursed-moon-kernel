@@ -26,11 +26,11 @@ masaustu sunuyor.
 |---|---|
 | Mimariler | i386 (Multiboot1, `int 0x80`) · x86_64 (Multiboot2, `syscall`) |
 | Ikili bicimleri | ELF32/ELF64 · PE32/PE32+ (ithal tablosu cozulur) |
-| POSIX cagrilari | 62 (+ ELF yardimci vektoru, dosya destekli `mmap`, `clone`) |
-| NT/Win32 cagrilari | 71 (`KERNEL32.dll` 49 ihracat + `TCMKGUI.dll`) |
-| Ring 3 uygulamalari | 28 ELF + 10 PE |
+| POSIX cagrilari | 65 (+ ELF yardimci vektoru, dosya destekli `mmap`, `clone`, `futex`) |
+| NT/Win32 cagrilari | 75 (`KERNEL32.dll` 53 ihracat + `TCMKGUI.dll`) |
+| Ring 3 uygulamalari | 29 ELF + 11 PE |
 | Kalici depolama | ATA PIO + MBR + TCMKFS (yazilabilir, i386) |
-| Kod | ~28 bin satir cekirdek + ~13 bin satir userland |
+| Kod | ~29 bin satir cekirdek + ~14 bin satir userland |
 
 Uyumluluk yuzeyi su alanlarda **iki ABI'de birden** kurulu: dosya
 sistemi (acma/okuma/yazma/kesme/gezinme/yeniden adlandirma), surec
@@ -38,11 +38,12 @@ sistemi (acma/okuma/yazma/kesme/gezinme/yeniden adlandirma), surec
 dizini, program argumanlari, saat, `stat`, `PATH` aramasi, is-parcacigi
 tabani (POSIX TLS / Windows TEB), **surec yaratma**
 (`fork`/`execve` -- `CreateProcess`), **istisna dagitimi**
-(sinyaller -- SEH/VEH) ve **is parcaciklari**
-(`clone` -- `CreateThread`).
+(sinyaller -- SEH/VEH), **is parcaciklari**
+(`clone` -- `CreateThread`) ve **akislarin senkronizasyonu**
+(`futex` -- `WaitOnAddress`).
 
 Her yetenek QEMU'da **olculerek** dogrulanmistir: `probe` (16 sinav),
-`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `bequest`
+`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `bequest`
 (6), `nested` (4), `winenv` (4) gibi programlar sonucu hem ekrana hem
 seri gunluge yaziyor. Olcumler yol boyunca gercek hatalar buldu -- dolan
 VFS tablosu, `CreateFileA`'nin cevrilmeyen Windows yollari, `GDT`
@@ -4641,12 +4642,15 @@ gelmiyor -- once **hatali** surumde basarisiz oldugunu gormek gerekiyor.
 
 ### Bilerek yapilmayanlar
 
-* **`pthread_join` / `futex` yok.** POSIX tarafinda is parcaciginin
-  bitmesini beklemenin yolu yok; `threads` bu yuzden paylasilan bir
-  bayragi yokluyor. Win32 tarafinda `WaitForSingleObject` calisiyor --
-  asimetri gercek ve olculuyor.
-* **`GetExitCodeThread` yok.** Cikis kodu tramplen uzerinden cekirdege
-  ulasiyor ama disaridan sorulamiyor.
+* ~~**`pthread_join` / `futex` yok.**~~ Ikisi de artik var. `futex`
+  eklendi ve `pthread_join` onun uzerine kuruldu -- ayri bir cagri
+  degil, `CLONE_CHILD_CLEARTID` sozunun uzerine oturan bir bekleme.
+  Bkz. [Beklemenin ucuz
+  yolu](#beklemenin-ucuz-yolu----futex-ve-waitonaddress). (`threads`in
+  bayrak yoklamasi oldugu gibi birakildi: `sync` D sinavi gercek yolu
+  ayrica olcuyor.)
+* ~~**`GetExitCodeThread` yok.**~~ Artik var: kosarken `STILL_ACTIVE`,
+  bitince gercek kod (`winsync` D).
 * **`dwStackSize` yok sayiliyor**: yigin her zaman sabit 8 KiB.
   Istenen boyu tutmak, tutulamayacak bir soz vermek olurdu.
 * **`CREATE_SUSPENDED` yok** (`ResumeThread` de yok): is parcacigi
@@ -4659,6 +4663,185 @@ gelmiyor -- once **hatali** surumde basarisiz oldugunu gormek gerekiyor.
   bir glibc `pthread_create` icin gerekli olurdu.
 * **Is parcacigi basina TEB var, TLS geri kazanimi yok**: is parcacigi
   olunce TEB blogu birakiliyor ama surecin TLS girdisi tek.
+
+## Beklemenin ucuz yolu -- `futex` ve `WaitOnAddress`
+
+Bir onceki bati iki akisi ayni bellege baktirdi. Ama gormek yetmez:
+paylasilan bir sayaci iki akis ayni anda artirirsa sonuc yanlis cikar,
+ve birinin otekini **beklemesi** gerekir.
+
+```
+[sync]    A uyandirma:        gecti (uyundu ve kardes uyandirdi)
+[sync]    B zaman asimi:      gecti (kimse uyandirmadi, ETIMEDOUT geldi)
+[sync]    C cekismesiz kilit: gecti (64 kilit/birakma, sifir sistem cagrisi)
+[sync]    D join:             gecti (cekirdek yuvayi sifirladi, bekleyen uyandi)
+[sync]    E sayac dogru:      gecti (iki akis, 400 artirma, toplam tam)
+
+[winsync] A uyandirma:        gecti (uyundu ve kardes uyandirdi)
+[winsync] B zaman asimi:      gecti (FALSE + ERROR_TIMEOUT)
+[winsync] C deger degismis:   gecti (hic uyumadan TRUE dondu)
+[winsync] D GetExitCodeThread:gecti (kosarken STILL_ACTIVE, bitince 42)
+[winsync] E sayac dogru:      gecti (iki akis, 400 artirma, toplam tam)
+```
+
+![sync](docs/screenshot-sync.png)
+![winsync](docs/screenshot-winsync.png)
+
+### Tek ilkel, iki ABI, ikisi de gercek
+
+Cekirdek tarafinda eklenen sey **iki cagri**dan ibaret:
+
+```text
+  bekle(adres, beklenen)   -> deger hala `beklenen` ise uyu
+  uyandir(adres, kac_tane) -> o adreste uyuyanlari kaldir
+```
+
+Uzerine kurulan iki yuz de uydurma degil. `futex` Linux 2.6'dan beri
+butun kilitlerin altinda; `WaitOnAddress` Windows 8'den beri
+`SRWLOCK`un ve `CONDITION_VARIABLE`in altinda. Ayni ilkel, iki dunyada
+bagimsiz olarak kesfedilmis.
+
+| | POSIX | Win32 |
+|---|---|---|
+| beklenen deger | **sayi** olarak gecer | **adres** olarak gecer, boyu ayrica |
+| deger uymuyorsa | `-EAGAIN` (hata kodu) | `TRUE` (basari) |
+| uyandirma | `FUTEX_WAKE`, sayiyi alir | `WakeByAddressSingle` / `...All` |
+| uyandirilan sayi | **dondurulur** | dondurulmez (`void`) |
+
+Ikinci satir, ayni olayin iki ABI'de **zit isaretle** bildirildigi tek
+yer -- ve `winsync`in C sinavi bilerek onu olcuyor. Aslinda celiski yok:
+iki tarafta da yapilacak sey ayni, kosulu yeniden sinamak.
+
+Son satir daha somut bir sonuc dogurdu. `WakeByAddressSingle` `void`
+oldugu icin "kimseyi bulamadim" bilgisi Win32'de **hic yok**. TCMK
+sayiyi cekirdekte tutuyor (kabukta `stats`, Ring 3'ten `kstat`), ama
+Win32 tarafina uydurup vermiyor.
+
+### `futex`in adindaki "fast": cekirdege inmemek
+
+Kilit almanin hizli yolu cekirdege **hic ugramaz**:
+
+```rust
+fn lock_acquire() {
+    // Hizli yol: bos ise kap ve cik. Sistem cagrisi yok.
+    if LOCK.compare_exchange(0, 1, Acquire, Relaxed).is_ok() {
+        return;
+    }
+    loop {
+        // Bekleyen oldugunu isaretle (2); birakan taraf bunu gorup
+        // uyandirma yapacak.
+        if LOCK.swap(2, Acquire) == 0 {
+            return;
+        }
+        futex_wait(&LOCK, 2, 0);
+    }
+}
+```
+
+Kilidin **uc** degerli olmasi (0 bos / 1 alinmis / 2 alinmis ve bekleyen
+var) klasik `futex` hilesi: birakan taraf, bekleyen olmadigini biliyorsa
+uyandirma cagrisini hic yapmaz.
+
+Sinav C bunu tahmin etmiyor, **olcuyor**. Gecen sureye bakmak yeterli
+olmazdi -- hizli bir sistem cagrisi da kisa surer. Bunun icin cekirdegin
+kendi sayacini Ring 3'e acan kucuk bir cagri eklendi (`kstat`, TCMK
+araliginda 0x50C). Sinav 64 kez kilit alip birakiyor ve sayacin
+**degismedigini** dogruluyor.
+
+### Kacirilmis uyandirma: sartin neden cekirdekte oldugu
+
+"Deger hala beklenen ise uyu" sarti gereksiz gorunur, degildir. Sirasiz
+bir dunyada su olurdu:
+
+```text
+  akis A            akis B
+  ------            ------
+  degeri okur (0)
+                    degeri 1 yapar
+                    uyandirir  <- kimse uyumuyor, uyandirma KAYBOLUR
+  uyumaya gider                <- sonsuza kadar
+```
+
+Sinama bu yuzden cekirdekte **ve kesmeler kapaliyken** yapiliyor: tek
+islemcili bir sistemde kesmeler kapaliyken araya baska bir akis
+giremez, yani okuma ile uyuma arasinda bosluk kalmiyor. Ayni kalip
+`wait_for_io` ve `wait_for_signal`de de var; ucu de ayni yarisin ucu
+farkli yuzu.
+
+Rust tarafinda bunun kucuk bir bedeli oldu: sart bir kapanis olarak
+geciyor ve `Fn` oldugu icin icinden dogrudan yazilamiyor. Sonucu disari
+tasimak icin `Cell` gerekti -- "hic uyunmadi" ile "uyunup zaman asimina
+ugradi" ayri sonuclar ve ikisi de cagirana lazim.
+
+### `pthread_join` diye bir sistem cagrisi yoktur
+
+Onceki bati "POSIX tarafinda is parcaciginin bitmesini beklemenin yolu
+yok" diye yazmisti. Yanlisti -- yolu var, sadece adi baska.
+
+`clone`, `CLONE_CHILD_CLEARTID` bayragiyla cagrilirsa cekirdek bir soz
+veriyor: akis olurken verilen adrese **0 yazacagim ve orada bekleyenleri
+uyandiracagim**. Gerisi `futex`:
+
+```text
+  clone(.. | CLONE_CHILD_CLEARTID, .., &tid)   -> tid yuvasi dolar
+  join:  while tid != 0 { futex_wait(&tid, tid) }
+  akis olurken cekirdek:  tid = 0 ; futex_wake(&tid, hepsi)
+```
+
+Yani "bitmesini bekle" ayri bir mekanizma degil. Gercek glibc'nin
+`pthread_join`i de tam olarak budur; bu yuzden Linux'ta oyle bir sistem
+cagrisi aramak bosunadir. Ayni sozun sonradan verilen bicimi
+(`set_tid_address`) da eklendi -- glibc her akis icin onu cagirir ve
+tanimayan bir cekirdek, is parcacigi kutuphanesi kurulamadan patlatirdi.
+
+Win32 tarafinda karsilik zaten vardi (`WaitForSingleObject` bir is
+parcacigi taniticisi uzerinde calisiyordu); eksik olan cikis kodunu
+sormakti, o da `GetExitCodeThread` ile tamamlandi.
+
+### Yeni bir bekleme durumu, ve neden ayri olmak zorunda
+
+Zamanlayiciya besinci bir bekleme durumu eklendi: `AddrWait`. Digerleri
+gibi ayri olmak zorunda, cunku **uyandirma kaynagi** farkli:
+
+| durum | uyandiran |
+|---|---|
+| `Blocked` | zaman (PIT tik) |
+| `Waiting` | beklenen gorevin bitmesi |
+| `SigWait` | sinyal |
+| `IoWait` | donanim kesmesi |
+| `AddrWait` | **baska bir Ring 3 akisi** |
+
+Ayni yuvayi paylassalardi bir disk kesmesi, kilit bekleyen bir is
+parcacigini yanlislikla uyandirirdi -- ve o akis kilidi almadigi halde
+aldigini sanardi. Sessiz veri bozulmasinin tarifi.
+
+Uyandirma hem adresi hem **adres uzayini** karsilastiriyor: ayni sanal
+adres iki surecte bambaska bellektir.
+
+### Bilerek yapilmayanlar
+
+* **`futex`in yalnizca iki islemi var**: `FUTEX_WAIT` ve `FUTEX_WAKE`.
+  `REQUEUE`, `WAIT_BITSET` ve oncelik devralan (`PI`) kilitler yok;
+  yarim uygulamak, glibc'nin dogru sandigi bir davranisi sessizce
+  bozmak olurdu. Taninmayan islem `ENOSYS` doner.
+* **`FUTEX_PRIVATE_FLAG` yok sayiliyor.** TCMK'de esleme surecler
+  arasinda paylasilmiyor, yani her futex zaten "private". Bayragi
+  reddetmek, glibc'nin gercekte kullandigi bicimi reddetmek olurdu.
+* **Zaman asimi cozunurlugu 10 ms** (PIT 100 Hz). 5 ms isteyen bir
+  cagri bir tik bekler; hic beklememeye cevirmek, dongu iceren bir
+  programi mesgul beklemeye dusururdu.
+* **i386'da 8 baytlik karsilastirma reddediliyor.** `WaitOnAddress`
+  `AddressSize=8` kabul eder ama 32 bitte bolunemez okunamaz; sessizce
+  yanlis davranmaktansa `ERROR_INVALID_PARAMETER` dondurmek.
+* **`CRITICAL_SECTION` ve `SRWLOCK` yok.** Ikisi de bu ilkelin
+  **uzerine** kurulabilir ve kullanici tarafina aittir; cekirdege
+  koymak, Windows'un kendi katmanlamasini bozardi.
+* **Oncelik devralma (priority inheritance) yok**: dusuk oncelikli bir
+  akisin tuttugu kilit, yuksek oncelikliyi bekletir. `nice` dilim
+  uzunlugunu degistirdigi icin aclik olusmuyor, ama ters oncelik
+  duzeltilmiyor.
+* **`clone` bayrak kumesi hala tam degil**: `CLONE_SETTLS` ve
+  `CLONE_PARENT_SETTID` yok. `CLONE_CHILD_CLEARTID` bu batiyla geldi.
 
 ## Alfa'nin bilinen sinirlari
 
@@ -4701,11 +4884,11 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
   grubu) ve `WUNTRACED`/`WCONTINUED` yok. Is-parcacigi grubu (`tgid`)
   ayri bir kavram ve o **var** (yukari bkz.); eksik olan **surec**
   grubu.
-- **Is parcaciklarinin bekleme yolu asimetrik.** `CreateThread` donen
-  tanitici `WaitForSingleObject` ile beklenebilir; POSIX tarafinda
-  `pthread_join`/`futex` karsiligi yok, bekleyen tarafin paylasilan bir
-  bayrak yoklamasi gerekiyor (yukari bkz.). Ayrica is-parcacigi yigini
-  sabit 8 KiB: `dwStackSize` yok sayiliyor.
+- **Is-parcacigi yigini sabit 8 KiB**: `dwStackSize` yok sayiliyor.
+  Beklemenin iki yolu da artik var (`futex` / `WaitOnAddress`, yukari
+  bkz.), ama uzerlerine kurulacak `CRITICAL_SECTION`/`SRWLOCK` katmani
+  yok -- o katman kullanici tarafina aittir. Oncelik devralma da yok:
+  dusuk oncelikli bir akisin tuttugu kilit, yuksek oncelikliyi bekletir.
 - **Surec basina 512 KiB eslenir**, talep uzerine sayfalama yok.
 - **TCMKFS'te toplam 64 inode var** (dizinler de sayilir), dosya basina
   160 KiB (yalnizca dogrudan blok isaretcileri) ve azami 8 seviye

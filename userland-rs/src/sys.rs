@@ -167,6 +167,20 @@ pub const SYS_GETTID: usize = 224;
 pub const SYS_CLONE: usize = 56;
 #[cfg(target_arch = "x86_64")]
 pub const SYS_GETTID: usize = 186;
+
+/// `futex` ve `set_tid_address` -- is parcaciklarinin bekleme ikilisi.
+#[cfg(target_arch = "x86")]
+pub const SYS_FUTEX: usize = 240;
+#[cfg(target_arch = "x86")]
+pub const SYS_SET_TID_ADDRESS: usize = 258;
+#[cfg(target_arch = "x86_64")]
+pub const SYS_FUTEX: usize = 202;
+#[cfg(target_arch = "x86_64")]
+pub const SYS_SET_TID_ADDRESS: usize = 218;
+/// Cekirdek sayaclarini okur -- "bu is gercekten cekirdekte mi oldu"
+/// sorusunun durust cevabi. Gecen sureye bakmak bunu olcmezdi.
+pub const SYS_KSTAT: usize = 0x50C;
+
 /// `setenv`/`unsetenv`. Linux'ta boyle bir sistem cagrisi yoktur --
 /// orada ortam surecin kendi belleginde ve libc'nin isidir. TCMK'de
 /// tablo cekirdekte oldugu icin cagri gerekiyor; numaranin TCMK
@@ -1214,6 +1228,12 @@ pub const CLONE_FILES: usize = 0x0000_0400;
 pub const CLONE_SIGHAND: usize = 0x0000_0800;
 pub const CLONE_THREAD: usize = 0x0001_0000;
 
+/// Akis olurken verilen adrese 0 yazilip orada bekleyenler uyandirilir.
+///
+/// `pthread_join`in tamami bu bayrakta: ayri bir "bitmesini bekle"
+/// cagrisi **yok**, cekirdegin verdigi bu soz ile `futex` yetiyor.
+pub const CLONE_CHILD_CLEARTID: usize = 0x0020_0000;
+
 /// `pthread_create`in cekirdege gecirdigi bayrak kumesi.
 pub const CLONE_THREAD_FLAGS: usize =
     CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD;
@@ -1241,6 +1261,156 @@ pub fn clone_thread(entry: extern "C" fn(usize) -> usize, param: usize, stack: u
             0,
         ) as isize
     }
+}
+
+/// Yeni bir is parcacigi baslatir ve **beklenebilir** kilar.
+///
+/// `clone_thread`ten tek farki `CLONE_CHILD_CLEARTID`: cekirdek, akis
+/// olurken `tid_slot`a 0 yazip orada bekleyenleri uyandiracagina soz
+/// veriyor. `join` bu sozun uzerinde duruyor.
+///
+/// Cagiran `tid_slot`u kendisi tutar ve donen kimligi oraya yazar --
+/// gercek `pthread_create` de bunu boyle yapar, `pthread_t` yapisinin
+/// icindeki alan tam olarak budur.
+///
+/// # Safety
+/// `tid_slot` is parcacigi bitene kadar gecerli kalmali.
+pub unsafe fn clone_joinable(
+    entry: extern "C" fn(usize) -> usize,
+    param: usize,
+    tid_slot: *mut u32,
+) -> isize {
+    let id = syscall6(
+        SYS_CLONE,
+        CLONE_THREAD_FLAGS | CLONE_CHILD_CLEARTID,
+        0,
+        entry as usize,
+        param,
+        tid_slot as usize,
+        0,
+    ) as isize;
+    if id > 0 {
+        tid_slot.write_volatile(id as u32);
+    }
+    id
+}
+
+/// `futex` islemleri (Linux ile ayni sayilar).
+pub const FUTEX_WAIT: usize = 0;
+pub const FUTEX_WAKE: usize = 1;
+
+/// Adresteki deger `expected` oldugu surece uyur.
+///
+/// Kilit almanin **yavas** yolu: hizli yol cekirdege hic ugramaz, tek
+/// bir atomik islemle biter. Buraya ancak cekisme varsa inilir.
+///
+/// `timeout_ms` sifirsa suresiz. Doner: 0 uyandirildi, `-EAGAIN` deger
+/// zaten farkliydi, `-ETIMEDOUT` sure doldu.
+///
+/// # Safety
+/// `address` gecerli, 4'e hizali bir kullanici adresi olmali.
+pub unsafe fn futex_wait(address: *const u32, expected: u32, timeout_ms: usize) -> isize {
+    // Cekirdek `struct timespec` bekliyor: [saniye, nanosaniye].
+    let spec = [timeout_ms / 1000, (timeout_ms % 1000) * 1_000_000];
+    let timeout = if timeout_ms == 0 {
+        0
+    } else {
+        spec.as_ptr() as usize
+    };
+    syscall6(
+        SYS_FUTEX,
+        address as usize,
+        FUTEX_WAIT,
+        expected as usize,
+        timeout,
+        0,
+        0,
+    ) as isize
+}
+
+/// Adres uzerinde uyuyan en fazla `count` akisi uyandirir.
+///
+/// Doner: gercekten uyandirilan sayi. Windows ikizi
+/// (`WakeByAddressSingle`/`All`) bu sayiyi **dondurmez** -- ayni ilkelin
+/// iki sozlesmesi.
+///
+/// # Safety
+/// `address` gecerli bir kullanici adresi olmali.
+pub unsafe fn futex_wake(address: *const u32, count: usize) -> isize {
+    syscall6(SYS_FUTEX, address as usize, FUTEX_WAKE, count, 0, 0, 0) as isize
+}
+
+/// Bir is parcaciginin bitmesini bekler (`pthread_join`).
+///
+/// Ayri bir cagri **degil**: `clone_joinable`in verdigi yuva sifirlanana
+/// kadar `futex` ile uyunur. Gercek glibc'nin `pthread_join`i de tam
+/// olarak bunu yapar -- bu yuzden POSIX'te "is parcacigini bekle" diye
+/// bir sistem cagrisi aramak bosunadir, yoktur.
+///
+/// Doner: bittiyse `true`, sure dolduysa `false`.
+///
+/// # Safety
+/// `tid_slot`, `clone_joinable`a verilen yuvanin ta kendisi olmali.
+pub unsafe fn join_thread(tid_slot: *mut u32, timeout_ms: usize) -> bool {
+    let deadline_steps = if timeout_ms == 0 { usize::MAX } else { 8 };
+    let slice = if timeout_ms == 0 { 0 } else { timeout_ms / 8 + 1 };
+    let mut step = 0;
+    loop {
+        let current = tid_slot.read_volatile();
+        if current == 0 {
+            return true;
+        }
+        if step >= deadline_steps {
+            return false;
+        }
+        // Deger hala `current` ise uyu. Sart, akis tam bu arada biterse
+        // uyandirmanin kaybolmasini engelliyor.
+        futex_wait(tid_slot as *const u32, current, slice);
+        step += 1;
+    }
+}
+
+/// Cekirdek sayaclari (`kstat`).
+pub mod kstat {
+    /// Kac kez bir adres uzerinde uyunuldu.
+    pub const ADDRESS_WAITS: usize = 0;
+    /// Kac akis bir adres uzerinden uyandirildi.
+    pub const ADDRESS_WAKES: usize = 1;
+    /// PIT tik sayaci (10 ms cozunurluk).
+    pub const TICKS: usize = 2;
+    /// Kac is parcacigi yaratildi.
+    pub const THREADS_CREATED: usize = 3;
+}
+
+/// Bir cekirdek sayacini okur.
+pub fn kstat(which: usize) -> usize {
+    unsafe { syscall1(SYS_KSTAT, which) }
+}
+
+/// Kac kez bir adres uzerinde uyunuldu (cekirdegin kendi sayaci).
+pub fn address_waits() -> usize {
+    kstat(kstat::ADDRESS_WAITS)
+}
+
+/// Kac akis bir adres uzerinden uyandirildi.
+pub fn address_wakes() -> usize {
+    kstat(kstat::ADDRESS_WAKES)
+}
+
+/// PIT tik sayaci -- 10 ms cozunurluk.
+pub fn ticks() -> usize {
+    kstat(kstat::TICKS)
+}
+
+/// `set_tid_address`: olurken sifirlanacak yeri sonradan bildirir.
+///
+/// `CLONE_CHILD_CLEARTID` ile ayni soz, ayri bir kapi. glibc her akis
+/// icin bunu cagirir; doner: cagiranin kendi kimligi.
+///
+/// # Safety
+/// `address` akis bitene kadar gecerli kalmali.
+pub unsafe fn set_tid_address(address: *mut u32) -> usize {
+    syscall1(SYS_SET_TID_ADDRESS, address as usize)
 }
 
 /// POSIX `gettid`: **is parcaciginin** kimligi.

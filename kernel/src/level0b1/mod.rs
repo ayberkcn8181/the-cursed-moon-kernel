@@ -21,3 +21,5 @@ pub mod process;
 pub mod signal;
 /// Is parcaciklari: clone ve CreateThread.
 pub mod thread;
+/// Adres uzerinde bekleme: futex ve WaitOnAddress.
+pub mod futex;

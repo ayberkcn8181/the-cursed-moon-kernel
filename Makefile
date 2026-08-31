@@ -210,7 +210,7 @@ USERLAND_DIR := $(ROOT_DIR)/userland-rs
 USERLAND_TARGET_DIR := $(TARGET_DIR)/userland
 USER_BASE := 0x00C00000
 
-USER_APPS := hello paint plasma crash hog spin notes menu twins relay echo2 sigdemo race reaper redirect mux masked arena seeker browse waiter heir nested bequest probe quoted mapped threads
+USER_APPS := hello paint plasma crash hog spin notes menu twins relay echo2 sigdemo race reaper redirect mux masked arena seeker browse waiter heir nested bequest probe quoted mapped threads sync
 
 # Windows (PE32) uygulamalari. Ayni kaynak agacindan, ayni `tcmk`
 # kutuphanesiyle, yalnizca **baska bir hedefle** derlenir: rust-lld
@@ -219,7 +219,7 @@ USER_APPS := hello paint plasma crash hog spin notes menu twins relay echo2 sigd
 # imaji yuklerken taban yeniden yerlesimi uygular -- gercek bir Windows
 # programinda oldugu gibi.
 WIN_TARGET_DIR := $(TARGET_DIR)/userland-win
-WIN_APPS := winclock winpad winfiles winenv winprobe winseh winargv winmods winmap winthread
+WIN_APPS := winclock winpad winfiles winenv winprobe winseh winargv winmods winmap winthread winsync
 
 # Ithal kutuphaneleri (Faz 7b). Ortada gercek bir DLL YOKTUR: bunlar
 # yalnizca baglayiciya "bu adlar KERNEL32.dll'den gelecek" demenin
@@ -264,7 +264,7 @@ userland-rust:
 # tek sey taban adresidir, o da bir baglayici argumani.
 USER64_TARGET_DIR := $(TARGET_DIR)/userland64
 # PE tarafi (winclock/winpad) i386'ya ozgu; gerisi iki mimaride de var.
-USER64_APPS := hello plasma paint notes menu crash twins relay echo2 sigdemo race reaper redirect mux masked arena seeker browse waiter heir nested bequest probe quoted mapped threads
+USER64_APPS := hello plasma paint notes menu crash twins relay echo2 sigdemo race reaper redirect mux masked arena seeker browse waiter heir nested bequest probe quoted mapped threads sync
 
 userland-x86_64:
 	@mkdir -p $(ROOT_DIR)/userland
@@ -293,7 +293,7 @@ userland-win: $(WIN_LIB_DIR)/stamp
 # kullanici bolgesinin cok uzerindedir, yani yeniden yerlesim burada
 # **zorunludur**: delta negatiftir ve butun DIR64 girdileri duzeltilir.
 WIN64_TARGET_DIR := $(TARGET_DIR)/userland-win64
-WIN64_APPS := winclock winpad winfiles winenv winprobe winseh winargv winmods winmap winthread
+WIN64_APPS := winclock winpad winfiles winenv winprobe winseh winargv winmods winmap winthread winsync
 
 userland-win64: $(WIN_LIB_DIR)/stamp64
 	@mkdir -p $(ROOT_DIR)/userland

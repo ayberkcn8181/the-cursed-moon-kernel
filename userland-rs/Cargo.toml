@@ -41,6 +41,10 @@ name = "quoted"
 path = "src/bin/quoted.rs"
 
 [[bin]]
+name = "sync"
+path = "src/bin/sync.rs"
+
+[[bin]]
 name = "winprobe"
 path = "src/win/probe.rs"
 
@@ -63,6 +67,10 @@ path = "src/win/seh.rs"
 [[bin]]
 name = "winthread"
 path = "src/win/thread.rs"
+
+[[bin]]
+name = "winsync"
+path = "src/win/sync.rs"
 
 [profile.dev]
 panic = "abort"

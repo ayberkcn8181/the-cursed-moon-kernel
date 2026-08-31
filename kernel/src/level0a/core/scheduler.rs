@@ -55,6 +55,15 @@ pub enum TaskState {
     /// "disk hazir olunca uyan" ayni yuvayi paylasir ve biri otekini
     /// yanlislikla uyandirir.
     IoWait,
+    /// Bir **kullanici adresi** uzerinde bekliyor (`futex` / `WaitOnAddress`).
+    ///
+    /// Ayri bir durum olmasi, digerlerindeki ayni gerekce: uyandirma
+    /// kaynagi farkli. `IoWait`i donanim, `SigWait`i sinyal, `Waiting`i
+    /// bir gorevin bitmesi kaldirir; bunu ise **baska bir Ring 3 akisi**
+    /// kaldirir. Ayni yuvayi paylassalardi bir disk kesmesi, kilit
+    /// bekleyen bir is parcacigini yanlislikla uyandirirdi -- ve o akis
+    /// kilidi almadigi halde aldigini sanardi.
+    AddrWait,
     Terminated,
 }
 
@@ -128,6 +137,25 @@ pub struct Task {
     /// Is parcacigi tabanlari (TLS/TEB) **grup basina degil gorev
     /// basina**dir; her akisin kendi TEB'i olmak zorunda.
     pub group: usize,
+    /// `AddrWait` iken: beklenen **kullanici** adresi (0 = beklemiyor).
+    ///
+    /// Adres uzayiyla birlikte anlamli: iki farkli surecin ayni sanal
+    /// adresi bambaska bellektir. Uyandirma bu yuzden hem adresi hem
+    /// `address_space`i karsilastirir.
+    pub wait_addr: usize,
+    /// `AddrWait` iken: `wake_tick` anlamli mi (zaman asimi istendi mi)?
+    ///
+    /// Ayri bir bayrak sart, cunku "0 tik sonra uyan" ile "hic uyanma"
+    /// ayni sayiyla ifade edilemez.
+    pub wait_timed: bool,
+    /// Is parcacigi olurken sifirlanip uyandirilacak kullanici adresi.
+    ///
+    /// Linux'ta `CLONE_CHILD_CLEARTID`in yaptigi is; `pthread_join`
+    /// tam olarak bunun uzerine kuruludur. Cekirdek akis biterken adrese
+    /// 0 yazar ve o adres uzerinde bekleyenleri uyandirir -- yani
+    /// "bitti" haberini beklemek ayri bir mekanizma gerektirmiyor,
+    /// `futex` zaten yetiyor.
+    pub clear_child_tid: usize,
 }
 
 impl Task {
@@ -150,6 +178,9 @@ impl Task {
             stack_top: 0,
             exit_code: 0,
             group: 0,
+            wait_addr: 0,
+            wait_timed: false,
+            clear_child_tid: 0,
         }
     }
 }
@@ -315,6 +346,12 @@ fn spawn_inner(
         // Siradan bir gorev kendi grubunun lideridir. Is parcaciklari
         // bunu `spawn_thread` icinde yaratanin grubuyla degistirir.
         (*tasks.add(index)).group = index;
+        // Yuva yeniden kullaniliyor olabilir: onceki sahibinin bekleme
+        // izleri temizlenmezse yeni gorev hic beklemedigi bir adres
+        // uzerinde uyandirilirdi.
+        (*tasks.add(index)).wait_addr = 0;
+        (*tasks.add(index)).wait_timed = false;
+        (*tasks.add(index)).clear_child_tid = 0;
 
         // Calisma dizini yuvaya baglidir, imaja degil. Sifirlamanin
         // burada olmasi `execve`nin cwd'yi **korumasini** kendiliginden
@@ -359,6 +396,9 @@ fn release_slot(index: usize) {
         (*tasks.add(index)).wait_for = 0;
         (*tasks.add(index)).credits = 0;
         (*tasks.add(index)).name = "";
+        (*tasks.add(index)).wait_addr = 0;
+        (*tasks.add(index)).wait_timed = false;
+        (*tasks.add(index)).clear_child_tid = 0;
     }
 }
 
@@ -786,6 +826,15 @@ fn wake_expired(count: usize) {
                         task.state = TaskState::Ready;
                     }
                 }
+                TaskState::AddrWait => {
+                    // Yalnizca zaman asimi istenmisse; suresiz bekleyeni
+                    // ancak `futex::wake` kaldirir.
+                    if task.wait_timed && now.wrapping_sub(task.wake_tick) < 0x8000_0000 {
+                        task.state = TaskState::Ready;
+                        task.wait_addr = 0;
+                        task.wait_timed = false;
+                    }
+                }
                 TaskState::Waiting => {
                     // Zamanla degil, beklenen gorevin bitmesiyle uyanir.
                     let target = task.wait_for - 1;
@@ -1029,6 +1078,141 @@ pub fn group_of(task: usize) -> usize {
 /// Calisan gorevin grubu.
 pub fn current_group() -> usize {
     group_of(current_id())
+}
+
+/// Gorevi bir **kullanici adresi** uzerinde uyutur.
+///
+/// `futex(FUTEX_WAIT)` ve `WaitOnAddress`in ortak govdesi.
+///
+/// `still_waiting`, adresin beklenen degeri **hala** tasiyip tasimadigini
+/// soyler ve **kesmeler kapaliyken** sinanir. Bu sart, ilk bakista
+/// gereksiz gorunen ama olmazsa olmaz olan seydir: deger sinandiktan
+/// sonra gorev `AddrWait`e gecene kadar araya baska bir akis girerse,
+/// o akisin yaptigi uyandirma **kimseyi bulamaz** ve bekleyen sonsuza
+/// kadar uyur. Klasik "kacirilmis uyandirma" yarisi; `wait_for_io` da
+/// ayni kaligi kullaniyor.
+///
+/// `timeout_ticks` `None` ise suresiz bekler. Doner: gercekten
+/// uyandirildiysa `true`, zaman asimina ugradiysa ya da deger zaten
+/// degismisse `false`.
+pub fn wait_on_address(
+    address: usize,
+    timeout_ticks: Option<u32>,
+    still_waiting: impl Fn() -> bool,
+) -> bool {
+    let current = CURRENT.load(Ordering::Relaxed);
+    if !can_block(current) {
+        // Uyutulamayan baglam (masaustu/kabuk gorevi): bir tik birakip
+        // cagirana yeniden denetme sansi verilir.
+        yield_now();
+        return false;
+    }
+
+    let deadline = timeout_ticks.map(|t| crate::level0a::pit::ticks().wrapping_add(t));
+    let armed = crate::arch::cpu::without_interrupts(|| unsafe {
+        if !still_waiting() {
+            return false;
+        }
+        let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+        (*tasks.add(current)).wait_addr = address;
+        (*tasks.add(current)).wait_timed = deadline.is_some();
+        if let Some(tick) = deadline {
+            (*tasks.add(current)).wake_tick = tick;
+        }
+        (*tasks.add(current)).state = TaskState::AddrWait;
+        ADDR_WAITS.fetch_add(1, Ordering::Relaxed);
+        true
+    });
+    if !armed {
+        return false;
+    }
+
+    yield_now();
+
+    // Uyandik: yuvayi temizle ve nedeni bildir. `wait_addr`in sifirlanmis
+    // olmasi "biri beni uyandirdi" demek; `wake_expired` zaman asiminda
+    // onu da sifirliyor, o yuzden neden saat uzerinden ayirt ediliyor.
+    let timed_out = deadline
+        .map(|tick| crate::level0a::pit::ticks().wrapping_sub(tick) < 0x8000_0000)
+        .unwrap_or(false);
+    crate::arch::cpu::without_interrupts(|| unsafe {
+        let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+        (*tasks.add(current)).wait_addr = 0;
+        (*tasks.add(current)).wait_timed = false;
+        if (*tasks.add(current)).state == TaskState::AddrWait {
+            (*tasks.add(current)).state = TaskState::Running;
+        }
+    });
+    !timed_out
+}
+
+/// Bir kullanici adresi uzerinde bekleyenleri uyandirir.
+///
+/// `space` adres uzayi: ayni sanal adres iki surecte bambaska bellektir,
+/// o yuzden karsilastirmanin iki yani da gerekiyor. En fazla `count`
+/// gorev uyandirilir (`FUTEX_WAKE`in sayaci, `WakeByAddressSingle`in
+/// "bir tane"si). Doner: kac gorev uyandirildi.
+pub fn wake_on_address(space: usize, address: usize, count: usize) -> usize {
+    if address == 0 || count == 0 {
+        return 0;
+    }
+    crate::arch::cpu::without_interrupts(|| unsafe {
+        let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+        let mut woken = 0;
+        for i in 0..MAX_TASKS {
+            if woken == count {
+                break;
+            }
+            let task = &mut *tasks.add(i);
+            if task.state != TaskState::AddrWait {
+                continue;
+            }
+            if task.wait_addr != address || task.address_space != space {
+                continue;
+            }
+            task.state = TaskState::Ready;
+            task.wait_addr = 0;
+            task.wait_timed = false;
+            woken += 1;
+        }
+        ADDR_WAKES.fetch_add(woken, Ordering::Relaxed);
+        woken
+    })
+}
+
+/// Kac kez bir adres uzerinde uyunuldu / kac uyandirma yapildi (olcum).
+static ADDR_WAITS: AtomicUsize = AtomicUsize::new(0);
+static ADDR_WAKES: AtomicUsize = AtomicUsize::new(0);
+
+pub fn address_waits() -> usize {
+    ADDR_WAITS.load(Ordering::Relaxed)
+}
+
+pub fn address_wakes() -> usize {
+    ADDR_WAKES.load(Ordering::Relaxed)
+}
+
+/// Is parcacigi olurken sifirlanacak adresi kaydeder
+/// (`CLONE_CHILD_CLEARTID`).
+pub fn set_clear_child_tid(task: usize, address: usize) {
+    if task >= MAX_TASKS {
+        return;
+    }
+    crate::arch::cpu::without_interrupts(|| unsafe {
+        let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+        (*tasks.add(task)).clear_child_tid = address;
+    });
+}
+
+/// Kayitli `clear_child_tid` adresi (yoksa 0).
+pub fn clear_child_tid(task: usize) -> usize {
+    if task >= MAX_TASKS {
+        return 0;
+    }
+    unsafe {
+        let tasks = core::ptr::addr_of!(TASKS) as *const Task;
+        (*tasks.add(task)).clear_child_tid
+    }
 }
 
 /// Bir gruptaki canli gorev sayisi.

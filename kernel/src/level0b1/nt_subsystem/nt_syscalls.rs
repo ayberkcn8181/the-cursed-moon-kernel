@@ -123,6 +123,10 @@ pub const NT_UNMAP_VIEW_OF_FILE: u32 = 0x3035;
 pub const NT_SET_UNHANDLED_EXCEPTION_FILTER: u32 = 0x3036;
 pub const NT_CREATE_THREAD: u32 = 0x3037;
 pub const NT_EXIT_THREAD: u32 = 0x3038;
+pub const NT_GET_EXIT_CODE_THREAD: u32 = 0x3039;
+pub const NT_WAIT_ON_ADDRESS: u32 = 0x303A;
+pub const NT_WAKE_BY_ADDRESS_SINGLE: u32 = 0x303B;
+pub const NT_WAKE_BY_ADDRESS_ALL: u32 = 0x303C;
 
 pub const NT_USER_CREATE_WINDOW_W32: u32 = 0x3010;
 pub const NT_GDI_GET_BITS_W32: u32 = 0x3011;
@@ -241,6 +245,10 @@ const WAIT_FAILED: usize = 0xFFFF_FFFF;
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 /// Cagriya verilen parametre gecersiz (bos ad, okunamayan isaretci).
 const ERROR_INVALID_PARAMETER: u32 = 87;
+/// `WaitOnAddress` sure dolunca bunu birakir. POSIX ikizi `-ETIMEDOUT`
+/// **doner**; Win32 ise `FALSE` donup kodu `GetLastError`a birakir --
+/// ayni bilginin iki tasima yolu.
+const ERROR_TIMEOUT: u32 = 1460;
 /// Adi verilen ortam degiskeni yok.
 const ERROR_ENVVAR_NOT_FOUND: u32 = 203;
 
@@ -1801,6 +1809,114 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
         NT_EXIT_THREAD => {
             let code = arg(args, 0).unwrap_or(0);
             kernel_api::exit_current_task(code & 0xFF);
+        }
+
+        // GetExitCodeThread(hThread, lpExitCode)
+        //
+        // `GetExitCodeProcess` ile ayni govde, ayri bir ad. Windows'ta
+        // ikisinin ayri olmasi, tanitici turlerinin ayri olmasindan
+        // geliyor; TCMK'de is parcacigi da bir gorev oldugu icin ayni
+        // yuvaya bakiyorlar. Ayri numara vermek yine de dogru: bir
+        // surec taniticisini `GetExitCodeThread`e vermek Windows'ta da
+        // calisir, tersi de -- ama iki cagriyi tek numaraya indirmek,
+        // ithal tablosunda yalnizca birini arayan bir ikiliyi kirardi.
+        NT_GET_EXIT_CODE_THREAD => {
+            let handle = arg(args, 0).unwrap_or(0) as usize;
+            match (handle.checked_sub(PROCESS_HANDLE_FLAG), arg_ptr(args, 1)) {
+                (Some(task), Some(out)) if out != 0 && mmu::is_user_accessible(out) => {
+                    let code = match remembered_exit(task) {
+                        Some(code) => code,
+                        None
+                            if crate::level0a::core::scheduler::state_of(task)
+                                == crate::level0a::core::scheduler::TaskState::Terminated =>
+                        {
+                            crate::level0a::core::scheduler::exit_code_of(task)
+                        }
+                        None => STILL_ACTIVE,
+                    };
+                    unsafe { (out as *mut u32).write_unaligned(code) };
+                    WIN32_TRUE
+                }
+                _ => {
+                    set_last_error(ERROR_INVALID_HANDLE);
+                    WIN32_FALSE
+                }
+            }
+        }
+
+        // --- Adres uzerinde bekleme (bkz. `level0b1::futex`) ---
+
+        // WaitOnAddress(Address, CompareAddress, AddressSize, dwMilliseconds)
+        //
+        // Windows 8'den beri `SRWLOCK`un ve `CONDITION_VARIABLE`in
+        // altindaki ilkel; Linux'ta ayni isi `futex(FUTEX_WAIT)` yapiyor
+        // ve TCMK ikisini de **ayni** cekirdek yoluna indiriyor.
+        //
+        // Ayrisan iki nokta ve ikisi de bilincli olarak korunuyor:
+        // beklenen deger burada bir **adres** ile veriliyor (POSIX
+        // sayiyi dogrudan alir), ve deger zaten farkliysa donus `TRUE`
+        // oluyor (POSIX `-EAGAIN` der). Ikinci fark onemli: Win32
+        // tarafinda "bosuna uyandin" ile "gercekten uyandirildin"
+        // ayrimini cagiran yapar, cunku her iki durumda da yapilacak sey
+        // ayni -- kosulu yeniden sinamak.
+        NT_WAIT_ON_ADDRESS => {
+            let address = arg_ptr(args, 0).unwrap_or(0);
+            let compare = arg_ptr(args, 1).unwrap_or(0);
+            let width = arg(args, 2).unwrap_or(0) as usize;
+            let milliseconds = arg(args, 3).unwrap_or(0);
+
+            if compare == 0 || !mmu::is_user_accessible(compare) || !matches!(width, 1 | 2 | 4 | 8)
+            {
+                set_last_error(ERROR_INVALID_PARAMETER);
+                WIN32_FALSE
+            } else {
+                let expected = unsafe {
+                    match width {
+                        1 => (compare as *const u8).read_unaligned() as u64,
+                        2 => (compare as *const u16).read_unaligned() as u64,
+                        4 => (compare as *const u32).read_unaligned() as u64,
+                        _ => (compare as *const u64).read_unaligned(),
+                    }
+                };
+                // `INFINITE` (0xFFFFFFFF) suresiz demek.
+                let timeout = if milliseconds == u32::MAX {
+                    None
+                } else {
+                    Some(milliseconds)
+                };
+
+                match unsafe { crate::level0b1::futex::wait(address, expected, width, timeout) } {
+                    // "Deger zaten degismisti" de basaridir: cagiran
+                    // kosulu yeniden sinayacak.
+                    crate::level0b1::futex::Outcome::Woken
+                    | crate::level0b1::futex::Outcome::Changed => WIN32_TRUE,
+                    crate::level0b1::futex::Outcome::TimedOut => {
+                        set_last_error(ERROR_TIMEOUT);
+                        WIN32_FALSE
+                    }
+                    crate::level0b1::futex::Outcome::BadAddress => {
+                        set_last_error(ERROR_INVALID_PARAMETER);
+                        WIN32_FALSE
+                    }
+                }
+            }
+        }
+
+        // WakeByAddressSingle(Address) / WakeByAddressAll(Address)
+        //
+        // POSIX'te tek cagri var ve sayiyi arguman aliyor; Windows iki
+        // ayri cagri koymus. Ikisi de `void` doner -- yani "kimseyi
+        // bulamadim" bilgisi Win32 tarafinda **yok**. TCMK sayiyi yine
+        // de tutuyor (kabukta `stats`), ama uydurup dondurmuyor.
+        NT_WAKE_BY_ADDRESS_SINGLE => {
+            let address = arg_ptr(args, 0).unwrap_or(0);
+            crate::level0b1::futex::wake(address, 1);
+            WIN32_TRUE
+        }
+        NT_WAKE_BY_ADDRESS_ALL => {
+            let address = arg_ptr(args, 0).unwrap_or(0);
+            crate::level0b1::futex::wake(address, usize::MAX);
+            WIN32_TRUE
         }
 
         // --- Dosya esleme (bkz. `mapping.rs`) ---

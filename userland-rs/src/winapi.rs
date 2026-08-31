@@ -409,6 +409,51 @@ extern "system" {
     /// **Yalnizca cagiran akisi** bitirir; surec kardesleriyle yasamaya
     /// devam eder. `ExitProcess` ile arasindaki tek fark budur.
     pub fn ExitThread(exit_code: Dword) -> !;
+
+    /// Bitmis bir is parcaciginin cikis kodu.
+    ///
+    /// Hala kosuyorsa `STILL_ACTIVE` (259) doner -- yani "bitti mi"
+    /// sorusu da bununla cevaplanabilir. POSIX'te bunun karsiligi
+    /// **yok**: `waitpid` is parcacigini gormez, `pthread_join` ise
+    /// donus degerini kutuphanenin kendi yapisindan alir.
+    pub fn GetExitCodeThread(thread: Handle, exit_code: *mut Dword) -> Bool;
+}
+
+/// `WaitOnAddress` sure dolunca `GetLastError` bunu verir.
+pub const ERROR_TIMEOUT: Dword = 1460;
+
+#[link(name = "kernel32")]
+extern "system" {
+    /// Adresteki deger **karsilastirma adresindekiyle ayni** oldugu
+    /// surece uyur.
+    ///
+    /// Windows 8'den beri `SRWLOCK` ve `CONDITION_VARIABLE` bunun
+    /// uzerine kurulu; Linux'ta ayni isi `futex(FUTEX_WAIT)` yapar ve
+    /// TCMK ikisini ayni cekirdek yoluna indiriyor.
+    ///
+    /// Iki ayrinti POSIX ikizinden ayrisiyor:
+    ///
+    /// * Beklenen deger bir **adres** ile veriliyor (POSIX sayiyi
+    ///   dogrudan alir) ve boyu ayrica soyleniyor -- 1, 2, 4 ya da 8.
+    /// * Deger zaten farkliysa donus yine `TRUE`. POSIX orada
+    ///   `-EAGAIN` der; ikisi de "kosulu yeniden sina" demektir.
+    ///
+    /// `milliseconds` icin `INFINITE` suresiz bekler.
+    pub fn WaitOnAddress(
+        address: *const c_void,
+        compare_address: *const c_void,
+        address_size: usize,
+        milliseconds: Dword,
+    ) -> Bool;
+
+    /// Adres uzerinde bekleyen **bir** akisi uyandirir.
+    ///
+    /// Donus yok: "kimseyi bulamadim" bilgisi Win32'de mevcut degil.
+    /// POSIX ikizi (`futex(FUTEX_WAKE)`) uyandirdigi sayiyi dondurur.
+    pub fn WakeByAddressSingle(address: *const c_void);
+
+    /// Adres uzerinde bekleyen **butun** akislari uyandirir.
+    pub fn WakeByAddressAll(address: *const c_void);
 }
 
 /// `CreateFileMappingA`nin koruma degerleri (Win32 ile ayni).

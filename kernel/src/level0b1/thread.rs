@@ -183,6 +183,12 @@ extern "C" fn thread_task() -> ! {
     unsafe { usermode::resume_user_context(&context) };
 
     // Buraya donulduyse is parcacigi cikti.
+    //
+    // Once verilen soz: `clone` cagrisi bir `clear_child_tid` adresi
+    // birakmissa oraya 0 yazilip bekleyenler uyandirilir. Sirasi onemli
+    // -- adres uzayi yikildiktan sonra yazacak yer kalmazdi.
+    unsafe { crate::level0b1::futex::clear_child_tid(id) };
+
     let space = scheduler::address_space_of(id);
     if space != 0 && scheduler::address_space_users(space) == 1 {
         // Grubun son gorevi: uzayi birakma isi normal cikis yoluna ait,

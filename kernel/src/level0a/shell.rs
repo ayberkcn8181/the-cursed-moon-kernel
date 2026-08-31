@@ -463,6 +463,7 @@ fn state_name(state: scheduler::TaskState) -> &'static str {
         scheduler::TaskState::Waiting => "bekliyor",
         scheduler::TaskState::IoWait => "disk",
         scheduler::TaskState::SigWait => "sinyal",
+        scheduler::TaskState::AddrWait => "kilit",
         scheduler::TaskState::Terminated => "bitti",
     }
 }

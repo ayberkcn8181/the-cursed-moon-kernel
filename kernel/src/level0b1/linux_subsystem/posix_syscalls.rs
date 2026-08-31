@@ -51,6 +51,14 @@ pub const SYS_EXECVE: u32 = 0x509;
 /// (`SetEnvironmentVariableA` sureci temsil eden blogu degistirir), yani
 /// iki ABI burada da ayni yerde bulusmuyor.
 pub const SYS_SETENV: u32 = 0x50B;
+/// Cekirdek sayaclarini okur (`SYS_KSTAT`).
+///
+/// POSIX'te karsiligi yok, o yuzden TCMK araliginda. Var olma sebebi
+/// olcum: "bu cagri cekirdege indi mi" sorusunun kullanici tarafindan
+/// **durustce** cevaplanabilmesi icin sayaci cekirdegin kendisinden
+/// okumak gerekiyor. Gecen sureye bakmak bunu olcmezdi -- hizli bir
+/// sistem cagrisi da kisa surer.
+pub const SYS_KSTAT: u32 = 0x50C;
 
 // Linux syscall numaralari MIMARIYE GORE DEGISIR -- ayni isim, farkli sayi.
 // Bunu tek bir kumeyle gecistirmek Faz 4'te gercek bir hataya yol acti:
@@ -68,6 +76,8 @@ mod i386_numbers {
     pub const SYS_EXECVE_LINUX: u32 = 11;
     pub const SYS_CLONE: u32 = 120;
     pub const SYS_GETTID: u32 = 224;
+    pub const SYS_FUTEX: u32 = 240;
+    pub const SYS_SET_TID_ADDRESS: u32 = 258;
     pub const SYS_WAITPID: u32 = 7;
     pub const SYS_PIPE: u32 = 42;
     pub const SYS_READ: u32 = 3;
@@ -137,6 +147,8 @@ mod x86_64_numbers {
     pub const SYS_EXECVE_LINUX: u32 = 59;
     pub const SYS_CLONE: u32 = 56;
     pub const SYS_GETTID: u32 = 186;
+    pub const SYS_FUTEX: u32 = 202;
+    pub const SYS_SET_TID_ADDRESS: u32 = 218;
     pub const SYS_READ: u32 = 0;
     pub const SYS_WRITE: u32 = 1;
     pub const SYS_OPEN: u32 = 2;
@@ -206,6 +218,11 @@ const ENOENT: i32 = 2;
 const EMFILE: i32 = 24;
 const EINVAL: i32 = 22;
 const ENOSYS: i32 = 38;
+/// Bekleme suresi doldu -- `futex(FUTEX_WAIT)` zaman asiminda bunu
+/// dondurur. `EAGAIN`den ayri tutulmasi sart: biri "sure bitti", oteki
+/// "deger zaten degismisti" demek ve bekleyen taraf ikisine farkli
+/// tepki verir.
+const ETIMEDOUT: i32 = 110;
 /// Kaynak gecici olarak yok -- `fork` icin gorev tablosu ya da cerceve
 /// havuzu dolu demektir (Linux `fork` da bu kodu dondurur).
 const EAGAIN: i32 = 11;
@@ -824,6 +841,8 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
             const CLONE_FS: usize = 0x0000_0200;
             const CLONE_FILES: usize = 0x0000_0400;
             const CLONE_THREAD: usize = 0x0001_0000;
+            /// Akis olurken verilen adrese 0 yazilip uyandirilir.
+            const CLONE_CHILD_CLEARTID: usize = 0x0020_0000;
 
             let flags = arg1;
             let child_stack = arg2;
@@ -858,6 +877,14 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
                     crate::level0b1::thread::create(entry, param, child_stack, false)
                 } {
                     Ok(id) => {
+                        // `CLONE_CHILD_CLEARTID`: cekirdek, akis olurken
+                        // verilen adrese 0 yazip orada bekleyenleri
+                        // uyandiracagina soz veriyor. `pthread_join`
+                        // baska bir sey degil -- bu sozun uzerine
+                        // kurulmus bir `futex` beklemesi.
+                        if flags & CLONE_CHILD_CLEARTID != 0 && arg5 != 0 {
+                            crate::level0a::core::scheduler::set_clear_child_tid(id, arg5);
+                        }
                         frame.set_return(id);
                         return;
                     }
@@ -873,6 +900,108 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
         // Linux'ta da tam olarak boyledir.
         SYS_GETTID => {
             frame.set_return(crate::level0a::core::scheduler::current_id());
+            return;
+        }
+
+        // `futex(uaddr, op, val, timeout, uaddr2, val3)`
+        //
+        // Linux'un butun kilitlerinin altindaki ilkel. Adi "fast
+        // userspace mutex"ten geliyor ve **fast** kismi cekirdegin hic
+        // cagrilmadigi yol: cekisme yoksa kullanici tarafi tek bir
+        // atomik islemle isini bitirir. Buraya yalnizca beklemek
+        // gerektiginde inilir.
+        //
+        // Iki islem destekleniyor:
+        //
+        // ```text
+        //   FUTEX_WAIT (0)  *uaddr == val ise uyu
+        //   FUTEX_WAKE (1)  uaddr uzerinde uyuyan en fazla val akisi kaldir
+        // ```
+        //
+        // `FUTEX_PRIVATE_FLAG` (128) yok sayiliyor: TCMK'de esleme
+        // surecler arasi paylasilmiyor, yani her futex zaten "private".
+        // Bayragi reddetmek, glibc'nin gercekte kullandigi bicimi
+        // reddetmek olurdu.
+        SYS_FUTEX => {
+            const FUTEX_WAIT: usize = 0;
+            const FUTEX_WAKE: usize = 1;
+            const FUTEX_CMD_MASK: usize = !(128 | 256);
+
+            let address = arg1;
+            let operation = arg2 & FUTEX_CMD_MASK;
+            let value = arg3;
+
+            match operation {
+                FUTEX_WAIT => {
+                    // `timeout` bir `struct timespec` isaretcisi; NULL
+                    // ise suresiz. Saniye + nanosaniye milisaniyeye
+                    // cevriliyor, cunku zamanlayicinin cozunurlugu
+                    // 10 ms (PIT 100 Hz) ve daha incesini tutmak
+                    // tutulamayacak bir soz olurdu.
+                    let timeout = if arg4 != 0 && mmu::is_user_accessible(arg4) {
+                        let spec = arg4 as *const usize;
+                        let seconds = unsafe { spec.read_unaligned() };
+                        let nanoseconds = unsafe { spec.add(1).read_unaligned() };
+                        Some((seconds as u32).saturating_mul(1000) + (nanoseconds / 1_000_000) as u32)
+                    } else {
+                        None
+                    };
+
+                    match unsafe {
+                        crate::level0b1::futex::wait(address, value as u64, 4, timeout)
+                    } {
+                        crate::level0b1::futex::Outcome::Woken => 0,
+                        // Deger uymadi: hata degil, "bosuna geldin".
+                        // glibc bunu gorunce donup yeniden dener.
+                        crate::level0b1::futex::Outcome::Changed => -EAGAIN,
+                        crate::level0b1::futex::Outcome::TimedOut => -ETIMEDOUT,
+                        crate::level0b1::futex::Outcome::BadAddress => -EFAULT,
+                    }
+                }
+                FUTEX_WAKE => crate::level0b1::futex::wake(address, value) as i32,
+                // Diger islemler (REQUEUE, WAIT_BITSET, PI kilitleri)
+                // yok. Yarim uygulamak, glibc'nin dogru sandigi bir
+                // davranisi sessizce bozmak olurdu.
+                _ => -ENOSYS,
+            }
+        }
+
+        // `kstat(hangi)` -- cekirdegin kendi sayaclarindan biri.
+        //
+        // Sinav programlarinin "bu is gercekten cekirdekte mi oldu"
+        // sorusunu cevaplayabilmesi icin var. Kabuktaki `stats` komutu
+        // ayni sayaclari gosteriyor; buradaki tek fark, Ring 3'ten de
+        // okunabilmesi.
+        SYS_KSTAT => {
+            const KSTAT_ADDRESS_WAITS: usize = 0;
+            const KSTAT_ADDRESS_WAKES: usize = 1;
+            const KSTAT_TICKS: usize = 2;
+            const KSTAT_THREADS_CREATED: usize = 3;
+
+            let value = match arg1 {
+                KSTAT_ADDRESS_WAITS => crate::level0a::core::scheduler::address_waits(),
+                KSTAT_ADDRESS_WAKES => crate::level0a::core::scheduler::address_wakes(),
+                KSTAT_TICKS => crate::level0a::pit::ticks() as usize,
+                KSTAT_THREADS_CREATED => crate::level0b1::thread::created(),
+                _ => {
+                    frame.set_return((-EINVAL) as usize);
+                    return;
+                }
+            };
+            frame.set_return(value);
+            return;
+        }
+
+        // `set_tid_address(adres)` -- olurken sifirlanacak yeri bildirir.
+        //
+        // `clone`un `CLONE_CHILD_CLEARTID` bayragiyla ayni sozun sonradan
+        // verilen bicimi. glibc her akis icin bunu cagirir; tanimayan bir
+        // cekirdek `ENOSYS` dondururdu ve iş parcaciği kutuphanesi
+        // kurulamadan patlardi. Doner: cagiranin kendi kimligi.
+        SYS_SET_TID_ADDRESS => {
+            let task = crate::level0a::core::scheduler::current_id();
+            crate::level0a::core::scheduler::set_clear_child_tid(task, arg1);
+            frame.set_return(task);
             return;
         }
 
