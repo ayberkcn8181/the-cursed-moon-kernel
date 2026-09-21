@@ -36,7 +36,26 @@
 //! kuruluyor; Win32'de boru **tutamacinin** kipi ve
 //! `SetNamedPipeHandleState` ile. Ikisi de varsayilan olarak bloke.
 //!
-//! ## Bes sinav
+//! ## 4. Olmek ile hata almak
+//!
+//! En sert ayrisma burada ve F sinavi bunu olcuyor. Okuyan ucu kapali
+//! bir boruya yazmak:
+//!
+//! ```text
+//!   POSIX  write() -> EPIPE + SIGPIPE -> yakalanmazsa SUREC OLER
+//!   Win32  WriteFile -> FALSE + ERROR_BROKEN_PIPE -> surec YASAR
+//! ```
+//!
+//! Ayni olay, birinde olum, otekinde bir hata kodu. POSIX'in tercihi
+//! kabuk boru hatlari icin: `uretici | head` kaliginda uretici
+//! durdurulmazsa sonsuza kadar kosardi. Windows'un boru hatti gelenegi
+//! farkli oldugu icin oyle bir varsayilana ihtiyaci olmamis.
+//!
+//! Bu sinav `winpipe`in POSIX ikizinde **yakalanarak** olculuyor
+//! (`blocking` G/H); burada yakalanacak bir sey yok -- olculen sey
+//! zaten sinyalin **olmamasi**.
+//!
+//! ## Yedi sinav
 //!
 //! ```text
 //!   A  bekleme       -> bos borudan okumak kardes yazana kadar BEKLER
@@ -44,6 +63,8 @@
 //!   C  kirik boru    -> yazan kapaninca ERROR_BROKEN_PIPE (POSIX: 0)
 //!   D  PIPE_NOWAIT   -> bos boruda FALSE + ERROR_NO_DATA, bekleme yok
 //!   E  iki durum     -> NO_DATA ile BROKEN_PIPE ayni sey DEGIL
+//!   F  sinyal yok    -> okuyan yokken yazmak OLDURMEZ, hata dondurur
+//!   G  yazma bekler  -> dolu boruya yazmak kardes okuyana kadar BEKLER
 //! ```
 //!
 //! Tuslar: `q` -> cik
@@ -88,6 +109,27 @@ const EMPTY: Check = Check {
     passed: false,
 };
 
+/// G sinavinin borusunun okuma ucu.
+static READ_END: AtomicU32 = AtomicU32::new(u32::MAX);
+
+/// G sinavinin kardesi: bekleyip **okur** ve yer acar.
+unsafe extern "system" fn late_reader(_param: *mut c_void) -> Dword {
+    winapi::Sleep(DELAY_MS);
+    let handle = READ_END.load(Ordering::SeqCst);
+    if handle != u32::MAX {
+        let mut buf = [0u8; 512];
+        let mut read = 0u32;
+        winapi::ReadFile(
+            handle,
+            buf.as_mut_ptr(),
+            buf.len() as u32,
+            &mut read,
+            core::ptr::null_mut(),
+        );
+    }
+    0
+}
+
 /// A sinavinin kardesi: bekleyip yazar.
 unsafe extern "system" fn late_writer(_param: *mut c_void) -> Dword {
     winapi::Sleep(DELAY_MS);
@@ -125,7 +167,7 @@ fn make_pipe() -> Option<(Handle, Handle)> {
 
 fn main() {
     let mut console = winapi::Console;
-    let mut checks = [EMPTY; 5];
+    let mut checks = [EMPTY; 7];
 
     // --- A: bekleme ---
     let mut waited_ms = 0u32;
@@ -379,6 +421,134 @@ fn main() {
         passed: e,
     };
 
+    // --- F: sinyal yok, surec yasiyor ---
+    //
+    // POSIX ikizi burada olurdu (SIGPIPE). Windows'ta oyle bir sey yok:
+    // yazma hata doner ve program devam eder. Sinavin kaniti da bu --
+    // bu satirdan sonrasinin **calisiyor olmasi**.
+    let mut write_error = 0u32;
+    let f = match make_pipe() {
+        Some((read_end, write_end)) => {
+            unsafe { winapi::CloseHandle(read_end) };
+            let mut written = 0u32;
+            let ok = unsafe {
+                winapi::WriteFile(
+                    write_end,
+                    b"kimse yok".as_ptr(),
+                    9,
+                    &mut written,
+                    core::ptr::null_mut(),
+                )
+            };
+            write_error = unsafe { winapi::GetLastError() };
+            unsafe { winapi::CloseHandle(write_end) };
+            ok == 0 && write_error == winapi::ERROR_BROKEN_PIPE
+        }
+        None => false,
+    };
+    checks[5] = Check {
+        name: "F sinyal yok",
+        detail: if f {
+            "ERROR_BROKEN_PIPE dondu, surec yasiyor"
+        } else if write_error == 0 {
+            "yazma BASARILI dondu (okuyan yokken)"
+        } else {
+            "hata kodu yanlis"
+        },
+        passed: f,
+    };
+
+    // --- G: yazma bekliyor ---
+    let mut write_waited = 0u32;
+    let g = match make_pipe() {
+        Some((read_end, write_end)) => {
+            // Tamponu doldur. Bloke olmayan kipte doldurup sonra bloke
+            // eden kipe donuyoruz ki burada asilmayalim.
+            let mode_nowait = winapi::PIPE_NOWAIT;
+            unsafe {
+                winapi::SetNamedPipeHandleState(
+                    write_end,
+                    &mode_nowait,
+                    core::ptr::null_mut(),
+                    core::ptr::null_mut(),
+                )
+            };
+            let block = [b'x'; 256];
+            let mut total = 0usize;
+            loop {
+                let mut written = 0u32;
+                let ok = unsafe {
+                    winapi::WriteFile(
+                        write_end,
+                        block.as_ptr(),
+                        block.len() as u32,
+                        &mut written,
+                        core::ptr::null_mut(),
+                    )
+                };
+                if ok == 0 || written == 0 {
+                    break;
+                }
+                total += written as usize;
+                if total > 4096 {
+                    break;
+                }
+            }
+            let mode_wait = winapi::PIPE_WAIT;
+            unsafe {
+                winapi::SetNamedPipeHandleState(
+                    write_end,
+                    &mode_wait,
+                    core::ptr::null_mut(),
+                    core::ptr::null_mut(),
+                )
+            };
+
+            READ_END.store(read_end, Ordering::SeqCst);
+            let mut thread_id = 0u32;
+            let helper = unsafe {
+                winapi::CreateThread(
+                    core::ptr::null_mut(),
+                    0,
+                    Some(late_reader),
+                    core::ptr::null_mut(),
+                    0,
+                    &mut thread_id,
+                )
+            };
+            let started = unsafe { winapi::GetTickCount() };
+            let mut written = 0u32;
+            let ok = unsafe {
+                winapi::WriteFile(
+                    write_end,
+                    b"z".as_ptr(),
+                    1,
+                    &mut written,
+                    core::ptr::null_mut(),
+                )
+            };
+            write_waited = unsafe { winapi::GetTickCount() }.wrapping_sub(started);
+            if helper != 0 {
+                unsafe { winapi::CloseHandle(helper) };
+            }
+            unsafe { winapi::CloseHandle(read_end) };
+            unsafe { winapi::CloseHandle(write_end) };
+            ok != 0 && written == 1 && write_waited >= 100
+        }
+        None => false,
+    };
+    checks[6] = Check {
+        name: "G yazma bekler",
+        detail: if g {
+            "dolu boru, kardes okuyana kadar beklendi"
+        } else if write_waited < 100 {
+            "beklemeden dondu (yazma bloke etmiyor)"
+        } else {
+            "yazma basarisiz"
+        },
+        passed: g,
+    };
+
     for check in &checks {
         let _ = core::fmt::Write::write_str(&mut console, "[winpipe] ");
         let _ = core::fmt::Write::write_str(&mut console, check.name);
@@ -392,7 +562,7 @@ fn main() {
         let _ = core::fmt::Write::write_str(&mut console, ")\n");
     }
 
-    let mut win = match Window::create("winpipe -- bakmak ile almak", 330, 215, 470, 170) {
+    let mut win = match Window::create("winpipe -- bakmak ile almak", 330, 195, 470, 205) {
         Some(w) => w,
         None => return,
     };
@@ -405,7 +575,7 @@ fn main() {
     }
 }
 
-fn draw(win: &mut Window, checks: &[Check; 5], waited: usize) {
+fn draw(win: &mut Window, checks: &[Check; 7], waited: usize) {
     let (w, h) = (win.width(), win.height());
     win.clear(BG);
     win.fill(0, 0, w, 22, PANEL);

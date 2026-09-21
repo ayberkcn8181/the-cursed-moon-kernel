@@ -26,7 +26,7 @@ masaustu sunuyor.
 |---|---|
 | Mimariler | i386 (Multiboot1, `int 0x80`) · x86_64 (Multiboot2, `syscall`) |
 | Ikili bicimleri | ELF32/ELF64 · PE32/PE32+ (ithal tablosu cozulur) |
-| POSIX cagrilari | 68 (+ ELF yardimci vektoru, dosya destekli `mmap`, `clone`, `futex`) |
+| POSIX cagrilari | 68 (+ ELF yardimci vektoru, dosya destekli `mmap`, `clone`, `futex`, `SIGPIPE`) |
 | NT/Win32 cagrilari | 78 (`KERNEL32.dll` 56 ihracat + `TCMKGUI.dll`) |
 | Ring 3 uygulamalari | 30 ELF + 12 PE |
 | Kalici depolama | ATA PIO + MBR + TCMKFS (yazilabilir, i386) |
@@ -41,10 +41,10 @@ tabani (POSIX TLS / Windows TEB), **surec yaratma**
 (sinyaller -- SEH/VEH), **is parcaciklari**
 (`clone` -- `CreateThread`), **akislarin senkronizasyonu**
 (`futex` -- `WaitOnAddress`) ve **bloke eden borular**
-(`read`/`O_NONBLOCK` -- `ReadFile`/`PIPE_NOWAIT`).
+(`read`/`write`/`O_NONBLOCK` -- `ReadFile`/`WriteFile`/`PIPE_NOWAIT`).
 
 Her yetenek QEMU'da **olculerek** dogrulanmistir: `probe` (16 sinav),
-`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (5), `winpipe` (5), `bequest`
+`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `bequest`
 (6), `nested` (4), `winenv` (4) gibi programlar sonucu hem ekrana hem
 seri gunluge yaziyor. Olcumler yol boyunca gercek hatalar buldu -- dolan
 VFS tablosu, `CreateFileA`'nin cevrilmeyen Windows yollari, `GDT`
@@ -4871,17 +4871,23 @@ Birincisini de `0` dondurmek, `read`i bloke sanan gercek bir Linux
 ikilisini **erken cikmaya** ikna etmek demekti. Artik ilki bekliyor.
 
 ```
-[blocking] A bekleme:       gecti (kardes yazana kadar beklendi)
-[blocking] B dosya sonu:    gecti (yazan uc kapali, 0 dondu ve beklemedi)
-[blocking] C O_NONBLOCK:    gecti (bos boruda -EAGAIN, bekleme yok)
-[blocking] D uc durum ayri: gecti (yazan varken -EAGAIN, kapaninca 0)
-[blocking] E pipe2:         gecti (bayrak yaratma aninda kondu)
+[blocking] A bekleme:        gecti (kardes yazana kadar beklendi)
+[blocking] B dosya sonu:     gecti (yazan uc kapali, 0 dondu ve beklemedi)
+[blocking] C O_NONBLOCK:     gecti (bos boruda -EAGAIN, bekleme yok)
+[blocking] D uc durum ayri:  gecti (yazan varken -EAGAIN, kapaninca 0)
+[blocking] E pipe2:          gecti (bayrak yaratma aninda kondu)
+[blocking] F yazma bekler:   gecti (dolu boru, kardes okuyana kadar beklendi)
+[blocking] G varsayilan olum:gecti (yakalamayan cocuk 141 ile oldu)
+[blocking] H SIGPIPE:        gecti (yakalandi, surec yasiyor)
+[blocking] I EPIPE:          gecti (yazma -EPIPE dondu)
 
-[winpipe]  A bekleme:       gecti (kardes yazana kadar beklendi)
-[winpipe]  B PeekNamedPipe: gecti (bakmak tuketmedi, ayni bayt sonra okundu)
-[winpipe]  C kirik boru:    gecti (FALSE + ERROR_BROKEN_PIPE)
-[winpipe]  D PIPE_NOWAIT:   gecti (bos boruda ERROR_NO_DATA, bekleme yok)
-[winpipe]  E iki durum:     gecti (yazan varken NO_DATA, kapaninca BROKEN_PIPE)
+[winpipe]  A bekleme:        gecti (kardes yazana kadar beklendi)
+[winpipe]  B PeekNamedPipe:  gecti (bakmak tuketmedi, ayni bayt sonra okundu)
+[winpipe]  C kirik boru:     gecti (FALSE + ERROR_BROKEN_PIPE)
+[winpipe]  D PIPE_NOWAIT:    gecti (bos boruda ERROR_NO_DATA, bekleme yok)
+[winpipe]  E iki durum:      gecti (yazan varken NO_DATA, kapaninca BROKEN_PIPE)
+[winpipe]  F sinyal yok:     gecti (ERROR_BROKEN_PIPE dondu, surec yasiyor)
+[winpipe]  G yazma bekler:   gecti (dolu boru, kardes okuyana kadar beklendi)
 ```
 
 ![blocking](docs/screenshot-blocking.png)
@@ -4906,6 +4912,69 @@ Son satir iki ABI'nin en keskin ayristigi yer ve bilerek korundu:
 bitmesi beklenen bir sondur; Windows icin bir kopmadir. Sifir bayt ile
 basarili donmek, POSIX'in cevabini Win32 kilifinda vermek olurdu --
 ve `ReadFile`dan hata bekleyen gercek bir Windows programi kirilirdi.
+
+### Yazma da bekliyor -- ve POSIX burada olduruyor
+
+Ilk halinde yalnizca okuma bekliyordu; asimetri README'ye "bilerek
+yapilmayanlar" olarak yazilmisti. Simdi ayna tamamlandi:
+
+```text
+  yer var             -> yaz (kismi olabilir)
+  yer yok, okuyan var -> BEKLE
+  yer yok, okuyan yok -> EPIPE + SIGPIPE
+```
+
+Son satir iki ABI'nin **en sert** ayristigi yer:
+
+| | POSIX | Win32 |
+|---|---|---|
+| okuyan ucu kapali boruya yazmak | `EPIPE` **+ `SIGPIPE`** | `ERROR_BROKEN_PIPE` |
+| yakalanmazsa | **surec oler** (141 = 128+13) | surec yasar |
+
+Ayni olay, birinde olum, otekinde bir hata kodu. POSIX'in bu kadar sert
+olmasinin sebebi kabuk boru hatlari: `uretici | head` kaliginda `head`
+ilk on satiri alip cikar; uretici durdurulmazsa sonsuza kadar kosardi.
+Sinyal onu sessizce sonlandiriyor. Windows'un boru hatti gelenegi
+farkli oldugu icin oyle bir varsayilana ihtiyaci olmamis.
+
+Iddiayi **olcmeden** birakmadik. `blocking` G sinavi bir `fork` cocugu
+yaziyor -- isleyici kurulmadan **once** -- ve ebeveyn cikis kodunu
+`waitpid` ile topluyor:
+
+```
+[LEVEL-0b1] sinyal: gorev #7 SIGPIPE ile sonlandiriliyor (varsayilan davranis).
+[LEVEL-0a] Ring 3 sureci cikis kodu 141 ile sonlandi.
+[blocking] G varsayilan olum: gecti (yakalamayan cocuk 141 ile oldu)
+```
+
+Kendi surecimizde olcemezdik: olcen taraf da olurdu. H ve I ise sinyali
+**yakaliyor**, boylece surec yasiyor ve `write`in donus degeri
+gorulebiliyor -- yakalamasaydik o satirlara hic gelinmezdi.
+
+Bekleme icin ikinci bir anahtar gerekti (`write_key`), ve ayri olmasi
+sart: dolu boruda bekleyen yazici ile bos boruda bekleyen okuyucu ayni
+nesneyi ama **zit kosullari** bekliyor. Tek anahtar olsaydi birbirlerini
+bosa kaldirip dururlardi. Uyandirmalar da ayna simetrik: yazma
+okuyuculari, okuma yazicilari kaldiriyor; ve okuyan son uc kapaninca
+yazicilar uyandiriliyor ki `EPIPE` alabilsinler -- yoksa asla
+bosalmayacak bir tamponu sonsuza kadar beklerlerdi.
+
+### Olcumun buldugu hata: sinavin kendisinde
+
+G sinavi ilk yazildiginda `KALDI` verdi -- ama cekirdek dogru
+davraniyordu; seri gunluk cocugun 141 ile oldugunu acikca yaziyordu.
+Hata **sinavdaydi**: `waitpid`in doldurdugu durum ham bir sayi degil,
+POSIX'in paketlenmis kelimesi. Cikis kodu 8-15. bitlerde duruyor:
+
+```text
+  beklenen 141
+  gorulen  36096 = 141 << 8
+```
+
+Userland'de bunu cozen `exit_status` (`WEXITSTATUS`) zaten vardi ve
+belgesinde de yaziyordu; sinav onu kullanmadan ham degeri
+karsilastirdi. Ders su: bir sinavin `KALDI` vermesi, hatanin olculen
+yerde oldugu anlamina gelmiyor. Once gunluge bakmak gerekti.
 
 ### Bloke olmamak: kimin ozelligi
 
@@ -4985,11 +5054,19 @@ degil, **iki goreve** aitmis.
   penceresinde biriken tuslari dondurur, yoksa `0`. Bloke etmek icin
   tus gelisinde uyandirma gerekiyor ve o yol pencere yoneticisinin
   girdi hattindan geciyor -- ayri bir bati.
-* **Yazma bloke etmiyor.** Dolu bir boruya yazmak kisa doner (POSIX'te
-  de kisa donus mesrudur), ama gercek POSIX yer acilana kadar beklerdi.
-  Simetrigi eksik: okuma bekliyor, yazma beklemiyor.
-* **`SIGPIPE` yok.** Okuyan ucu kapali bir boruya yazmak POSIX'te sinyal
-  uretir; burada yalnizca `0` doner.
+* ~~**Yazma bloke etmiyor.**~~ Artik ediyor (yukari bkz.); simetri tam.
+* ~~**`SIGPIPE` yok.**~~ Artik var ve varsayilan davranisi olduruyor.
+* **`WIFSIGNALED`/`WTERMSIG` yok.** Gercek POSIX'te sinyalle olen bir
+  surec, sinyal numarasini durum kelimesinin **dusuk** bitlerine yazar
+  ve cikis kodu alani bos kalir. TCMK bunun yerine kabuk gelenegi olan
+  `128 + signo`yu cikis koduna koyuyor -- yani `waitpid` ile toplanan
+  bir SIGPIPE olumu `141` olarak gorunur, `WIFSIGNALED` ile degil.
+  Kabuklarin kullandigi sayi dogru, ama ayrimi soran bir program
+  yanilir.
+* **`PIPE_BUF` atomikligi yok.** POSIX, `PIPE_BUF` (genelde 4096) bayta
+  kadar yazmalarin **bolunmeden** yapilacagini garanti eder; TCMK'de
+  tampon 1 KiB ve kisa donus her boyda mumkun. Iki yazicinin satirlari
+  birbirine karisabilir.
 * **`O_NONBLOCK` disindaki `F_SETFL` bayraklari suzuluyor.** Kabul edip
   uygulamamak, uygulandigini saniyormus gibi davranmak olurdu.
 * **Bayraklar tanimlayici basina, acik dosya tanimi basina degil.**
@@ -5025,8 +5102,9 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
   basina sabit 512 KiB. Dosya destekli esleme artik var (yukari bkz.)
   ama **ozel** ve tembel degil: `MAP_SHARED`/`msync` yok, icerik esleme
   aninda okunuyor.
-- ~~**Boru okumasi bloke etmez**~~ -- artik bloke ediyor (yukari bkz.);
-  **yazma** hala beklemiyor ve `SIGPIPE` yok. Boru sayisi dorttur. `dup`/`dup2` ve
+- ~~**Boru okumasi bloke etmez**~~ -- okuma da yazma da artik bloke
+  ediyor ve `SIGPIPE` var (yukari bkz.). Boru sayisi dorttur ve
+  `PIPE_BUF` atomikligi yok. `dup`/`dup2` ve
   `poll` var (yukari bkz.); `select` yok -- `poll` onu kapsadigi icin
   ayrica yazilmadi. `poll` bir bekleme kuyrugu degil, tik cozunurluklu
   bir dongudur: uyanma gecikmesi en fazla 10 ms. `dup` ayrica konumu

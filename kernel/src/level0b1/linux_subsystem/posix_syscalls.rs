@@ -232,6 +232,10 @@ const ENOSYS: i32 = 38;
 /// "deger zaten degismisti" demek ve bekleyen taraf ikisine farkli
 /// tepki verir.
 const ETIMEDOUT: i32 = 110;
+/// Okuyan ucu kapali boruya yazmak. Hata **kodunun yaninda** `SIGPIPE`
+/// de gonderilir ve yakalanmazsa surec oler -- yani cogu program bu
+/// kodu hic gormez.
+const EPIPE: i32 = 32;
 /// Kaynak gecici olarak yok -- `fork` icin gorev tablosu ya da cerceve
 /// havuzu dolu demektir (Linux `fork` da bu kodu dondurur).
 const EAGAIN: i32 = 11;
@@ -493,6 +497,7 @@ fn errno_of(err: KernelError) -> i32 {
         // POSIX'te `EWOULDBLOCK` ile `EAGAIN` ayni sayidir -- Linux de
         // ikisini esitler. Bloke olmayan bos bir boru bunu dondurur.
         KernelError::WouldBlock => -EAGAIN,
+        KernelError::BrokenPipe => -EPIPE,
     }
 }
 
@@ -530,8 +535,30 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
             kernel_api::exit_current_task(arg1 as u32);
         }
 
+        // `write` -- ve POSIX'in en sert varsayilani.
+        //
+        // Okuyan ucu kapali bir boruya yazmak yalnizca `EPIPE`
+        // dondurmuyor; **`SIGPIPE` de gonderiyor** ve yakalanmazsa surec
+        // oluyor. Cogu program bu yuzden `EPIPE`i hic gormez.
+        //
+        // Kaba gorunuyor ama kabuk boru hatlari buna bagli:
+        // `uretici | head` kaliginda `head` ilk on satiri alip cikar;
+        // uretici durdurulmazsa sonsuza kadar kosardi. Sinyal onu
+        // sessizce sonlandiriyor.
+        //
+        // Windows'ta bunun karsiligi **yok** -- `WriteFile` yalnizca
+        // `ERROR_BROKEN_PIPE` doner. Ayni olay, birinde olum, otekinde
+        // bir hata kodu; `winpipe` bunu acikca olcuyor.
         SYS_WRITE => match unsafe { kernel_api::write(arg1 as u32, arg2 as *const u8, arg3) } {
             Ok(written) => written as i32,
+            Err(KernelError::BrokenPipe) => {
+                let task = crate::level0a::core::scheduler::current_id();
+                // Sinyal **once** gonderiliyor: teslim Ring 3'e donerken
+                // olacak, yani cagirana yazilan errno da gorunmeyecek --
+                // tipki gercek Linux'ta oldugu gibi.
+                let _ = crate::level0b1::signal::raise(task, crate::level0b1::signal::SIGPIPE);
+                -EPIPE
+            }
             Err(e) => errno_of(e),
         },
 

@@ -59,6 +59,17 @@ pub const SIGKILL: u32 = 9;
 pub const SIGUSR1: u32 = 10;
 pub const SIGSEGV: u32 = 11;
 pub const SIGUSR2: u32 = 12;
+/// Okuyan ucu kapali bir boruya yazmak.
+///
+/// POSIX'in en sert varsayilani: yakalanmazsa **surec oler**. Sebebi
+/// kabuk boru hatlari -- `uretici | head` kaliginda `head` ilk on satiri
+/// alip cikinca, uretici yazmaya devam etse sonsuza kadar kosardi.
+/// Sinyal onu sessizce durduruyor.
+///
+/// Windows'ta bunun karsiligi **yok**: `WriteFile` yalnizca
+/// `ERROR_BROKEN_PIPE` doner ve surec yasamaya devam eder. Ayni olay,
+/// birinde olum, otekinde bir hata kodu.
+pub const SIGPIPE: u32 = 13;
 pub const SIGALRM: u32 = 14;
 pub const SIGTERM: u32 = 15;
 
@@ -593,6 +604,7 @@ pub fn name_of(signo: u32) -> &'static str {
         SIGUSR1 => "SIGUSR1",
         SIGSEGV => "SIGSEGV",
         SIGUSR2 => "SIGUSR2",
+        SIGPIPE => "SIGPIPE",
         SIGALRM => "SIGALRM",
         SIGTERM => "SIGTERM",
         _ => "SIG?",

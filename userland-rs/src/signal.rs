@@ -41,6 +41,12 @@ pub const SIGKILL: u32 = 9;
 pub const SIGUSR1: u32 = 10;
 pub const SIGSEGV: u32 = 11;
 pub const SIGUSR2: u32 = 12;
+/// Okuyan ucu kapali bir boruya yazmak.
+///
+/// POSIX'in en sert varsayilani: yakalanmazsa **surec oler**. Windows'ta
+/// karsiligi yok -- orada `WriteFile` yalnizca `ERROR_BROKEN_PIPE`
+/// doner ve surec yasar.
+pub const SIGPIPE: u32 = 13;
 pub const SIGALRM: u32 = 14;
 pub const SIGTERM: u32 = 15;
 

@@ -1492,6 +1492,12 @@ pub fn waitpid(pid: usize, status: &mut u32, options: usize) -> isize {
 }
 
 /// `WEXITSTATUS`: durum kelimesinden cikis kodunu cikarir.
+///
+/// Gercek POSIX'te ayrica `WIFSIGNALED`/`WTERMSIG` vardir: sinyalle
+/// olen bir surec sinyal numarasini **dusuk** bitlere yazar ve cikis
+/// kodu alani bos kalir. TCMK bunun yerine kabuk gelenegi olan
+/// `128 + signo`yu cikis koduna koyuyor, yani sinyalle olen bir cocuk
+/// burada `141` (128+SIGPIPE) olarak gorunur. Ayrim README'de yazili.
 pub fn exit_status(status: u32) -> u32 {
     (status >> 8) & 0xFF
 }

@@ -175,6 +175,8 @@ const STATUS_DISK_FULL: u32 = 0xC000_007F;
 const STATUS_MEDIA_WRITE_PROTECTED: u32 = 0xC000_00A2;
 /// Bloke olmayan bos boru -- NT'nin kendi kodu.
 const STATUS_PIPE_EMPTY: u32 = 0xC000_00D9;
+/// Okuyan ucu kapali boru -- NT'nin kendi kodu.
+const STATUS_PIPE_BROKEN: u32 = 0xC000_014B;
 
 const PATH_MAX: usize = 128;
 
@@ -360,6 +362,9 @@ fn win32_error_of(err: KernelError) -> u32 {
         // Win32'de bloke olmayan bos bir borunun kodu budur; POSIX
         // `EAGAIN` der. Ayni durum, iki ayri ad.
         KernelError::WouldBlock => ERROR_NO_DATA,
+        // Windows'ta bu **yalnizca** bir hata kodu: sinyal yok, surec
+        // yasamaya devam eder. POSIX ikizi `EPIPE` + `SIGPIPE`.
+        KernelError::BrokenPipe => ERROR_BROKEN_PIPE,
     }
 }
 
@@ -379,6 +384,7 @@ fn ntstatus_of(err: KernelError) -> u32 {
         KernelError::NoSpace => STATUS_DISK_FULL,
         KernelError::ReadOnly => STATUS_MEDIA_WRITE_PROTECTED,
         KernelError::WouldBlock => STATUS_PIPE_EMPTY,
+        KernelError::BrokenPipe => STATUS_PIPE_BROKEN,
     }
 }
 
@@ -781,7 +787,15 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
                             store_out(args, 3, written as u32);
                             WIN32_TRUE
                         }
-                        Err(_) => WIN32_FALSE,
+                        // Okuyan ucu kapali boru: Windows bunu bir hata
+                        // sayar ve **orada biter**. POSIX ayni durumda
+                        // ayrica `SIGPIPE` gonderir ve surec oler --
+                        // Win32 tarafinda oyle bir sey yok, cagiran
+                        // hatayi gorup yasamaya devam eder.
+                        Err(e) => {
+                            set_last_error(win32_error_of(e));
+                            WIN32_FALSE
+                        }
                     }
                 }
                 _ => WIN32_FALSE,

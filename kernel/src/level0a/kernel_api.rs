@@ -34,6 +34,13 @@ pub enum KernelError {
     /// durum `NotFound` olarak bildiriliyordu ve gezgin "bulunamadi"
     /// diyordu -- ekranda duran bir dosya icin yaniltici bir cevap.
     ReadOnly,
+    /// Okuyan ucu kapali bir boruya yazmak -- POSIX `EPIPE` (+ `SIGPIPE`)
+    /// / Win32 `ERROR_BROKEN_PIPE`.
+    ///
+    /// Iki ABI'nin en sert ayristigi yer: POSIX bu durumda sinyal
+    /// gonderir ve yakalanmazsa **surec oler**; Windows yalnizca hata
+    /// kodu doner.
+    BrokenPipe,
     /// Bloke olacakti ama tanimlayici bloke olmamaya ayarli -- POSIX
     /// `EAGAIN` / Win32 `ERROR_NO_DATA`.
     ///
@@ -141,7 +148,12 @@ pub unsafe fn write(fd_num: u32, buf: *const u8, len: usize) -> Result<usize, Ke
     // eski sira yonlendirmeyi gorunmez kilardi.
     match fd::get(fd_num as usize) {
         Some(entry) => match entry.kind {
-            fd::FdKind::PipeWrite => Ok(pipe::write(entry.node, bytes)),
+            // Yazma da **bloke eder** -- okumanin aynasi. Uc durum:
+            //
+            //   yer var             -> yaz
+            //   yer yok, okuyan var -> bekle
+            //   yer yok, okuyan yok -> BrokenPipe (+ POSIX'te SIGPIPE)
+            fd::FdKind::PipeWrite => write_pipe_blocking(fd_num as usize, entry.node, bytes),
             // Borunun okuma ucuna yazmak POSIX'te de hatadir.
             fd::FdKind::PipeRead => Err(KernelError::BadFileDescriptor),
             // Dizine yazmak da oyle: icerigi dosya sistemi belirler.
@@ -510,6 +522,52 @@ pub const POLLNVAL: u16 = 0x020;
 ///
 /// Tus kuyruguna **bakilir, tuketilmez**: `poll` veriyi yeseydi
 /// arkasindan gelen `read` bos donerdi.
+/// Boruya **bloke ederek** yazar.
+///
+/// POSIX'te kismi yazma mesrudur: tampon dolduysa yazilabilen kadari
+/// yazilip o sayi dondurulur. Bekleme yalnizca **hic** yer yoksa
+/// devreye giriyor -- yani cagri asla sifir dondurmuyor (hata ya da en
+/// az bir bayt). Sifir donmek, yazani sonsuz bir donguye sokardi.
+fn write_pipe_blocking(
+    fd_num: usize,
+    pipe_index: usize,
+    bytes: &[u8],
+) -> Result<usize, KernelError> {
+    if bytes.is_empty() {
+        return Ok(0);
+    }
+    loop {
+        // Okuyan kimse kalmadiysa yazmanin anlami yok. Bu sinama
+        // **yazmadan once** yapilmali: yazip sonra fark etmek, kimsenin
+        // okumayacagi veriyi tampona koymak olurdu.
+        if pipe::readers(pipe_index) == 0 {
+            return Err(KernelError::BrokenPipe);
+        }
+
+        let written = pipe::write(pipe_index, bytes);
+        if written > 0 {
+            return Ok(written);
+        }
+
+        // Tampon dolu.
+        if fd::flags(fd_num) & fd::O_NONBLOCK != 0 {
+            return Err(KernelError::WouldBlock);
+        }
+        if !scheduler::current_can_block() {
+            // Uyutulamayan baglam: kismi (sifir) yazma ile don. Cagiran
+            // bunu kisa yazma olarak gorur ve yeniden dener.
+            return Ok(0);
+        }
+
+        scheduler::wait_on_kernel_key(pipe::write_key(pipe_index), None, || {
+            // Kesmeler kapaliyken son bakis: yer aciildi mi, ya da
+            // okuyan kalmadi mi? Ikincisi de uyanma sebebi -- yoksa
+            // asla bosalmayacak bir tamponu beklerdik.
+            !pipe::has_room(pipe_index) && pipe::readers(pipe_index) > 0
+        });
+    }
+}
+
 /// Borudan **bloke ederek** okur.
 ///
 /// Dongu, uyandiktan sonra kosulu yeniden sinamak zorunda: uyandiran

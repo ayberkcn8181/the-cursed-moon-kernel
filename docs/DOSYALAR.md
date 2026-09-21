@@ -282,7 +282,7 @@ gunluge yazarlar ve olcum bunlardan okunur.
 | `probe.rs` (16 sinav) | POSIX yuzeyinin genis sinavi: `stat`, `access`, `uname`, saat, `writev`, TLS, **yardimci vektor**. |
 | `quoted.rs` (4 sinav) | `execve(yol, argv[], envp[])`: dizi bicimi, `argv[0]` korunmasi, `envp` degistirmesi. |
 | `mapped.rs` (4 sinav) | Dosya destekli `mmap`: icerik, hizasiz ofset reddi, dosya sonu sifirlamasi. |
-| `blocking.rs` (5 sinav) | Bloke eden boru okumasi: bekleme, dosya sonu, `O_NONBLOCK` ile `-EAGAIN`, uc durumun ayriligi, `pipe2`. |
+| `blocking.rs` (9 sinav) | Bloke eden boru okumasi **ve yazmasi**: bekleme, dosya sonu, `O_NONBLOCK` ile `-EAGAIN`, uc durumun ayriligi, `pipe2`, ve `SIGPIPE` -- yakalamayan bir `fork` cocugunun 141 ile oldugu `waitpid` ile olculuyor. |
 | `sync.rs` (5 sinav) | `futex`: uyandirma, zaman asimi, cekismesiz kilidin cekirdege inmemesi, `CLONE_CHILD_CLEARTID` ile `join`, paylasilan sayacin kilitle korunmasi. |
 | `threads.rs` (5 sinav) | `clone`: paylasilan bellek ve tanimlayicilar, `gettid`/`getpid` ayrimi, ayni programda `fork` karsiti, ana akis cikinca kardesin yasamasi. |
 
@@ -299,7 +299,7 @@ gunluge yazarlar ve olcum bunlardan okunur.
 | `modules.rs` (6 sinav) | PEB ve modul tablosu; `GetProcAddress` ile **ithal edilmemis** bir fonksiyonu bulup cagirma. |
 | `argv.rs` (4 sinav) | Komut satiri alintilamasi ve `lpEnvironment` blogu. |
 | `mapping.rs` (4 sinav) | `CreateFileMapping` + `MapViewOfFile`; adlandirilmis eslemenin acikca reddi. |
-| `pipe.rs` (5 sinav) | `CreatePipe`/`PeekNamedPipe`: bakmak tuketmez, kirik boru **hata** (POSIX 0 der), `PIPE_NOWAIT`. |
+| `pipe.rs` (7 sinav) | `CreatePipe`/`PeekNamedPipe`: bakmak tuketmez, kirik boru **hata** (POSIX 0 der), `PIPE_NOWAIT`, bloke eden yazma, ve okuyan yokken yazmanin sureci **oldurmemesi** (POSIX ikizi olur). |
 | `sync.rs` (5 sinav) | `WaitOnAddress`/`WakeByAddress*`: uyandirma, `ERROR_TIMEOUT`, degerin degismis olmasi (POSIX'te `-EAGAIN`, burada `TRUE`), `GetExitCodeThread`. |
 | `thread.rs` (4 sinav) | `CreateThread`/`ExitThread`; `GetCurrentThreadId` ile `GetCurrentProcessId` ayrimi ve is parcacigi taniticisinin `WaitForSingleObject` ile beklenmesi. |
 

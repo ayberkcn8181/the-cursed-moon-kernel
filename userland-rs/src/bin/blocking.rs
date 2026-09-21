@@ -23,7 +23,21 @@
 //! degil `-EAGAIN` doner -- yani "sonra tekrar dene", dosya sonu degil.
 //! Uc durum, uc ayri cevap.
 //!
-//! ## Bes sinav
+//! ## Yazma da bekliyor
+//!
+//! Okumanin aynasi tamamlandi: dolu bir boruya yazmak da yer acilana
+//! kadar bekliyor. Ve ucuncu durumda POSIX'in en sert varsayilani
+//! devreye giriyor -- okuyan uc kapaliysa yazmak yalnizca `EPIPE`
+//! dondurmuyor, **`SIGPIPE`** de gonderiyor ve yakalanmazsa surec
+//! **oluyor**.
+//!
+//! Kaba gorunuyor ama kabuk boru hatlarinin calismasi buna bagli:
+//! `uretici | head` kaliginda `head` ilk on satiri alip cikar; uretici
+//! durdurulmazsa sonsuza kadar kosardi.
+//!
+//! Windows'ta bunun karsiligi **yok** (bkz. `winpipe` F sinavi).
+//!
+//! ## Sekiz sinav
 //!
 //! ```text
 //!   A  bekleme       -> bos borudan okumak kardes yazana kadar BEKLER
@@ -31,11 +45,24 @@
 //!   C  O_NONBLOCK    -> bos boruda -EAGAIN, bekleme YOK
 //!   D  uc durum ayri -> EAGAIN ile 0 ayni sey DEGIL
 //!   E  pipe2         -> bayrak yaratma aninda konabiliyor
+//!   F  yazma bekler  -> dolu boruya yazmak kardes okuyana kadar BEKLER
+//!   G  varsayilan olum-> yakalamayan cocuk 141 (128+SIGPIPE) ile OLER
+//!   H  SIGPIPE        -> yakalanirsa sinyal GELIR, surec yasar
+//!   I  EPIPE          -> yakalandiginda yazma -EPIPE doner
 //! ```
 //!
 //! D sinavi asil meselenin kendisi: C ile B'nin ayni cagriyi ayni bos
 //! boruda farkli cevaplar vermesi. Ayni sayiyi dondurselerdi sadeleşme
 //! surerdi.
+//!
+//! G ile H ayni olayin iki yuzu ve sirasi onemli. G, sinyali
+//! **yakalamayan** bir `fork` cocugunun gercekten oldugunu olcuyor --
+//! ebeveyn cikis kodunu `waitpid` ile topluyor ve 141 (128+13)
+//! bekliyor. Kendi surecimizde olcemezdik: olcen taraf da olurdu.
+//!
+//! H ve I ise sinyali yakaliyor, boylece surec yasiyor ve `write`in
+//! donus degeri gorulebiliyor. Yakalamasaydik o satirlara hic
+//! gelinmezdi. Bu yuzden G once kosuyor: isleyici kurulmadan once.
 //!
 //! Tuslar: `q` -> cik
 
@@ -81,6 +108,27 @@ const EMPTY: Check = Check {
     passed: false,
 };
 
+/// F sinavinin borusunun okuma ucu.
+static READ_END: AtomicUsize = AtomicUsize::new(usize::MAX);
+/// G sinavinda sinyal geldi mi?
+static SIGPIPE_SEEN: AtomicUsize = AtomicUsize::new(0);
+
+/// `SIGPIPE` isleyicisi -- yalnizca "geldim" demek icin.
+extern "C" fn on_sigpipe(_signo: u32) {
+    SIGPIPE_SEEN.store(1, Ordering::SeqCst);
+}
+
+/// F sinavinin kardesi: bekleyip **okur** ve yer acar.
+extern "C" fn late_reader(_param: usize) -> usize {
+    sys::sleep_ms(DELAY_MS);
+    let fd = READ_END.load(Ordering::SeqCst);
+    if fd != usize::MAX {
+        let mut buf = [0u8; 512];
+        sys::read(fd, &mut buf);
+    }
+    0
+}
+
 /// A sinavinin kardesi: bekleyip yazar.
 extern "C" fn late_writer(_param: usize) -> usize {
     sys::sleep_ms(DELAY_MS);
@@ -94,7 +142,7 @@ extern "C" fn late_writer(_param: usize) -> usize {
 fn main() {
     use core::fmt::Write;
     let mut out = Stdout;
-    let mut checks = [EMPTY; 5];
+    let mut checks = [EMPTY; 9];
 
     // --- A: bekleme ---
     //
@@ -235,6 +283,150 @@ fn main() {
         passed: e,
     };
 
+    // --- F: yazma bekliyor ---
+    //
+    // Tamponu tamamen dolduruyoruz, sonra bir kardes 150 ms sonra
+    // okuyup yer aciyor. Yazma beklemezse hemen kisa donerdi.
+    let mut write_waited_ms = 0usize;
+    let f = match sys::pipe() {
+        Some((read_end, write_end)) => {
+            // Tamponu doldur. `PIPE_CAPACITY` 1 KiB; kisa donusler
+            // oldugu surece yazmaya devam ediyoruz.
+            let block = [b'x'; 256];
+            let mut total = 0usize;
+            // Bloke olmayan kipte doldur ki burada asilmayalim.
+            sys::set_flags(write_end, sys::O_NONBLOCK);
+            loop {
+                let n = sys::write(write_end, &block);
+                if n <= 0 {
+                    break;
+                }
+                total += n as usize;
+                if total > 4096 {
+                    break;
+                }
+            }
+            // Simdi bloke eden kipe geri don ve bir bayt daha yazmayi
+            // dene: tampon dolu, beklemeli.
+            sys::set_flags(write_end, 0);
+            READ_END.store(read_end, Ordering::SeqCst);
+            let helper = sys::clone_thread(late_reader, 0, 0);
+            let started = sys::ticks();
+            let wrote = sys::write(write_end, b"z");
+            write_waited_ms = sys::ticks().wrapping_sub(started) * 10;
+            let ok = helper > 0 && wrote == 1 && write_waited_ms >= 100;
+            sys::close(read_end);
+            sys::close(write_end);
+            ok
+        }
+        None => false,
+    };
+    checks[5] = Check {
+        name: "F yazma bekler",
+        detail: if f {
+            "dolu boru, kardes okuyana kadar beklendi"
+        } else if write_waited_ms < 100 {
+            "beklemeden dondu (yazma bloke etmiyor)"
+        } else {
+            "yazma basarisiz"
+        },
+        passed: f,
+    };
+
+    // --- G: varsayilan davranis oldurur ---
+    //
+    // Bu sinav isleyici kurulmadan **once** kosmali. Kendi surecimizde
+    // olcemezdik -- olcen taraf da olurdu -- o yuzden bir `fork` cocugu
+    // yaziyor ve ebeveyn cikis kodunu topluyor.
+    //
+    // Beklenen kod 141 = 128 + SIGPIPE(13): POSIX'in sinyalle olen bir
+    // surec icin kullandigi gelenek.
+    let mut child_code = 0u32;
+    let g = match sys::pipe() {
+        Some((read_end, write_end)) => {
+            let forked = sys::fork();
+            match forked {
+                0 => {
+                    // Cocuk: okuyan ucu kapatip yaziyor. Isleyici yok,
+                    // yani buradan geri donus de yok.
+                    sys::close(read_end);
+                    sys::write(write_end, b"kimse yok");
+                    // Buraya ulasilmamali: sinyal sureci oldurmus
+                    // olmali. Ulasilirsa ayirt edilebilir bir kodla cik.
+                    sys::exit(7);
+                }
+                id if id > 0 => {
+                    sys::close(read_end);
+                    sys::close(write_end);
+                    let reaped = sys::waitpid(id as usize, &mut child_code, 0) >= 0;
+                    // Durum **paketlenmis** gelir: cikis kodu 8-15.
+                    // bitlerde. Ham degeri karsilastirmak 141 yerine
+                    // 36096 gormek olurdu.
+                    child_code = sys::exit_status(child_code);
+                    reaped && child_code == 128 + tcmk::signal::SIGPIPE
+                }
+                _ => false,
+            }
+        }
+        None => false,
+    };
+    checks[6] = Check {
+        name: "G varsayilan olum",
+        detail: if g {
+            "yakalamayan cocuk 141 ile oldu"
+        } else if child_code == 7 {
+            "cocuk OLMEDI, yazma geri dondu"
+        } else {
+            "cocuk beklenemedi ya da kod yanlis"
+        },
+        passed: g,
+    };
+
+    // --- H: sinyal yakalanabiliyor ---
+    //
+    // Artik isleyiciyi kuruyoruz: surec yasayacak ve olcum surebilecek.
+    tcmk::signal::install(tcmk::signal::SIGPIPE, on_sigpipe);
+    let mut epipe_result = 0isize;
+    let h = match sys::pipe() {
+        Some((read_end, write_end)) => {
+            // Okuyan ucu kapat: artik kimse okumayacak.
+            sys::close(read_end);
+            epipe_result = sys::write(write_end, b"kimse yok");
+            // Sinyal Ring 3'e donusle teslim edilir; bir tik birakalim.
+            sys::sleep_ms(20);
+            sys::close(write_end);
+            SIGPIPE_SEEN.load(Ordering::SeqCst) == 1
+        }
+        None => false,
+    };
+    checks[7] = Check {
+        name: "H SIGPIPE",
+        detail: if h {
+            "yakalandi, surec yasiyor"
+        } else {
+            "sinyal GELMEDI"
+        },
+        passed: h,
+    };
+
+    // --- I: EPIPE ---
+    //
+    // Sinyal yakalandigi icin yazmanin donus degeri gorulebiliyor.
+    // Yakalanmasaydi bu satira hic gelinmezdi -- G tam olarak onu
+    // olcuyor.
+    let i = epipe_result == -EPIPE;
+    checks[8] = Check {
+        name: "I EPIPE",
+        detail: if i {
+            "yazma -EPIPE dondu"
+        } else if epipe_result >= 0 {
+            "yazma BASARILI dondu (okuyan yokken)"
+        } else {
+            "yanlis hata kodu"
+        },
+        passed: i,
+    };
+
     for check in &checks {
         let _ = writeln!(
             out,
@@ -245,7 +437,7 @@ fn main() {
         );
     }
 
-    let mut win = match Window::open("blocking -- bekleyen okuma", 300, 200, 460, 170) {
+    let mut win = match Window::open("blocking -- bekleyen borular", 300, 170, 460, 240) {
         Some(w) => w,
         None => return,
     };
@@ -260,8 +452,11 @@ fn main() {
 
 /// "Simdilik yok, sonra tekrar dene" -- dosya sonu **degil**.
 const EAGAIN: isize = 11;
+/// Okuyan ucu kapali boruya yazmak. Cogu program bunu **hic gormez**:
+/// `SIGPIPE` yakalanmazsa surec once oler.
+const EPIPE: isize = 32;
 
-fn draw(win: &mut Window, checks: &[Check; 5], waited: usize) {
+fn draw(win: &mut Window, checks: &[Check; 9], waited: usize) {
     let (w, h) = (win.width(), win.height());
     win.clear(BG);
     win.fill(0, 0, w, 22, PANEL);

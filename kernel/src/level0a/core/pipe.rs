@@ -44,6 +44,27 @@
 //! Uyutulamayan baglamlar (masaustu/kabuk gorevi -- ekrani onlar ciziyor)
 //! eski davranisa duser: bloke olmak yerine `0` doner. Bu, cagiran
 //! tarafin `current_can_block` ile onceden anlamasi gereken bir durum.
+//!
+//! ## Bloke eden yazma
+//!
+//! Okumanin aynasi: tampon doluysa yazma, yer acilana ya da **okuyan
+//! son uc kapanana** kadar bekler.
+//!
+//! ```text
+//!   yer var             -> yaz (kismi olabilir)
+//!   yer yok, okuyan var -> BEKLE
+//!   yer yok, okuyan yok -> EPIPE + SIGPIPE
+//! ```
+//!
+//! Son satir POSIX'in en sert varsayilani: sinyal yakalanmazsa surec
+//! **oler**. Kaba gorunuyor ama kabuk boru hatlarinin calismasi buna
+//! bagli -- `uretici | head` kaliginda `head` cikinca, uretici
+//! durdurulmazsa sonsuza kadar kosardi.
+//!
+//! Iki anahtar kullaniliyor (`read_key` / `write_key`) ve ayri olmalari
+//! sart: dolu boruda bekleyen yazici ile bos boruda bekleyen okuyucu
+//! ayni nesneyi ama **zit kosullari** bekliyor. Tek anahtar olsaydi
+//! birbirlerini bosa kaldirip dururlardi.
 
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -172,9 +193,35 @@ pub fn read_key(index: usize) -> usize {
     PIPE_READ_KEY_BASE + index
 }
 
+/// Bir borunun **yazma** bekleme anahtari.
+///
+/// Okuma anahtarindan ayri olmak zorunda: dolu bir boruda bekleyen
+/// yazici ile bos bir boruda bekleyen okuyucu ayni nesneyi bekliyor ama
+/// **zit kosullari** bekliyor. Tek anahtar olsaydi, bir okumanin
+/// uyandirdigi yazici ile bir yazmanin uyandirdigi okuyucu birbirini
+/// surekli bosa kaldirirdi.
+pub fn write_key(index: usize) -> usize {
+    PIPE_WRITE_KEY_BASE + index
+}
+
 /// Boru okuma anahtarlarinin tabani -- baska nesne turleriyle
 /// cakismayacak bir aralik.
 const PIPE_READ_KEY_BASE: usize = 0x0001_0000;
+/// Yazma anahtarlarinin tabani.
+const PIPE_WRITE_KEY_BASE: usize = 0x0002_0000;
+
+/// Borunun tamponunda **bos yer** var mi?
+pub fn has_room(index: usize) -> bool {
+    match info(index) {
+        Some((pending, _, _)) => pending < PIPE_CAPACITY,
+        None => false,
+    }
+}
+
+/// Okuyan uc sayisi (0 ise yazmanin alicisi yok).
+pub fn readers(index: usize) -> usize {
+    info(index).map(|(_, _, readers)| readers).unwrap_or(0)
+}
 
 /// Borudan okur; okunan bayt sayisini dondurur. Veri yoksa `0`.
 pub fn read(index: usize, out: &mut [u8]) -> usize {
@@ -182,7 +229,7 @@ pub fn read(index: usize, out: &mut [u8]) -> usize {
         return 0;
     }
 
-    crate::arch::cpu::without_interrupts(|| {
+    let read = crate::arch::cpu::without_interrupts(|| {
         let pipe = &PIPES[index];
         let head = pipe.head.load(Ordering::Relaxed);
         let mut tail = pipe.tail.load(Ordering::Relaxed);
@@ -199,7 +246,14 @@ pub fn read(index: usize, out: &mut [u8]) -> usize {
 
         pipe.tail.store(tail, Ordering::Relaxed);
         read
-    })
+    });
+
+    // Yer acildi: dolu tamponda bekleyen yazicilari kaldir. Okumanin
+    // aynasi -- yazma okuyuculari uyandiriyor, okuma yazicilari.
+    if read > 0 {
+        scheduler::wake_kernel_key(write_key(index), usize::MAX);
+    }
+    read
 }
 
 /// Borudan **tuketmeden** okur (`PeekNamedPipe`).
@@ -253,6 +307,13 @@ pub fn close_end(index: usize, writer: bool) {
     // tek isareti.
     if writer && pipe.writers.load(Ordering::Relaxed) == 0 {
         scheduler::wake_kernel_key(read_key(index), usize::MAX);
+    }
+    // Okuyan son uc kapandi: dolu tamponda bekleyen yazicilar artik
+    // bosuna bekliyor -- kimse okumayacak. Uyandirilmalilar ki
+    // `EPIPE`/`SIGPIPE` alabilsinler; aksi halde asla bosalmayacak bir
+    // tamponu sonsuza kadar beklerlerdi.
+    if !writer && pipe.readers.load(Ordering::Relaxed) == 0 {
+        scheduler::wake_kernel_key(write_key(index), usize::MAX);
     }
 
     if pipe.writers.load(Ordering::Relaxed) == 0 && pipe.readers.load(Ordering::Relaxed) == 0 {
