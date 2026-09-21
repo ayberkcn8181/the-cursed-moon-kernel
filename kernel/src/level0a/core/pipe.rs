@@ -19,16 +19,35 @@
 //! calismazdi -- her taraf kullanmadigi ucu kapatir, ve paylasilan bir
 //! tabloda cocugun kapattigi uc ebeveyninkini de yok ederdi.
 //!
-//! ## Bloke etmeyen okuma
+//! ## Bloke eden okuma
 //!
-//! Gercek POSIX'te bos bir borudan okumak, veri gelene ya da yazan uc
-//! kapanana kadar **bloke olur**. TCMK'de okuma bloke olmaz; veri yoksa
-//! `0` doner. Nedeni GUI'dir: bloke olan bir surec penceresini de
-//! dondurur, oysa buradaki uygulamalar kendi cizim dongulerini surer.
-//! Yazan uc kapandiginda `is_closed` ile "dosya sonu" ayirt edilebilir,
-//! yani protokol yine kurulabilir.
+//! Bos bir borudan okumak, veri gelene ya da **yazan son uc kapanana**
+//! kadar bekler -- POSIX'in sozlesmesi budur ve artik TCMK de onu
+//! tutuyor. Ayrim onemli, cunku "veri yok" ile "bir daha veri gelmeyecek"
+//! ayni sayiyla (`0`) ifade edilemez:
+//!
+//! ```text
+//!   veri var            -> okunani dondur (kismi olabilir)
+//!   veri yok, yazan var -> BEKLE
+//!   veri yok, yazan yok -> 0 dondur (dosya sonu)
+//! ```
+//!
+//! Onceden okuma bloke etmiyordu ve ikinci satir da `0` donduruyordu.
+//! Bu, gercek bir Linux ikilisini kirmaya yeten bir farktir: `read`i
+//! bloke sanan bir program, dosya sonu geldigini sanip erken cikar.
+//!
+//! Uyandirma iki yerden geliyor ve ikisi de sart: **yazma** (veri geldi)
+//! ve **yazan ucun kapanmasi** (bir daha gelmeyecek). Ikincisi olmasa
+//! borunun yazan ucunu kapatan bir ebeveyn, okuyan cocugu sonsuza kadar
+//! uyutmus olurdu.
+//!
+//! Uyutulamayan baglamlar (masaustu/kabuk gorevi -- ekrani onlar ciziyor)
+//! eski davranisa duser: bloke olmak yerine `0` doner. Bu, cagiran
+//! tarafin `current_can_block` ile onceden anlamasi gereken bir durum.
 
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+use crate::level0a::core::scheduler;
 
 /// Ayni anda acik olabilecek boru sayisi.
 pub const MAX_PIPES: usize = 4;
@@ -110,7 +129,7 @@ pub fn write(index: usize, bytes: &[u8]) -> usize {
         return 0;
     }
 
-    crate::arch::cpu::without_interrupts(|| {
+    let written = crate::arch::cpu::without_interrupts(|| {
         let pipe = &PIPES[index];
         let mut head = pipe.head.load(Ordering::Relaxed);
         let tail = pipe.tail.load(Ordering::Relaxed);
@@ -131,8 +150,31 @@ pub fn write(index: usize, bytes: &[u8]) -> usize {
 
         pipe.head.store(head, Ordering::Relaxed);
         written
-    })
+    });
+
+    // Veri geldi: bekleyen okuyuculari kaldir. Uyandirma yazmanin
+    // **disinda**, cunku `wake_kernel_key` kendi kritik bolgesini
+    // aciyor ve ic ice girmesi gerekmiyor.
+    if written > 0 {
+        scheduler::wake_kernel_key(read_key(index), usize::MAX);
+    }
+    written
 }
+
+/// Bir borunun okuma bekleme anahtari.
+///
+/// Boru indeksi tek basina yetmezdi: anahtarlar gorev tablosunda tek bir
+/// alanda tutuluyor ve baska cekirdek nesneleri de eklenebilir. Tur
+/// etiketini anahtara katmak, ileride konsol ya da soket beklemesi
+/// eklendiginde cakismayi derleme aninda degil ama **tasarim aninda**
+/// engelliyor.
+pub fn read_key(index: usize) -> usize {
+    PIPE_READ_KEY_BASE + index
+}
+
+/// Boru okuma anahtarlarinin tabani -- baska nesne turleriyle
+/// cakismayacak bir aralik.
+const PIPE_READ_KEY_BASE: usize = 0x0001_0000;
 
 /// Borudan okur; okunan bayt sayisini dondurur. Veri yoksa `0`.
 pub fn read(index: usize, out: &mut [u8]) -> usize {
@@ -160,6 +202,39 @@ pub fn read(index: usize, out: &mut [u8]) -> usize {
     })
 }
 
+/// Borudan **tuketmeden** okur (`PeekNamedPipe`).
+///
+/// POSIX'te bunun karsiligi yok: orada "bakmak" istiyorsaniz `poll` ile
+/// hazir mi diye sorar, sonra `read` ile alirsiniz -- ama aldiginiz an
+/// tuketmis olursunuz. Win32 ikisini ayirmis, cunku adlandirilmis
+/// borularda ileti sinirlarini gormek gerekebiliyor.
+///
+/// Doner: kopyalanan bayt sayisi. Imlec ilerlemez.
+pub fn peek(index: usize, out: &mut [u8]) -> usize {
+    if index >= MAX_PIPES || !PIPES[index].used.load(Ordering::Relaxed) {
+        return 0;
+    }
+
+    crate::arch::cpu::without_interrupts(|| {
+        let pipe = &PIPES[index];
+        let head = pipe.head.load(Ordering::Relaxed);
+        let mut tail = pipe.tail.load(Ordering::Relaxed);
+        let mut read = 0usize;
+
+        while read < out.len() && tail != head {
+            out[read] = unsafe {
+                let buffers = core::ptr::addr_of!(BUFFERS) as *const u8;
+                buffers.add(index * PIPE_CAPACITY + tail % PIPE_CAPACITY).read()
+            };
+            tail = (tail + 1) % (PIPE_CAPACITY + 1);
+            read += 1;
+        }
+
+        // `tail` **geri yazilmiyor**: farkin tamami bu.
+        read
+    })
+}
+
 /// Bir ucu kapatir. Son uc de kapaninca boru serbest kalir.
 pub fn close_end(index: usize, writer: bool) {
     if index >= MAX_PIPES || !PIPES[index].used.load(Ordering::Relaxed) {
@@ -170,6 +245,14 @@ pub fn close_end(index: usize, writer: bool) {
     let previous = counter.load(Ordering::Relaxed);
     if previous > 0 {
         counter.store(previous - 1, Ordering::Relaxed);
+    }
+
+    // Yazan son uc kapandi: bekleyen okuyucular icin bu "dosya sonu"
+    // haberidir. Uyandirmasak, bir daha veri gelmeyecek bir boruyu
+    // sonsuza kadar beklerlerdi -- borunun kapanmasi, gelmeyecek verinin
+    // tek isareti.
+    if writer && pipe.writers.load(Ordering::Relaxed) == 0 {
+        scheduler::wake_kernel_key(read_key(index), usize::MAX);
     }
 
     if pipe.writers.load(Ordering::Relaxed) == 0 && pipe.readers.load(Ordering::Relaxed) == 0 {

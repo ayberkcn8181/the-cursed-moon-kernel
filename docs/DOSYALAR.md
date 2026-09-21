@@ -282,6 +282,7 @@ gunluge yazarlar ve olcum bunlardan okunur.
 | `probe.rs` (16 sinav) | POSIX yuzeyinin genis sinavi: `stat`, `access`, `uname`, saat, `writev`, TLS, **yardimci vektor**. |
 | `quoted.rs` (4 sinav) | `execve(yol, argv[], envp[])`: dizi bicimi, `argv[0]` korunmasi, `envp` degistirmesi. |
 | `mapped.rs` (4 sinav) | Dosya destekli `mmap`: icerik, hizasiz ofset reddi, dosya sonu sifirlamasi. |
+| `blocking.rs` (5 sinav) | Bloke eden boru okumasi: bekleme, dosya sonu, `O_NONBLOCK` ile `-EAGAIN`, uc durumun ayriligi, `pipe2`. |
 | `sync.rs` (5 sinav) | `futex`: uyandirma, zaman asimi, cekismesiz kilidin cekirdege inmemesi, `CLONE_CHILD_CLEARTID` ile `join`, paylasilan sayacin kilitle korunmasi. |
 | `threads.rs` (5 sinav) | `clone`: paylasilan bellek ve tanimlayicilar, `gettid`/`getpid` ayrimi, ayni programda `fork` karsiti, ana akis cikinca kardesin yasamasi. |
 
@@ -298,6 +299,7 @@ gunluge yazarlar ve olcum bunlardan okunur.
 | `modules.rs` (6 sinav) | PEB ve modul tablosu; `GetProcAddress` ile **ithal edilmemis** bir fonksiyonu bulup cagirma. |
 | `argv.rs` (4 sinav) | Komut satiri alintilamasi ve `lpEnvironment` blogu. |
 | `mapping.rs` (4 sinav) | `CreateFileMapping` + `MapViewOfFile`; adlandirilmis eslemenin acikca reddi. |
+| `pipe.rs` (5 sinav) | `CreatePipe`/`PeekNamedPipe`: bakmak tuketmez, kirik boru **hata** (POSIX 0 der), `PIPE_NOWAIT`. |
 | `sync.rs` (5 sinav) | `WaitOnAddress`/`WakeByAddress*`: uyandirma, `ERROR_TIMEOUT`, degerin degismis olmasi (POSIX'te `-EAGAIN`, burada `TRUE`), `GetExitCodeThread`. |
 | `thread.rs` (4 sinav) | `CreateThread`/`ExitThread`; `GetCurrentThreadId` ile `GetCurrentProcessId` ayrimi ve is parcacigi taniticisinin `WaitForSingleObject` ile beklenmesi. |
 
@@ -337,6 +339,7 @@ almazlar.
 | Zamanlama | `scheduler.rs`, `pit.rs` |
 | Is parcaciklari | `thread.rs`, `scheduler.rs` (`Task.group`) |
 | Kilit / bekleme | `futex.rs`, `scheduler.rs` (`wait_on_address`) |
+| Boru / bloke okuma | `pipe.rs`, `kernel_api.rs` (`read_pipe_blocking`) |
 | Windows uyumlulugu | `pe32.rs`, `dll.rs`, `teb.rs`, `seh.rs` |
 | Linux uyumlulugu | `elf32.rs`, `posix_syscalls.rs`, `signal.rs` |
 | Bir sinav programi yazmak | `userland-rs/src/bin/probe.rs` ornegine bak |

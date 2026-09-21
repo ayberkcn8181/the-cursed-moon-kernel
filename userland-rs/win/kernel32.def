@@ -63,3 +63,6 @@ GetExitCodeThread@8 @50
 WaitOnAddress@16 @51
 WakeByAddressSingle@4 @52
 WakeByAddressAll@4 @53
+CreatePipe@16 @54
+PeekNamedPipe@24 @55
+SetNamedPipeHandleState@16 @56

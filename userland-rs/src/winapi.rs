@@ -456,6 +456,66 @@ extern "system" {
     pub fn WakeByAddressAll(address: *const c_void);
 }
 
+/// `SetNamedPipeHandleState`in "bloke olma" kipi.
+///
+/// POSIX ikizi `O_NONBLOCK`. Ayrisan sey kimin ozelligi oldugu: POSIX'te
+/// bayrak **acik dosya tanimina** ait, Win32'de boru **tutamacinin**
+/// durumuna.
+pub const PIPE_NOWAIT: Dword = 0x0000_0001;
+pub const PIPE_WAIT: Dword = 0x0000_0000;
+
+/// Bloke olmayan bos bir boruda `ReadFile` bunu birakir.
+///
+/// POSIX ikizi `EAGAIN`. Ikisi de "simdilik yok, sonra tekrar dene"
+/// demek -- **dosya sonu degil**. Dosya sonu Win32'de `ReadFile`in
+/// `TRUE` donup sifir bayt bildirmesiyle anlasilir.
+pub const ERROR_NO_DATA: Dword = 232;
+/// Yazan ucu kapali bir borudan okumak: Windows bunu bir **hata** sayar
+/// ve `ERROR_BROKEN_PIPE` doner. POSIX ayni durumda `read`i sifirla
+/// dondurur ve bunu hata saymaz.
+pub const ERROR_BROKEN_PIPE: Dword = 109;
+
+#[link(name = "kernel32")]
+extern "system" {
+    /// Adsiz bir boru yaratir.
+    ///
+    /// POSIX `pipe()` ile ayni cekirdek nesnesi. Iki ayrinti ayrisiyor:
+    /// tanimlayicilar cagiranin verdigi **iki ayri isaretciye** yazilir
+    /// (POSIX tek bir diziye yazar), ve `lpPipeAttributes` ile miras
+    /// alinabilirlik soylenebilir.
+    ///
+    /// `nSize` bir **oneri**dir; Windows'ta da cekirdek onu asabilir ya
+    /// da yok sayabilir.
+    pub fn CreatePipe(
+        read_pipe: *mut Handle,
+        write_pipe: *mut Handle,
+        attributes: *mut c_void,
+        size: Dword,
+    ) -> Bool;
+
+    /// Boruya **tuketmeden** bakar.
+    ///
+    /// POSIX'te karsiligi yok: orada "veri var mi" sorusu `poll` ile
+    /// sorulur ama veriyi gormek icin `read` gerekir, ve `read` tuketir.
+    /// Her isaretci NULL olabilir -- o bilgi istenmiyor demektir.
+    pub fn PeekNamedPipe(
+        pipe: Handle,
+        buffer: *mut u8,
+        buffer_size: Dword,
+        bytes_read: *mut Dword,
+        total_available: *mut Dword,
+        bytes_left_this_message: *mut Dword,
+    ) -> Bool;
+
+    /// Boru tutamacinin kipini degistirir (`PIPE_NOWAIT` / `PIPE_WAIT`).
+    pub fn SetNamedPipeHandleState(
+        pipe: Handle,
+        mode: *const Dword,
+        max_collection_count: *mut Dword,
+        collect_data_timeout: *mut Dword,
+    ) -> Bool;
+}
+
 /// `CreateFileMappingA`nin koruma degerleri (Win32 ile ayni).
 pub const PAGE_READONLY: Dword = 0x02;
 pub const PAGE_READWRITE: Dword = 0x04;

@@ -26,11 +26,11 @@ masaustu sunuyor.
 |---|---|
 | Mimariler | i386 (Multiboot1, `int 0x80`) · x86_64 (Multiboot2, `syscall`) |
 | Ikili bicimleri | ELF32/ELF64 · PE32/PE32+ (ithal tablosu cozulur) |
-| POSIX cagrilari | 65 (+ ELF yardimci vektoru, dosya destekli `mmap`, `clone`, `futex`) |
-| NT/Win32 cagrilari | 75 (`KERNEL32.dll` 53 ihracat + `TCMKGUI.dll`) |
-| Ring 3 uygulamalari | 29 ELF + 11 PE |
+| POSIX cagrilari | 68 (+ ELF yardimci vektoru, dosya destekli `mmap`, `clone`, `futex`) |
+| NT/Win32 cagrilari | 78 (`KERNEL32.dll` 56 ihracat + `TCMKGUI.dll`) |
+| Ring 3 uygulamalari | 30 ELF + 12 PE |
 | Kalici depolama | ATA PIO + MBR + TCMKFS (yazilabilir, i386) |
-| Kod | ~29 bin satir cekirdek + ~14 bin satir userland |
+| Kod | ~30 bin satir cekirdek + ~15 bin satir userland |
 
 Uyumluluk yuzeyi su alanlarda **iki ABI'de birden** kurulu: dosya
 sistemi (acma/okuma/yazma/kesme/gezinme/yeniden adlandirma), surec
@@ -39,11 +39,12 @@ dizini, program argumanlari, saat, `stat`, `PATH` aramasi, is-parcacigi
 tabani (POSIX TLS / Windows TEB), **surec yaratma**
 (`fork`/`execve` -- `CreateProcess`), **istisna dagitimi**
 (sinyaller -- SEH/VEH), **is parcaciklari**
-(`clone` -- `CreateThread`) ve **akislarin senkronizasyonu**
-(`futex` -- `WaitOnAddress`).
+(`clone` -- `CreateThread`), **akislarin senkronizasyonu**
+(`futex` -- `WaitOnAddress`) ve **bloke eden borular**
+(`read`/`O_NONBLOCK` -- `ReadFile`/`PIPE_NOWAIT`).
 
 Her yetenek QEMU'da **olculerek** dogrulanmistir: `probe` (16 sinav),
-`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `bequest`
+`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (5), `winpipe` (5), `bequest`
 (6), `nested` (4), `winenv` (4) gibi programlar sonucu hem ekrana hem
 seri gunluge yaziyor. Olcumler yol boyunca gercek hatalar buldu -- dolan
 VFS tablosu, `CreateFileA`'nin cevrilmeyen Windows yollari, `GDT`
@@ -1426,13 +1427,21 @@ acik boru: 1 / 4  (tampon 1024 bayt)
   #0  bekleyen:    0  yazan:1  okuyan:1
 ```
 
-### Bloke etmeyen okuma
+### Bloke eden okuma
 
-Gercek POSIX'te bos bir borudan okumak veri gelene kadar bloke olur.
-TCMK'de okuma bloke etmez; veri yoksa `0` doner. Nedeni GUI'dir: bloke
-olan bir surec penceresini de dondurur, oysa buradaki uygulamalar kendi
-cizim dongulerini surer. `relay`'in ebeveyni her karede yoklar ve grafik
-akici kalir.
+Gercek POSIX'te bos bir borudan okumak veri gelene kadar bloke olur --
+ve TCMK artik bunu yapiyor. Uzun sure yapmiyordu; gerekce GUI idi.
+Sonradan gorulen sey, o sadelestirmenin "simdilik veri yok" ile "bir
+daha veri gelmeyecek"i ayni sayiyla bildirdigi ve gercek bir Linux
+ikilisini erken cikmaya ikna ettigiydi. Ayrintisi ve iki ABI'nin
+ayrisan sozlesmeleri icin bkz.
+[Okumak artik bekliyor](#okumak-artik-bekliyor).
+
+Eski gerekce tumden yok olmadi, yalnizca daraldi: masaustu ve kabuk
+gorevleri uyutulamaz (ekrani onlar ciziyor) ve orada okuma hala
+beklemeden doner. `relay`'in ebeveyni ise ayri bir Ring 3 gorevi --
+isterse bekler, grafik yine akici kalir cunku dondurdugu yalnizca
+kendi penceresi.
 
 ## `lseek` / `fstat` -- ve Win32'deki ikizleri
 
@@ -4843,6 +4852,160 @@ adres iki surecte bambaska bellektir.
 * **`clone` bayrak kumesi hala tam degil**: `CLONE_SETTLS` ve
   `CLONE_PARENT_SETTID` yok. `CLONE_CHILD_CLEARTID` bu batiyla geldi.
 
+## Okumak artik bekliyor
+
+Bu README uzun sure su cumleyi tasidi: *"TCMK'de okuma bloke etmez;
+veri yoksa `0` doner."* Gerekce de yaziliydi ve makuldu -- bloke olan
+bir surec penceresini de dondururdu.
+
+Ama sadelestirme bir **hata** uretiyordu, cunku iki ayri durumu ayni
+sayiyla bildiriyordu:
+
+```text
+  veri yok, yazan var  -> "simdilik yok"        \  ikisi de 0
+  veri yok, yazan yok  -> "bir daha gelmeyecek" /
+```
+
+POSIX'te ikincisi **dosya sonu**dur ve okuyan dongu oradan cikar.
+Birincisini de `0` dondurmek, `read`i bloke sanan gercek bir Linux
+ikilisini **erken cikmaya** ikna etmek demekti. Artik ilki bekliyor.
+
+```
+[blocking] A bekleme:       gecti (kardes yazana kadar beklendi)
+[blocking] B dosya sonu:    gecti (yazan uc kapali, 0 dondu ve beklemedi)
+[blocking] C O_NONBLOCK:    gecti (bos boruda -EAGAIN, bekleme yok)
+[blocking] D uc durum ayri: gecti (yazan varken -EAGAIN, kapaninca 0)
+[blocking] E pipe2:         gecti (bayrak yaratma aninda kondu)
+
+[winpipe]  A bekleme:       gecti (kardes yazana kadar beklendi)
+[winpipe]  B PeekNamedPipe: gecti (bakmak tuketmedi, ayni bayt sonra okundu)
+[winpipe]  C kirik boru:    gecti (FALSE + ERROR_BROKEN_PIPE)
+[winpipe]  D PIPE_NOWAIT:   gecti (bos boruda ERROR_NO_DATA, bekleme yok)
+[winpipe]  E iki durum:     gecti (yazan varken NO_DATA, kapaninca BROKEN_PIPE)
+```
+
+![blocking](docs/screenshot-blocking.png)
+![winpipe](docs/screenshot-winpipe.png)
+
+Ekrandaki "beklenen ms: 160" sayisi olcumun kendisi: kardes 150 ms
+sonra yaziyor ve okuma o sureyi gercekten uyuyarak geciriyor.
+
+### Uc durum, uc cevap
+
+Artik ayrim tam:
+
+| durum | POSIX | Win32 |
+|---|---|---|
+| veri var | okunani dondur | `TRUE` + sayi |
+| veri yok, yazan var | **bekle** | **bekle** |
+| ... ve `O_NONBLOCK`/`PIPE_NOWAIT` | `-EAGAIN` | `FALSE` + `ERROR_NO_DATA` |
+| veri yok, yazan yok | `0` (dosya sonu) | `FALSE` + `ERROR_BROKEN_PIPE` |
+
+Son satir iki ABI'nin en keskin ayristigi yer ve bilerek korundu:
+**ayni olay, birinde normal akis, otekinde hata.** POSIX icin borunun
+bitmesi beklenen bir sondur; Windows icin bir kopmadir. Sifir bayt ile
+basarili donmek, POSIX'in cevabini Win32 kilifinda vermek olurdu --
+ve `ReadFile`dan hata bekleyen gercek bir Windows programi kirilirdi.
+
+### Bloke olmamak: kimin ozelligi
+
+Ikisi de varsayilan olarak bloke, ve ikisinde de opt-out var. Ayrisan
+sey bayragin **neye** ait oldugu:
+
+```text
+  POSIX  fcntl(fd, F_SETFL, O_NONBLOCK)   -> acik dosya tanimina ait
+  Win32  SetNamedPipeHandleState(h, PIPE_NOWAIT) -> boru TUTAMACININ kipi
+```
+
+POSIX'in tercihi ayrica dikkate deger: bloke olmak **varsayilan**,
+bloke olmamak acikca istenmeli. Bu, "cogu program beklemek ister"
+varsayimidir ve dogrudur -- bloke olmayan kod yazmak, uyandirma
+mekanizmasini da yazmak demektir.
+
+`pipe2(flags)` de eklendi: `pipe` + `fcntl` ile ayni sonuc, tek farki
+**yaris olmamasi**. Iki cagri arasinda `fork` olursa cocuk bloke eden
+bir uc devralirdi; glibc bugun her zaman `pipe2` cagiriyor.
+
+### Bakmak ile almak
+
+Win32'de POSIX'te karsiligi **olmayan** bir cagri var:
+
+```text
+  POSIX  poll(fd, POLLIN)  -> "veri var mi?"
+         read(fd, ...)     -> veriyi AL (tuketir)
+
+  Win32  PeekNamedPipe(..) -> veriyi GOR, tuketme
+         ReadFile(..)      -> veriyi al
+```
+
+POSIX'te veriye bakmanin yolu onu tuketmekten geciyor. Win32 ikisini
+ayirmis, cunku adlandirilmis borularda ileti sinirlarini gormek
+gerekebiliyor. `pipe::peek` `read` ile ayni govdeyi paylasiyor;
+ayrisan tek satir `tail`in geri yazilmamasi.
+
+### Yeni bir bekleme anahtari ve neden ayri
+
+Bir onceki bati `AddrWait` durumunu getirmisti: bir **kullanici
+adresi** uzerinde beklemek. Boru beklemesi ayni durumu kullaniyor ama
+ayri bir anahtar uzayindan:
+
+```rust
+pub wait_kernel: bool,
+```
+
+Bayrak sart. `wait_addr` tek bir alan ve iki ayri seyi tasiyabiliyor --
+bir kullanici adresi ya da bir boru anahtari. Ayirmasaydik, bir boru
+indeksi tesadufen ayni sayiya denk gelen bir kullanici adresini
+bekleyen akisi uyandirirdi: `futex` ile bekleyen bir kilit, hic
+ilgisiz bir boruya gelen veriyle kalkardi. Sayilari cakismayacak
+araliklara bolmek yerine turu acikca tasimak, sessiz bir hatanin
+yerine okunabilir bir alan koyuyor.
+
+Uyandirma **iki** yerden geliyor ve ikisi de sart:
+
+* **yazma** -- veri geldi
+* **yazan ucun kapanmasi** -- bir daha gelmeyecek
+
+Ikincisi olmasa, borunun yazan ucunu kapatan bir ebeveyn okuyan cocugu
+sonsuza kadar uyutmus olurdu. Borunun kapanmasi, gelmeyecek verinin
+tek isaretidir.
+
+### GUI kisiti nereye gitti
+
+Eski gerekce hala gecerli -- yalnizca daha dar bir yerde. Masaustu ve
+kabuk gorevleri **uyutulamaz** (ekrani onlar ciziyor), o yuzden
+`current_can_block` onlari eski davranisa dusuruyor: bloke olmak yerine
+`0`. Ring 3 uygulamalari ise ayri gorevler, onlarin uyumasinin
+masaustune bir maliyeti yok. Yani kisit bastan beri butun sisteme
+degil, **iki goreve** aitmis.
+
+### Bilerek yapilmayanlar
+
+* **Standart girdi hala bloke etmiyor.** `read(0, ...)` sahibinin
+  penceresinde biriken tuslari dondurur, yoksa `0`. Bloke etmek icin
+  tus gelisinde uyandirma gerekiyor ve o yol pencere yoneticisinin
+  girdi hattindan geciyor -- ayri bir bati.
+* **Yazma bloke etmiyor.** Dolu bir boruya yazmak kisa doner (POSIX'te
+  de kisa donus mesrudur), ama gercek POSIX yer acilana kadar beklerdi.
+  Simetrigi eksik: okuma bekliyor, yazma beklemiyor.
+* **`SIGPIPE` yok.** Okuyan ucu kapali bir boruya yazmak POSIX'te sinyal
+  uretir; burada yalnizca `0` doner.
+* **`O_NONBLOCK` disindaki `F_SETFL` bayraklari suzuluyor.** Kabul edip
+  uygulamamak, uygulandigini saniyormus gibi davranmak olurdu.
+* **Bayraklar tanimlayici basina, acik dosya tanimi basina degil.**
+  POSIX'te `dup` ile kopyalanan iki tanimlayici ayni bayraklari
+  **paylasir**; TCMK'de tablo tanimlayici basina oldugu icin `dup`
+  bayraklari kopyaliyor. Birinde `O_NONBLOCK` acmak otekini
+  etkilemiyor.
+* **`lpPipeAttributes` okunmuyor.** `bInheritHandles` gibi miras
+  ayarlari yok sayiliyor; TCMK'de `execve` tanimlayicilari zaten
+  devrediyor.
+* **`nSize` yok sayiliyor** -- boru tamponu sabit 1 KiB. Windows'ta da
+  `nSize` bir oneridir, ama orada cekirdek onu genelde dikkate alir.
+* **Adlandirilmis boru yok.** `CreateNamedPipe`/`ConnectNamedPipe` ve
+  ileti kipi (`PIPE_TYPE_MESSAGE`) yok; `PeekNamedPipe`in
+  `lpBytesLeftThisMessage` cikisi bu yuzden her zaman sifir.
+
 ## Alfa'nin bilinen sinirlari
 
 Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
@@ -4862,7 +5025,8 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
   basina sabit 512 KiB. Dosya destekli esleme artik var (yukari bkz.)
   ama **ozel** ve tembel degil: `MAP_SHARED`/`msync` yok, icerik esleme
   aninda okunuyor.
-- **Boru okumasi bloke etmez** ve boru sayisi dorttur. `dup`/`dup2` ve
+- ~~**Boru okumasi bloke etmez**~~ -- artik bloke ediyor (yukari bkz.);
+  **yazma** hala beklemiyor ve `SIGPIPE` yok. Boru sayisi dorttur. `dup`/`dup2` ve
   `poll` var (yukari bkz.); `select` yok -- `poll` onu kapsadigi icin
   ayrica yazilmadi. `poll` bir bekleme kuyrugu degil, tik cozunurluklu
   bir dongudur: uyanma gecikmesi en fazla 10 ms. `dup` ayrica konumu

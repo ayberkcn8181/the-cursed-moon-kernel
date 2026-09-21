@@ -49,6 +49,14 @@ pub struct FileDescriptor {
     /// `File` icin VFS dugumu, boru uclari icin boru indeksi.
     pub node: usize,
     pub offset: usize,
+    /// Acik-dosya bayraklari (`O_NONBLOCK` gibi).
+    ///
+    /// POSIX'te bunlar **acik dosya tanimina** aittir, tanimlayiciya
+    /// degil: `dup` ile kopyalanan iki tanimlayici ayni bayraklari
+    /// paylasir. TCMK'de tablo tanimlayici basina oldugu icin `dup`
+    /// bayraklari kopyaliyor -- ayrim `sync` gibi programlarin gormedigi
+    /// bir yerde kaliyor ama README'de yazili.
+    pub flags: u32,
 }
 
 impl FileDescriptor {
@@ -58,6 +66,7 @@ impl FileDescriptor {
             kind: FdKind::File,
             node: 0,
             offset: 0,
+            flags: 0,
         }
     }
 }
@@ -145,6 +154,7 @@ pub fn allocate(node: usize) -> Option<usize> {
                     kind: FdKind::File,
                     node,
                     offset: 0,
+                    flags: 0,
                 });
                 return Some(fd);
             }
@@ -168,6 +178,29 @@ pub fn get(fd: usize) -> Option<FileDescriptor> {
     }
 }
 
+/// Bir tanimlayicinin acik-dosya bayraklari.
+pub fn flags(fd: usize) -> u32 {
+    get(fd).map(|entry| entry.flags).unwrap_or(0)
+}
+
+/// Bayraklari degistirir; tanimlayici yoksa `false`.
+pub fn set_flags(fd: usize, flags: u32) -> bool {
+    if fd >= MAX_FDS {
+        return false;
+    }
+    crate::arch::cpu::without_interrupts(|| unsafe {
+        let table = current_table();
+        if !(*table.add(fd)).used {
+            return false;
+        }
+        (*table.add(fd)).flags = flags;
+        true
+    })
+}
+
+/// `O_NONBLOCK` -- Linux'ta i386 ve x86_64'te ayni sayi (0o4000).
+pub const O_NONBLOCK: u32 = 0x800;
+
 /// Bir boru ucunu tanimlayiciya baglar.
 pub fn allocate_pipe(pipe: usize, kind: FdKind) -> Option<usize> {
     crate::arch::cpu::without_interrupts(|| unsafe {
@@ -179,6 +212,7 @@ pub fn allocate_pipe(pipe: usize, kind: FdKind) -> Option<usize> {
                     kind,
                     node: pipe,
                     offset: 0,
+                    flags: 0,
                 });
                 return Some(fd);
             }
@@ -200,6 +234,7 @@ pub fn allocate_dir(slot: usize) -> Option<usize> {
                     kind: FdKind::Dir,
                     node: slot,
                     offset: 0,
+                    flags: 0,
                 });
                 return Some(fd);
             }

@@ -78,6 +78,13 @@ mod i386_numbers {
     pub const SYS_GETTID: u32 = 224;
     pub const SYS_FUTEX: u32 = 240;
     pub const SYS_SET_TID_ADDRESS: u32 = 258;
+    /// i386'da iki numara ayni ise bakar: 55 eski, 221 `fcntl64`.
+    /// glibc bugun ikincisini cagiriyor, eski ikililer birincisini --
+    /// ikisini de tanimak, "gercek bir Linux ikilisi calissin" iddiasinin
+    /// gerektirdigi sey.
+    pub const SYS_FCNTL: u32 = 55;
+    pub const SYS_FCNTL64: u32 = 221;
+    pub const SYS_PIPE2: u32 = 331;
     pub const SYS_WAITPID: u32 = 7;
     pub const SYS_PIPE: u32 = 42;
     pub const SYS_READ: u32 = 3;
@@ -149,6 +156,8 @@ mod x86_64_numbers {
     pub const SYS_GETTID: u32 = 186;
     pub const SYS_FUTEX: u32 = 202;
     pub const SYS_SET_TID_ADDRESS: u32 = 218;
+    pub const SYS_FCNTL: u32 = 72;
+    pub const SYS_PIPE2: u32 = 293;
     pub const SYS_READ: u32 = 0;
     pub const SYS_WRITE: u32 = 1;
     pub const SYS_OPEN: u32 = 2;
@@ -437,6 +446,39 @@ impl PollEntry {
     };
 }
 
+/// `fcntl` govdesi -- iki mimaride de ayni.
+fn fcntl(fd_num: usize, command: usize, argument: usize) -> i32 {
+    use crate::level0a::core::fd;
+
+    const F_GETFD: usize = 1;
+    const F_SETFD: usize = 2;
+    const F_GETFL: usize = 3;
+    const F_SETFL: usize = 4;
+
+    if fd::get(fd_num).is_none() {
+        return -EBADF;
+    }
+    match command {
+        F_GETFL => fd::flags(fd_num) as i32,
+        F_SETFL => {
+            // POSIX'te `F_SETFL` yalnizca birkac bayragi degistirebilir;
+            // erisim kipi (`O_RDONLY` vb.) ve yaratma bayraklari yok
+            // sayilir. TCMK'de degistirilebilen tek sey `O_NONBLOCK`,
+            // o yuzden gerisi sessizce suzuluyor -- kabul edip
+            // uygulamamak, uygulandigini saniyormus gibi davranmak
+            // olurdu.
+            fd::set_flags(fd_num, argument as u32 & fd::O_NONBLOCK);
+            0
+        }
+        // close-on-exec: TCMK'de `execve` tanimlayicilari devrediyor ve
+        // kapatma bayragi tutulmuyor. Sifir dondurmek, "hicbiri
+        // kapanmayacak" demek -- ve bu dogru.
+        F_GETFD => 0,
+        F_SETFD => 0,
+        _ => -EINVAL,
+    }
+}
+
 fn errno_of(err: KernelError) -> i32 {
     match err {
         KernelError::BadFileDescriptor => -EBADF,
@@ -448,6 +490,9 @@ fn errno_of(err: KernelError) -> i32 {
         KernelError::NotEmpty => -ENOTEMPTY,
         KernelError::NoSpace => -ENOSPC,
         KernelError::ReadOnly => -EROFS,
+        // POSIX'te `EWOULDBLOCK` ile `EAGAIN` ayni sayidir -- Linux de
+        // ikisini esitler. Bloke olmayan bos bir boru bunu dondurur.
+        KernelError::WouldBlock => -EAGAIN,
     }
 }
 
@@ -990,6 +1035,51 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
             };
             frame.set_return(value);
             return;
+        }
+
+        // `fcntl(fd, cmd, arg)` -- acik dosya bayraklarini okur/yazar.
+        //
+        // Bu batinin acilis kapisi: `O_NONBLOCK` buradan kuruluyor.
+        // POSIX'in tercihi dikkat cekici -- **bloke olmak varsayilan**,
+        // bloke olmamak icin acikca bayrak koymak gerekiyor. Win32
+        // ikizinde (`SetNamedPipeHandleState`) de varsayilan bloke ama
+        // bayrak borunun kendisine ait, tanimlayiciya degil.
+        //
+        // Desteklenenler:
+        //
+        //   F_GETFL (3) -> bayraklari dondur
+        //   F_SETFL (4) -> bayraklari degistir (O_NONBLOCK)
+        //   F_GETFD (1) / F_SETFD (2) -> close-on-exec; TCMK'de exec
+        //     tanimlayicilari zaten devrediyor, o yuzden 0 dondurulup
+        //     sessizce kabul ediliyor.
+        #[cfg(target_arch = "x86")]
+        SYS_FCNTL | SYS_FCNTL64 => fcntl(arg1, arg2, arg3),
+        #[cfg(target_arch = "x86_64")]
+        SYS_FCNTL => fcntl(arg1, arg2, arg3),
+
+        // `pipe2(fds, flags)` -- boruyu bayrakla birlikte yaratir.
+        //
+        // `pipe` + `fcntl` ile ayni sonuc, tek farki **yaris olmamasi**:
+        // iki cagri arasinda `fork` olursa cocuk bloke eden bir uc
+        // devralirdi. glibc bugun her zaman bunu cagiriyor.
+        SYS_PIPE2 => {
+            use crate::level0a::core::fd;
+            // Linux'ta ilk arguman tanimlayici dizisi; TCMK `pipe` gibi
+            // ikisini tek kelimede paketliyor (bkz. `SYS_PIPE`), o yuzden
+            // burada da ayni bicim kullaniliyor. Ayrisan tek sey ikinci
+            // arguman: bayraklar.
+            let flags = arg2 as u32;
+            match kernel_api::create_pipe() {
+                Ok((read_fd, write_fd)) => {
+                    if flags & fd::O_NONBLOCK != 0 {
+                        fd::set_flags(read_fd, fd::O_NONBLOCK);
+                        fd::set_flags(write_fd, fd::O_NONBLOCK);
+                    }
+                    frame.set_return((read_fd << 16) | (write_fd & 0xFFFF));
+                    return;
+                }
+                Err(e) => errno_of(e),
+            }
         }
 
         // `set_tid_address(adres)` -- olurken sifirlanacak yeri bildirir.

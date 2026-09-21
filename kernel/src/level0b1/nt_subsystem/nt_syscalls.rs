@@ -127,6 +127,9 @@ pub const NT_GET_EXIT_CODE_THREAD: u32 = 0x3039;
 pub const NT_WAIT_ON_ADDRESS: u32 = 0x303A;
 pub const NT_WAKE_BY_ADDRESS_SINGLE: u32 = 0x303B;
 pub const NT_WAKE_BY_ADDRESS_ALL: u32 = 0x303C;
+pub const NT_CREATE_PIPE: u32 = 0x303D;
+pub const NT_PEEK_NAMED_PIPE: u32 = 0x303E;
+pub const NT_SET_NAMED_PIPE_HANDLE_STATE: u32 = 0x303F;
 
 pub const NT_USER_CREATE_WINDOW_W32: u32 = 0x3010;
 pub const NT_GDI_GET_BITS_W32: u32 = 0x3011;
@@ -170,6 +173,8 @@ const STATUS_OBJECT_NAME_COLLISION: u32 = 0xC000_0035;
 const STATUS_DIRECTORY_NOT_EMPTY: u32 = 0xC000_0101;
 const STATUS_DISK_FULL: u32 = 0xC000_007F;
 const STATUS_MEDIA_WRITE_PROTECTED: u32 = 0xC000_00A2;
+/// Bloke olmayan bos boru -- NT'nin kendi kodu.
+const STATUS_PIPE_EMPTY: u32 = 0xC000_00D9;
 
 const PATH_MAX: usize = 128;
 
@@ -245,6 +250,13 @@ const WAIT_FAILED: usize = 0xFFFF_FFFF;
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 /// Cagriya verilen parametre gecersiz (bos ad, okunamayan isaretci).
 const ERROR_INVALID_PARAMETER: u32 = 87;
+/// `ReadFile` bloke olmayan bos bir boruda bunu birakir. POSIX ikizi
+/// `EAGAIN`; ikisi de "simdilik yok, sonra tekrar dene" demek -- dosya
+/// sonu **degil**.
+const ERROR_NO_DATA: u32 = 232;
+/// Yazan ucu kapali bir borudan okumak. POSIX ayni durumda `read`i
+/// sifirla dondurur ve bunu **hata saymaz**; Windows sayar.
+const ERROR_BROKEN_PIPE: u32 = 109;
 /// `WaitOnAddress` sure dolunca bunu birakir. POSIX ikizi `-ETIMEDOUT`
 /// **doner**; Win32 ise `FALSE` donup kodu `GetLastError`a birakir --
 /// ayni bilginin iki tasima yolu.
@@ -288,6 +300,50 @@ pub fn clear_last_error(task: usize) {
     }
 }
 
+/// `PIPE_NOWAIT` -- Win32'nin "bloke olma" kipi.
+const PIPE_NOWAIT: u32 = 0x0000_0001;
+
+/// Bu tutamac, yazan ucu kapanmis bir boru mu?
+///
+/// `ReadFile`in sifir donusunu hataya cevirmek icin gerekiyor; yalnizca
+/// borular icin dogru, dosya sonuna gelmis bir **dosya** icin degil.
+/// Ayrim Windows'un kendi ayrimi: dosyada sifir bayt normal, boruda
+/// kirik boru.
+fn broken_pipe(handle: usize) -> bool {
+    use crate::level0a::core::fd;
+    let Some(entry) = fd::get(handle) else {
+        return false;
+    };
+    if entry.kind != fd::FdKind::PipeRead {
+        return false;
+    }
+    match crate::level0a::core::pipe::info(entry.node) {
+        Some((pending, writers, _)) => pending == 0 && writers == 0,
+        // Boru tumden kapanmis: yine kirik.
+        None => true,
+    }
+}
+
+/// Bir tutamacin arkasindaki boru indeksi (boru degilse `None`).
+fn pipe_index_of(handle: usize) -> Option<usize> {
+    use crate::level0a::core::fd;
+    let entry = fd::get(handle)?;
+    match entry.kind {
+        fd::FdKind::PipeRead | fd::FdKind::PipeWrite => Some(entry.node),
+        _ => None,
+    }
+}
+
+/// Istege bagli bir `DWORD*` cikis parametresini doldurur.
+///
+/// Win32'de bu isaretcilerin cogu NULL olabilir ve NULL gecmek hata
+/// degildir -- cagiran o bilgiyi istemiyor demektir.
+fn write_u32_out(pointer: usize, value: u32) {
+    if pointer != 0 && mmu::is_user_accessible(pointer) {
+        unsafe { (pointer as *mut u32).write_unaligned(value) };
+    }
+}
+
 /// Cekirdek hatasini Win32 kodunun karsiligina cevirir.
 fn win32_error_of(err: KernelError) -> u32 {
     match err {
@@ -301,6 +357,9 @@ fn win32_error_of(err: KernelError) -> u32 {
         KernelError::NoSpace => ERROR_DISK_FULL,
         // Windows salt okunur bir hedefte de bunu dondurur.
         KernelError::ReadOnly => ERROR_ACCESS_DENIED,
+        // Win32'de bloke olmayan bos bir borunun kodu budur; POSIX
+        // `EAGAIN` der. Ayni durum, iki ayri ad.
+        KernelError::WouldBlock => ERROR_NO_DATA,
     }
 }
 
@@ -319,6 +378,7 @@ fn ntstatus_of(err: KernelError) -> u32 {
         KernelError::NotEmpty => STATUS_DIRECTORY_NOT_EMPTY,
         KernelError::NoSpace => STATUS_DISK_FULL,
         KernelError::ReadOnly => STATUS_MEDIA_WRITE_PROTECTED,
+        KernelError::WouldBlock => STATUS_PIPE_EMPTY,
     }
 }
 
@@ -669,14 +729,33 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
 
         NT_READ_FILE_WIN32 => {
             // ReadFile(hFile, lpBuffer, nBytes, lpBytesRead, lpOverlapped)
+            //
+            // Borularda bir sozlesme farki var ve bilerek korunuyor:
+            // **yazan ucu kapali bir boru Windows'ta bir hatadir.**
+            //
+            //   POSIX  read() -> 0            (dosya sonu, hata degil)
+            //   Win32  ReadFile -> FALSE + ERROR_BROKEN_PIPE
+            //
+            // Ayni olay, birinde normal akis, otekinde hata. Sifir bayt
+            // ile basarili donmek POSIX'in cevabini Win32 kilifinda
+            // vermek olurdu -- ve `ReadFile`in sifir donusunu "boru
+            // bitti" diye okuyan bir program yerine, hata bekleyen
+            // gercek bir Windows programi kirilirdi.
             match (arg(args, 0), arg_ptr(args, 1), arg(args, 2)) {
                 (Some(handle), Some(buffer), Some(count)) => {
                     match unsafe { kernel_api::read(handle, buffer as *mut u8, count as usize) } {
+                        Ok(0) if count > 0 && broken_pipe(handle as usize) => {
+                            set_last_error(ERROR_BROKEN_PIPE);
+                            WIN32_FALSE
+                        }
                         Ok(read) => {
                             store_out(args, 3, read as u32);
                             WIN32_TRUE
                         }
-                        Err(_) => WIN32_FALSE,
+                        Err(e) => {
+                            set_last_error(win32_error_of(e));
+                            WIN32_FALSE
+                        }
                     }
                 }
                 _ => WIN32_FALSE,
@@ -1840,6 +1919,120 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
                 _ => {
                     set_last_error(ERROR_INVALID_HANDLE);
                     WIN32_FALSE
+                }
+            }
+        }
+
+        // --- Borular ---
+
+        // CreatePipe(hReadPipe, hWritePipe, lpPipeAttributes, nSize)
+        //
+        // POSIX `pipe()` ile ayni cekirdek nesnesi, iki ayrisan ayrinti:
+        // tanimlayicilar **cagiranin verdigi isaretcilere** yaziliyor
+        // (POSIX tek bir diziye yazar) ve `lpPipeAttributes` ile
+        // miras alinabilirlik soylenebiliyor. TCMK'de `execve`
+        // tanimlayicilari zaten devrediyor, o yuzden oznitelik yapisi
+        // okunmuyor -- ama sessizce yok sayilmasi README'de yazili.
+        //
+        // `nSize` bir **oneri**dir, Windows'ta da oyle: boru tamponu
+        // sabit (bkz. `pipe::PIPE_CAPACITY`).
+        NT_CREATE_PIPE => {
+            let read_out = arg_ptr(args, 0).unwrap_or(0);
+            let write_out = arg_ptr(args, 1).unwrap_or(0);
+            if read_out == 0
+                || write_out == 0
+                || !mmu::is_user_accessible(read_out)
+                || !mmu::is_user_accessible(write_out)
+            {
+                set_last_error(ERROR_INVALID_PARAMETER);
+                WIN32_FALSE
+            } else {
+                match kernel_api::create_pipe() {
+                    Ok((read_fd, write_fd)) => {
+                        // Tanitici = tanimlayici: TCMK'de Win32 tarafi
+                        // ayni tabloyu kullaniyor (bkz. `NT_READ_FILE`).
+                        unsafe {
+                            (read_out as *mut u32).write_unaligned(read_fd as u32);
+                            (write_out as *mut u32).write_unaligned(write_fd as u32);
+                        }
+                        WIN32_TRUE
+                    }
+                    Err(e) => {
+                        set_last_error(win32_error_of(e));
+                        WIN32_FALSE
+                    }
+                }
+            }
+        }
+
+        // PeekNamedPipe(hPipe, lpBuffer, nBufferSize, lpBytesRead,
+        //               lpTotalBytesAvail, lpBytesLeftThisMessage)
+        //
+        // POSIX'te karsiligi **yok** ve bu gercek bir ayrisma. Orada
+        // "veri var mi" sorusu `poll` ile sorulur, ama veriyi gormek
+        // icin `read` gerekir ve `read` tuketir. Win32 bakmayi ayri bir
+        // cagriya ayirmis.
+        NT_PEEK_NAMED_PIPE => {
+            let buffer = arg_ptr(args, 1).unwrap_or(0);
+            let size = arg(args, 2).unwrap_or(0) as usize;
+            let read_out = arg_ptr(args, 3).unwrap_or(0);
+            let avail_out = arg_ptr(args, 4).unwrap_or(0);
+            let left_out = arg_ptr(args, 5).unwrap_or(0);
+
+            match pipe_index_of(arg(args, 0).unwrap_or(0) as usize) {
+                None => {
+                    set_last_error(ERROR_INVALID_HANDLE);
+                    WIN32_FALSE
+                }
+                Some(index) => {
+                    let pending = crate::level0a::core::pipe::info(index)
+                        .map(|(pending, _, _)| pending)
+                        .unwrap_or(0);
+
+                    let mut copied = 0usize;
+                    if buffer != 0 && size > 0 && mmu::is_user_accessible(buffer) {
+                        let out =
+                            unsafe { core::slice::from_raw_parts_mut(buffer as *mut u8, size) };
+                        copied = crate::level0a::core::pipe::peek(index, out);
+                    }
+                    write_u32_out(read_out, copied as u32);
+                    write_u32_out(avail_out, pending as u32);
+                    // Ileti sinirlari yok (boru bayt akisi), yani
+                    // "bu iletiden kalan" her zaman sifir. Windows'ta da
+                    // bayt kipli borularda boyledir.
+                    write_u32_out(left_out, 0);
+                    WIN32_TRUE
+                }
+            }
+        }
+
+        // SetNamedPipeHandleState(hPipe, lpMode, lpMaxCollectionCount,
+        //                         lpCollectDataTimeout)
+        //
+        // `PIPE_NOWAIT` ile bloke olmamaya gecilir -- POSIX'te ayni isi
+        // `fcntl(F_SETFL, O_NONBLOCK)` yapiyor. Ayrisan sey **kimin
+        // ozelligi oldugu**: POSIX'te bayrak acik dosya tanimina ait,
+        // Win32'de boru **tutamacinin** durumuna.
+        NT_SET_NAMED_PIPE_HANDLE_STATE => {
+            let handle = arg(args, 0).unwrap_or(0) as usize;
+            let mode_ptr = arg_ptr(args, 1).unwrap_or(0);
+            match pipe_index_of(handle) {
+                None => {
+                    set_last_error(ERROR_INVALID_HANDLE);
+                    WIN32_FALSE
+                }
+                Some(_) => {
+                    // `lpMode` NULL ise "degistirme" demektir.
+                    if mode_ptr != 0 && mmu::is_user_accessible(mode_ptr) {
+                        let mode = unsafe { (mode_ptr as *const u32).read_unaligned() };
+                        let flags = if mode & PIPE_NOWAIT != 0 {
+                            crate::level0a::core::fd::O_NONBLOCK
+                        } else {
+                            0
+                        };
+                        crate::level0a::core::fd::set_flags(handle, flags);
+                    }
+                    WIN32_TRUE
                 }
             }
         }

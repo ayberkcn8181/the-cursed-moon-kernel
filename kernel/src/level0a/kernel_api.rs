@@ -34,6 +34,15 @@ pub enum KernelError {
     /// durum `NotFound` olarak bildiriliyordu ve gezgin "bulunamadi"
     /// diyordu -- ekranda duran bir dosya icin yaniltici bir cevap.
     ReadOnly,
+    /// Bloke olacakti ama tanimlayici bloke olmamaya ayarli -- POSIX
+    /// `EAGAIN` / Win32 `ERROR_NO_DATA`.
+    ///
+    /// "Veri yok"tan (`Ok(0)`) ayri tutulmasi sart: `Ok(0)` POSIX'te
+    /// **dosya sonu** demektir ve bir daha veri gelmeyecegini soyler.
+    /// Bloke olmayan bos bir boru ise "simdilik yok, sonra tekrar
+    /// dene" diyor. Ikisini ayni sayiyla bildirmek, okuyan tarafi
+    /// erken cikmaya ikna ederdi.
+    WouldBlock,
 }
 
 /// Program break (heap siniri) -- **surec basina**.
@@ -392,9 +401,19 @@ pub unsafe fn read(fd_num: u32, buf: *mut u8, len: usize) -> Result<usize, Kerne
     // surec stdin'i borudan okumalidir, klavyeden degil.
     match fd::get(fd_num as usize) {
         Some(entry) => match entry.kind {
-            // Boru okumasi bloke ETMEZ: veri yoksa 0 doner. Bloke olan bir
-            // surec penceresini de dondururdu (bkz. `core::pipe`).
-            fd::FdKind::PipeRead => Ok(pipe::read(entry.node, slice)),
+            // Boru okumasi **bloke eder** -- POSIX'in sozlesmesi budur.
+            //
+            // Uc durumu ayirmak sart ve ikisi ayni sayiyla ifade
+            // edilemez:
+            //
+            //   veri var            -> dondur
+            //   veri yok, yazan var -> bekle
+            //   veri yok, yazan yok -> 0 (dosya sonu)
+            //
+            // `O_NONBLOCK` acikken ortadaki durum beklemek yerine
+            // `WouldBlock` doner; bu, "dosya sonu"ndan farkli bir cevap
+            // ve okuyan taraf ikisine farkli tepki verir.
+            fd::FdKind::PipeRead => read_pipe_blocking(fd_num as usize, entry.node, slice),
             fd::FdKind::PipeWrite => Err(KernelError::BadFileDescriptor),
             // POSIX EISDIR: bir dizin `read` ile okunmaz, `getdents` ile
             // okunur. Ham bayt dondurmek, dizin bicimini ABI'ye kacak
@@ -491,6 +510,62 @@ pub const POLLNVAL: u16 = 0x020;
 ///
 /// Tus kuyruguna **bakilir, tuketilmez**: `poll` veriyi yeseydi
 /// arkasindan gelen `read` bos donerdi.
+/// Borudan **bloke ederek** okur.
+///
+/// Dongu, uyandiktan sonra kosulu yeniden sinamak zorunda: uyandiran
+/// yazma baska bir okuyucu tarafindan kapilmis olabilir. `wake_kernel_key`
+/// bekleyenlerin hepsini kaldiriyor, yani "uyandim demek veri var demek"
+/// degil -- bu, uyandirmayi tek okuyucuya yoneltmeye calismaktan daha
+/// basit ve daha dogru.
+fn read_pipe_blocking(
+    fd_num: usize,
+    pipe_index: usize,
+    out: &mut [u8],
+) -> Result<usize, KernelError> {
+    // Sifir uzunluklu okuma POSIX'te her zaman 0 doner ve **beklemez**.
+    if out.is_empty() {
+        return Ok(0);
+    }
+    loop {
+        let read = pipe::read(pipe_index, out);
+        if read > 0 {
+            return Ok(read);
+        }
+
+        // Veri yok. Yazan uc kaldi mi?
+        let writers = match pipe::info(pipe_index) {
+            Some((_, writers, _)) => writers,
+            // Boru tumden kapanmis: dosya sonu.
+            None => return Ok(0),
+        };
+        if writers == 0 {
+            return Ok(0);
+        }
+
+        if fd::flags(fd_num) & fd::O_NONBLOCK != 0 {
+            return Err(KernelError::WouldBlock);
+        }
+
+        // Uyutulamayan baglam (masaustu/kabuk gorevi -- ekrani o
+        // ciziyor). Bloke olmak butun masaustunu dondururdu, o yuzden
+        // eski davranisa dusuluyor. Cagiranin bunu bilmesi gerekmiyor:
+        // bos donus zaten gecerli bir kisa okuma.
+        if !scheduler::current_can_block() {
+            return Ok(0);
+        }
+
+        scheduler::wait_on_kernel_key(pipe::read_key(pipe_index), None, || {
+            // Kesmeler kapaliyken son bir kez bak: bu sinama ile uyumaya
+            // gecis arasinda bosluk kalmamali, yoksa araya giren bir
+            // yazmanin uyandirmasi kaybolur.
+            match pipe::info(pipe_index) {
+                Some((pending, writers, _)) => pending == 0 && writers > 0,
+                None => false,
+            }
+        });
+    }
+}
+
 pub fn readiness(fd_num: u32) -> u16 {
     match fd::get(fd_num as usize) {
         Some(entry) => match entry.kind {

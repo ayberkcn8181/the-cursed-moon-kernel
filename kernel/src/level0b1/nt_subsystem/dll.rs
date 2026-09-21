@@ -437,6 +437,28 @@ static KERNEL32: &[Export] = &[
         service: nt::NT_WAKE_BY_ADDRESS_ALL,
         stack_bytes: 4,
     },
+    Export {
+        name: "CreatePipe",
+        ordinal: 54,
+        service: nt::NT_CREATE_PIPE,
+        // hReadPipe, hWritePipe, lpPipeAttributes, nSize
+        stack_bytes: 16,
+    },
+    Export {
+        name: "PeekNamedPipe",
+        ordinal: 55,
+        service: nt::NT_PEEK_NAMED_PIPE,
+        // hNamedPipe, lpBuffer, nBufferSize, lpBytesRead,
+        // lpTotalBytesAvail, lpBytesLeftThisMessage
+        stack_bytes: 24,
+    },
+    Export {
+        name: "SetNamedPipeHandleState",
+        ordinal: 56,
+        service: nt::NT_SET_NAMED_PIPE_HANDLE_STATE,
+        // hNamedPipe, lpMode, lpMaxCollectionCount, lpCollectDataTimeout
+        stack_bytes: 16,
+    },
 ];
 
 /// `TCMKGUI.dll` -- win32k cagrilarinin kullanici modundaki yuzu.

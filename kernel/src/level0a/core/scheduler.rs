@@ -143,6 +143,16 @@ pub struct Task {
     /// adresi bambaska bellektir. Uyandirma bu yuzden hem adresi hem
     /// `address_space`i karsilastirir.
     pub wait_addr: usize,
+    /// `AddrWait` iken: beklenen sey bir **cekirdek nesnesi** mi?
+    ///
+    /// `wait_addr` iki ayri anahtar uzayindan birini tasiyor: kullanici
+    /// adresi (`futex`/`WaitOnAddress`) ya da cekirdek nesnesi anahtari
+    /// (boru, konsol). Ayri bir bayrak olmasi sart -- yoksa bir boru
+    /// indeksi, tesadufen ayni sayiya denk gelen bir kullanici adresini
+    /// bekleyen akisi uyandirirdi. Sayilari cakismayacak araliklara
+    /// bolmek yerine turu acikca tasimak, sessiz bir hatanin yerine
+    /// derleyicinin gorebildigi bir alan koyuyor.
+    pub wait_kernel: bool,
     /// `AddrWait` iken: `wake_tick` anlamli mi (zaman asimi istendi mi)?
     ///
     /// Ayri bir bayrak sart, cunku "0 tik sonra uyan" ile "hic uyanma"
@@ -179,6 +189,7 @@ impl Task {
             exit_code: 0,
             group: 0,
             wait_addr: 0,
+            wait_kernel: false,
             wait_timed: false,
             clear_child_tid: 0,
         }
@@ -350,6 +361,7 @@ fn spawn_inner(
         // izleri temizlenmezse yeni gorev hic beklemedigi bir adres
         // uzerinde uyandirilirdi.
         (*tasks.add(index)).wait_addr = 0;
+        (*tasks.add(index)).wait_kernel = false;
         (*tasks.add(index)).wait_timed = false;
         (*tasks.add(index)).clear_child_tid = 0;
 
@@ -397,6 +409,7 @@ fn release_slot(index: usize) {
         (*tasks.add(index)).credits = 0;
         (*tasks.add(index)).name = "";
         (*tasks.add(index)).wait_addr = 0;
+        (*tasks.add(index)).wait_kernel = false;
         (*tasks.add(index)).wait_timed = false;
         (*tasks.add(index)).clear_child_tid = 0;
     }
@@ -832,6 +845,7 @@ fn wake_expired(count: usize) {
                     if task.wait_timed && now.wrapping_sub(task.wake_tick) < 0x8000_0000 {
                         task.state = TaskState::Ready;
                         task.wait_addr = 0;
+                        task.wait_kernel = false;
                         task.wait_timed = false;
                     }
                 }
@@ -1115,6 +1129,7 @@ pub fn wait_on_address(
         }
         let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
         (*tasks.add(current)).wait_addr = address;
+        (*tasks.add(current)).wait_kernel = false;
         (*tasks.add(current)).wait_timed = deadline.is_some();
         if let Some(tick) = deadline {
             (*tasks.add(current)).wake_tick = tick;
@@ -1138,6 +1153,7 @@ pub fn wait_on_address(
     crate::arch::cpu::without_interrupts(|| unsafe {
         let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
         (*tasks.add(current)).wait_addr = 0;
+        (*tasks.add(current)).wait_kernel = false;
         (*tasks.add(current)).wait_timed = false;
         if (*tasks.add(current)).state == TaskState::AddrWait {
             (*tasks.add(current)).state = TaskState::Running;
@@ -1167,11 +1183,110 @@ pub fn wake_on_address(space: usize, address: usize, count: usize) -> usize {
             if task.state != TaskState::AddrWait {
                 continue;
             }
-            if task.wait_addr != address || task.address_space != space {
+            // Cekirdek nesnesi bekleyenler bu yoldan uyandirilmaz:
+            // anahtar uzaylari ayri (bkz. `Task.wait_kernel`).
+            if task.wait_kernel || task.wait_addr != address || task.address_space != space {
                 continue;
             }
             task.state = TaskState::Ready;
             task.wait_addr = 0;
+            task.wait_timed = false;
+            woken += 1;
+        }
+        ADDR_WAKES.fetch_add(woken, Ordering::Relaxed);
+        woken
+    })
+}
+
+/// **Cekirdek nesnesi** uzerinde uyutur (boru, konsol).
+///
+/// `wait_on_address` ile ayni govde, ayri anahtar uzayi. Ayrimin sebebi
+/// `Task.wait_kernel`da yazili; kisaca, bir boru indeksiyle bir kullanici
+/// adresinin ayni sayiya denk gelmesi sessiz bir uyandirma hatasi
+/// olurdu.
+///
+/// `still_waiting` yine **kesmeler kapaliyken** sinaniyor: kosul
+/// sinandiktan sonra gorev uyumaya gecene kadar araya giren bir yazma,
+/// uyandirmasini kaybederdi.
+///
+/// Doner: uyandirildiysa `true`; zaman asimi, uyutulamayan baglam ya da
+/// kosulun zaten saglanmis olmasi halinde `false`.
+pub fn wait_on_kernel_key(
+    key: usize,
+    timeout_ticks: Option<u32>,
+    still_waiting: impl Fn() -> bool,
+) -> bool {
+    let current = CURRENT.load(Ordering::Relaxed);
+    if !can_block(current) {
+        // Masaustu/kabuk gorevi uyutulamaz (ekrani o ciziyor). Cagiran
+        // bunu `current_can_block` ile onceden anlayip yoklamaya
+        // dusmeli; yine de buraya dusulurse bir tik birakilir.
+        yield_now();
+        return false;
+    }
+
+    let deadline = timeout_ticks.map(|t| crate::level0a::pit::ticks().wrapping_add(t));
+    let armed = crate::arch::cpu::without_interrupts(|| unsafe {
+        if !still_waiting() {
+            return false;
+        }
+        let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+        (*tasks.add(current)).wait_addr = key;
+        (*tasks.add(current)).wait_kernel = true;
+        (*tasks.add(current)).wait_timed = deadline.is_some();
+        if let Some(tick) = deadline {
+            (*tasks.add(current)).wake_tick = tick;
+        }
+        (*tasks.add(current)).state = TaskState::AddrWait;
+        ADDR_WAITS.fetch_add(1, Ordering::Relaxed);
+        true
+    });
+    if !armed {
+        return false;
+    }
+
+    yield_now();
+
+    let timed_out = deadline
+        .map(|tick| crate::level0a::pit::ticks().wrapping_sub(tick) < 0x8000_0000)
+        .unwrap_or(false);
+    crate::arch::cpu::without_interrupts(|| unsafe {
+        let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+        (*tasks.add(current)).wait_addr = 0;
+        (*tasks.add(current)).wait_kernel = false;
+        (*tasks.add(current)).wait_timed = false;
+        if (*tasks.add(current)).state == TaskState::AddrWait {
+            (*tasks.add(current)).state = TaskState::Running;
+        }
+    });
+    !timed_out
+}
+
+/// Bir cekirdek nesnesi uzerinde bekleyenleri uyandirir.
+///
+/// Adres uzayina **bakmaz**: nesne cekirdekte duruyor, yani onu bekleyen
+/// her surec ayni seyi bekliyor. `wake_on_address`in aksine burada
+/// `count` genelde `usize::MAX` olur -- bir boruya veri gelince
+/// bekleyenlerin hepsi bakmali, hangisinin okuyacagina yaris karar
+/// verir.
+pub fn wake_kernel_key(key: usize, count: usize) -> usize {
+    if count == 0 {
+        return 0;
+    }
+    crate::arch::cpu::without_interrupts(|| unsafe {
+        let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+        let mut woken = 0;
+        for i in 0..MAX_TASKS {
+            if woken == count {
+                break;
+            }
+            let task = &mut *tasks.add(i);
+            if task.state != TaskState::AddrWait || !task.wait_kernel || task.wait_addr != key {
+                continue;
+            }
+            task.state = TaskState::Ready;
+            task.wait_addr = 0;
+            task.wait_kernel = false;
             task.wait_timed = false;
             woken += 1;
         }

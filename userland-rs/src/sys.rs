@@ -1370,6 +1370,45 @@ pub unsafe fn join_thread(tid_slot: *mut u32, timeout_ms: usize) -> bool {
     }
 }
 
+/// `fcntl` ve `pipe2` -- numaralar mimariye gore.
+#[cfg(target_arch = "x86")]
+pub const SYS_FCNTL: usize = 221;
+#[cfg(target_arch = "x86")]
+pub const SYS_PIPE2: usize = 331;
+#[cfg(target_arch = "x86_64")]
+pub const SYS_FCNTL: usize = 72;
+#[cfg(target_arch = "x86_64")]
+pub const SYS_PIPE2: usize = 293;
+
+/// `fcntl` komutlari.
+pub const F_GETFL: usize = 3;
+pub const F_SETFL: usize = 4;
+
+/// Bloke olmama bayragi (Linux'ta i386 ve x86_64'te ayni sayi).
+pub const O_NONBLOCK: usize = 0x800;
+
+/// Bir tanimlayicinin acik-dosya bayraklarini okur.
+pub fn get_flags(fd: usize) -> isize {
+    unsafe { syscall3(SYS_FCNTL, fd, F_GETFL, 0) as isize }
+}
+
+/// Bayraklari degistirir. `O_NONBLOCK` disindakiler suzuluyor.
+pub fn set_flags(fd: usize, flags: usize) -> isize {
+    unsafe { syscall3(SYS_FCNTL, fd, F_SETFL, flags) as isize }
+}
+
+/// Boruyu **bayrakla birlikte** yaratir.
+///
+/// `pipe` + `fcntl` ile ayni sonuc; farki yaris olmamasi. Araya bir
+/// `fork` girerse cocuk bloke eden bir uc devralirdi.
+pub fn pipe2(flags: usize) -> Option<(usize, usize)> {
+    let packed = unsafe { syscall2(SYS_PIPE2, 0, flags) };
+    if (packed as isize) < 0 {
+        return None;
+    }
+    Some((packed >> 16, packed & 0xFFFF))
+}
+
 /// Cekirdek sayaclari (`kstat`).
 pub mod kstat {
     /// Kac kez bir adres uzerinde uyunuldu.

@@ -135,6 +135,9 @@ static THREADS_ELF: &[u8] = include_bytes!("../../userland/threads.elf");
 /// futex: is parcaciklarinin bekleme ikilisi.
 #[cfg(target_arch = "x86")]
 static SYNC_ELF: &[u8] = include_bytes!("../../userland/sync.elf");
+/// Bloke eden boru okumasi ve O_NONBLOCK.
+#[cfg(target_arch = "x86")]
+static BLOCKING_ELF: &[u8] = include_bytes!("../../userland/blocking.elf");
 /// FindFirstFileA gosterimi -- ayni dizinler, Win32 yuzu.
 #[cfg(target_arch = "x86")]
 static WINFILES_EXE: &[u8] = include_bytes!("../../userland/winfiles.exe");
@@ -162,6 +165,9 @@ static WINTHREAD_EXE: &[u8] = include_bytes!("../../userland/winthread.exe");
 /// WaitOnAddress / WakeByAddress -- futex'in Win32 yuzu.
 #[cfg(target_arch = "x86")]
 static WINSYNC_EXE: &[u8] = include_bytes!("../../userland/winsync.exe");
+/// CreatePipe / PeekNamedPipe -- bakmak ile almak ayri.
+#[cfg(target_arch = "x86")]
+static WINPIPE_EXE: &[u8] = include_bytes!("../../userland/winpipe.exe");
 
 /// Linux (ELF64, x86_64) kullanici programi -- `tools/gen_hello_elf64.py`.
 /// Elle kodlanmis en kucuk ELF64: yukleyicinin dar yolunu sinar.
@@ -225,6 +231,8 @@ static PROBE64: &[u8] = include_bytes!("../../userland/probe.elf64");
 static THREADS64: &[u8] = include_bytes!("../../userland/threads.elf64");
 #[cfg(target_arch = "x86_64")]
 static SYNC64: &[u8] = include_bytes!("../../userland/sync.elf64");
+#[cfg(target_arch = "x86_64")]
+static BLOCKING64: &[u8] = include_bytes!("../../userland/blocking.elf64");
 
 /// **Windows (PE32+) uygulamalari** -- i386'dakilerle ayni kaynak, ayni
 /// ithal kutuphaneleri; degisen yalnizca hedef. Taban 0x140000000
@@ -252,6 +260,8 @@ static WINMAP_EXE64: &[u8] = include_bytes!("../../userland/winmap.exe64");
 static WINTHREAD_EXE64: &[u8] = include_bytes!("../../userland/winthread.exe64");
 #[cfg(target_arch = "x86_64")]
 static WINSYNC_EXE64: &[u8] = include_bytes!("../../userland/winsync.exe64");
+#[cfg(target_arch = "x86_64")]
+static WINPIPE_EXE64: &[u8] = include_bytes!("../../userland/winpipe.exe64");
 
 /// Kullanici programlarinin VFS uzerinden okudugu test dosyasi.
 static BOOT_MSG: &[u8] = b"/boot/msg.txt: VFS uzerinden okundu (RAMFS).\n";
@@ -289,6 +299,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/mapped", MAPPED_ELF),
     ("/bin/threads", THREADS_ELF),
     ("/bin/sync", SYNC_ELF),
+    ("/bin/blocking", BLOCKING_ELF),
     ("/bin/winclock.exe", WINCLOCK_EXE),
     ("/bin/winpad.exe", WINPAD_EXE),
     ("/bin/winfiles.exe", WINFILES_EXE),
@@ -300,6 +311,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/winmap.exe", WINMAP_EXE),
     ("/bin/winthread.exe", WINTHREAD_EXE),
     ("/bin/winsync.exe", WINSYNC_EXE),
+    ("/bin/winpipe.exe", WINPIPE_EXE),
     ("/boot/msg.txt", BOOT_MSG),
 ];
 
@@ -333,6 +345,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/mapped", MAPPED64),
     ("/bin/threads", THREADS64),
     ("/bin/sync", SYNC64),
+    ("/bin/blocking", BLOCKING64),
     ("/bin/winclock.exe", WINCLOCK_EXE64),
     ("/bin/winpad.exe", WINPAD_EXE64),
     ("/bin/winfiles.exe", WINFILES_EXE64),
@@ -344,6 +357,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/winmap.exe", WINMAP_EXE64),
     ("/bin/winthread.exe", WINTHREAD_EXE64),
     ("/bin/winsync.exe", WINSYNC_EXE64),
+    ("/bin/winpipe.exe", WINPIPE_EXE64),
     ("/boot/msg.txt", BOOT_MSG),
 ];
 

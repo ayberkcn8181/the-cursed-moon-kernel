@@ -45,6 +45,10 @@ name = "sync"
 path = "src/bin/sync.rs"
 
 [[bin]]
+name = "blocking"
+path = "src/bin/blocking.rs"
+
+[[bin]]
 name = "winprobe"
 path = "src/win/probe.rs"
 
@@ -71,6 +75,10 @@ path = "src/win/thread.rs"
 [[bin]]
 name = "winsync"
 path = "src/win/sync.rs"
+
+[[bin]]
+name = "winpipe"
+path = "src/win/pipe.rs"
 
 [profile.dev]
 panic = "abort"
