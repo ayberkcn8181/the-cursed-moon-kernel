@@ -138,6 +138,9 @@ static SYNC_ELF: &[u8] = include_bytes!("../../userland/sync.elf");
 /// Bloke eden boru okumasi ve O_NONBLOCK.
 #[cfg(target_arch = "x86")]
 static BLOCKING_ELF: &[u8] = include_bytes!("../../userland/blocking.elf");
+/// EINTR ve SA_RESTART: sinyal bekleyen cagriyi boler mi?
+#[cfg(target_arch = "x86")]
+static INTR_ELF: &[u8] = include_bytes!("../../userland/intr.elf");
 /// FindFirstFileA gosterimi -- ayni dizinler, Win32 yuzu.
 #[cfg(target_arch = "x86")]
 static WINFILES_EXE: &[u8] = include_bytes!("../../userland/winfiles.exe");
@@ -233,6 +236,8 @@ static THREADS64: &[u8] = include_bytes!("../../userland/threads.elf64");
 static SYNC64: &[u8] = include_bytes!("../../userland/sync.elf64");
 #[cfg(target_arch = "x86_64")]
 static BLOCKING64: &[u8] = include_bytes!("../../userland/blocking.elf64");
+#[cfg(target_arch = "x86_64")]
+static INTR64: &[u8] = include_bytes!("../../userland/intr.elf64");
 
 /// **Windows (PE32+) uygulamalari** -- i386'dakilerle ayni kaynak, ayni
 /// ithal kutuphaneleri; degisen yalnizca hedef. Taban 0x140000000
@@ -300,6 +305,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/threads", THREADS_ELF),
     ("/bin/sync", SYNC_ELF),
     ("/bin/blocking", BLOCKING_ELF),
+    ("/bin/intr", INTR_ELF),
     ("/bin/winclock.exe", WINCLOCK_EXE),
     ("/bin/winpad.exe", WINPAD_EXE),
     ("/bin/winfiles.exe", WINFILES_EXE),
@@ -346,6 +352,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/threads", THREADS64),
     ("/bin/sync", SYNC64),
     ("/bin/blocking", BLOCKING64),
+    ("/bin/intr", INTR64),
     ("/bin/winclock.exe", WINCLOCK_EXE64),
     ("/bin/winpad.exe", WINPAD_EXE64),
     ("/bin/winfiles.exe", WINFILES_EXE64),

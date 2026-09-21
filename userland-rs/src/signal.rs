@@ -94,6 +94,23 @@ pub const SA_NODEFER: u32 = 0x4000_0000;
 /// haline getirdi.
 pub const SA_RESETHAND: u32 = 0x8000_0000;
 
+/// Bolunen bir sistem cagrisi, isleyici dondukten sonra **yeniden
+/// calistirilir**.
+///
+/// Bloke eden bir cagri (bos borudan `read` gibi) sirasinda sinyal
+/// gelirse iki secenek var:
+///
+/// ```text
+///   SA_RESTART yok -> cagri -EINTR ile doner, program kendisi dener
+///   SA_RESTART var -> cekirdek cagriyi kendisi yeniden baslatir
+/// ```
+///
+/// Ikincisi `EINTR`i **gorunmez** kilar. Eski `signal(2)` yuzu bayragi
+/// kendiliginden koyar (bkz. `install`); ham `sigaction` koymaz -- ve
+/// bu fark, `EINTR` denetlemeyi unutan kodun neden bazen calisip bazen
+/// bozuldugunun tarihsel sebebi.
+pub const SA_RESTART: u32 = 0x1000_0000;
+
 /// `sigaction`in cekirdege verdigi yapi -- dort kelime.
 ///
 /// Gercek `struct sigaction`in sadelestirilmisi: `sa_handler`,
@@ -138,12 +155,22 @@ pub fn action(signo: u32, handler: extern "C" fn(u32), flags: u32, mask: u32) ->
 /// Bir sinyal icin isleyici kurar; onceki isleyiciyi doner.
 ///
 /// `SIGKILL` icin basarisizdir (negatif doner) -- yakalanamaz.
+///
+/// Bayrak **konmaz**: bolunen cagrilar `-EINTR` doner. `SA_RESTART`
+/// isteyen `install_with` kullanmali -- ayrim bilincli, cunku ikisi
+/// gercekten farkli davraniyor ve hangisinin istendigi cagiranin
+/// bilmesi gereken bir sey.
 pub fn install(signo: u32, handler: extern "C" fn(u32)) -> isize {
+    install_with(signo, handler, 0)
+}
+
+/// Isleyiciyi **bayraklarla** kurar (`SA_RESTART`, `SA_NODEFER`, ...).
+pub fn install_with(signo: u32, handler: extern "C" fn(u32), flags: u32) -> isize {
     let mut previous = 0usize;
     let act = SigAction {
         handler: handler as usize,
         restorer: __tcmk_sigreturn as *const () as usize,
-        flags: 0,
+        flags,
         mask: 0,
     };
     let result = sigaction_raw(signo, &act, &mut previous);

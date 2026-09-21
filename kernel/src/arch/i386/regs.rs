@@ -291,4 +291,27 @@ impl SyscallFrame {
     pub unsafe fn set_user_context_via(&mut self, _from_interrupt: bool, ctx: &UserContext) {
         self.set_user_context(ctx)
     }
+
+    /// Cagriyi **yeniden calistirilmak uzere** geri sarar (`SA_RESTART`).
+    ///
+    /// Iki sey geri aliniyor: komut isaretcisi iki bayt (`int 0x80`,
+    /// `int 0x2E` ve `syscall` -- ucu de iki bayt) ve cagri numarasi.
+    /// Numara sart, cunku donus degeri onun ustune yaziliyor.
+    ///
+    /// Sonrasinda `deliver_pending` bu cerceveyi kaydedip isleyiciye
+    /// atliyor; `sigreturn` onu geri yukleyince cagri kendiliginden
+    /// yeniden calisiyor. Argumanlar dokunulmadigi icin ayrica geri
+    /// yuklenmesi gerekmiyor.
+    ///
+    /// # Safety
+    /// `user_context_via` ile ayni kosul: cerceve Ring 3'ten gelmeli.
+    pub unsafe fn rewind_for_restart(&mut self, number: usize, from_interrupt: bool) {
+        let mut ctx = self.user_context_via(from_interrupt);
+        ctx.eip = ctx.eip.wrapping_sub(SYSCALL_INSTRUCTION_BYTES);
+        ctx.eax = number as u32;
+        self.set_user_context_via(from_interrupt, &ctx);
+    }
 }
+
+/// `int 0x80` ve `int 0x2E` iki bayttir (0xCD 0xNN).
+const SYSCALL_INSTRUCTION_BYTES: u32 = 2;

@@ -34,6 +34,12 @@ pub enum KernelError {
     /// durum `NotFound` olarak bildiriliyordu ve gezgin "bulunamadi"
     /// diyordu -- ekranda duran bir dosya icin yaniltici bir cevap.
     ReadOnly,
+    /// Bekleyen cagri bir **sinyalle bolundu** -- POSIX `EINTR`.
+    ///
+    /// Win32'de karsiligi **yok**: orada sinyal diye bir sey olmadigi
+    /// icin `ReadFile` boyle bolunmez. Ayrim gercek ve README'de
+    /// olculuyor.
+    Interrupted,
     /// Okuyan ucu kapali bir boruya yazmak -- POSIX `EPIPE` (+ `SIGPIPE`)
     /// / Win32 `ERROR_BROKEN_PIPE`.
     ///
@@ -559,12 +565,22 @@ fn write_pipe_blocking(
             return Ok(0);
         }
 
+        if crate::level0b1::signal::interrupts_call(scheduler::current_id()) {
+            return Err(KernelError::Interrupted);
+        }
+
         scheduler::wait_on_kernel_key(pipe::write_key(pipe_index), None, || {
             // Kesmeler kapaliyken son bakis: yer aciildi mi, ya da
             // okuyan kalmadi mi? Ikincisi de uyanma sebebi -- yoksa
             // asla bosalmayacak bir tamponu beklerdik.
             !pipe::has_room(pipe_index) && pipe::readers(pipe_index) > 0
         });
+
+        if crate::level0b1::signal::interrupts_call(scheduler::current_id())
+            && !pipe::has_room(pipe_index)
+        {
+            return Err(KernelError::Interrupted);
+        }
     }
 }
 
@@ -612,6 +628,14 @@ fn read_pipe_blocking(
             return Ok(0);
         }
 
+        // Uyumadan **once** bekleyen bir sinyal var mi? Varsa hic
+        // uyumamali: POSIX'te sinyal bekleyen cagriyi boler ve burada
+        // uyusaydik, uyandiracak baska bir olay gelene kadar (belki hic)
+        // beklerdik.
+        if crate::level0b1::signal::interrupts_call(scheduler::current_id()) {
+            return Err(KernelError::Interrupted);
+        }
+
         scheduler::wait_on_kernel_key(pipe::read_key(pipe_index), None, || {
             // Kesmeler kapaliyken son bir kez bak: bu sinama ile uyumaya
             // gecis arasinda bosluk kalmamali, yoksa araya giren bir
@@ -621,6 +645,15 @@ fn read_pipe_blocking(
                 None => false,
             }
         });
+
+        // Uyandik. Sebep veri de olabilir, sinyal de -- `wake_signal_waiter`
+        // adres beklemesini de kaldiriyor. Once veriye bakiyoruz (dongu
+        // basi), ama veri yoksa ve sinyal varsa bolunmeliyiz.
+        if crate::level0b1::signal::interrupts_call(scheduler::current_id())
+            && pipe::info(pipe_index).map(|(p, _, _)| p == 0).unwrap_or(true)
+        {
+            return Err(KernelError::Interrupted);
+        }
     }
 }
 

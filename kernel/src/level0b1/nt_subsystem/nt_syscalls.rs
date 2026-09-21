@@ -177,6 +177,7 @@ const STATUS_MEDIA_WRITE_PROTECTED: u32 = 0xC000_00A2;
 const STATUS_PIPE_EMPTY: u32 = 0xC000_00D9;
 /// Okuyan ucu kapali boru -- NT'nin kendi kodu.
 const STATUS_PIPE_BROKEN: u32 = 0xC000_014B;
+const STATUS_CANCELLED: u32 = 0xC000_0120;
 
 const PATH_MAX: usize = 128;
 
@@ -259,6 +260,9 @@ const ERROR_NO_DATA: u32 = 232;
 /// Yazan ucu kapali bir borudan okumak. POSIX ayni durumda `read`i
 /// sifirla dondurur ve bunu **hata saymaz**; Windows sayar.
 const ERROR_BROKEN_PIPE: u32 = 109;
+/// Win32'de sinyal yok; bu kod yalnizca POSIX isleyicisi kurmus bir PE
+/// surecinin bolunmesi halinde gorunur.
+const ERROR_OPERATION_ABORTED: u32 = 995;
 /// `WaitOnAddress` sure dolunca bunu birakir. POSIX ikizi `-ETIMEDOUT`
 /// **doner**; Win32 ise `FALSE` donup kodu `GetLastError`a birakir --
 /// ayni bilginin iki tasima yolu.
@@ -365,6 +369,10 @@ fn win32_error_of(err: KernelError) -> u32 {
         // Windows'ta bu **yalnizca** bir hata kodu: sinyal yok, surec
         // yasamaya devam eder. POSIX ikizi `EPIPE` + `SIGPIPE`.
         KernelError::BrokenPipe => ERROR_BROKEN_PIPE,
+        // Win32'de sinyal yok, yani bu durumun gercek bir karsiligi da
+        // yok. Bir PE sureci POSIX cagrisiyla isleyici kurmussa buraya
+        // dusebilir; en yakin kod "islem iptal edildi".
+        KernelError::Interrupted => ERROR_OPERATION_ABORTED,
     }
 }
 
@@ -385,6 +393,7 @@ fn ntstatus_of(err: KernelError) -> u32 {
         KernelError::ReadOnly => STATUS_MEDIA_WRITE_PROTECTED,
         KernelError::WouldBlock => STATUS_PIPE_EMPTY,
         KernelError::BrokenPipe => STATUS_PIPE_BROKEN,
+        KernelError::Interrupted => STATUS_CANCELLED,
     }
 }
 

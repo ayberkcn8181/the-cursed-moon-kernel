@@ -139,6 +139,7 @@ static KNOWN_APPS: &[(&str, &str, &str)] = &[
     ("threads", "/bin/threads", "threads"),
     ("sync", "/bin/sync", "sync"),
     ("blocking", "/bin/blocking", "blocking"),
+    ("intr", "/bin/intr", "intr"),
     // Windows ikilisi: yol .exe ile biter, cekirdek bicimi magic'ten
     // anlar (bkz. vfs::format) ve PE yukleyicisine yonlendirir. Yol iki
     // mimaride de aynidir; VFS'te duran ikilinin PE32 mi PE32+ mi oldugu

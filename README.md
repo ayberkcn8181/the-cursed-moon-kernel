@@ -26,11 +26,11 @@ masaustu sunuyor.
 |---|---|
 | Mimariler | i386 (Multiboot1, `int 0x80`) · x86_64 (Multiboot2, `syscall`) |
 | Ikili bicimleri | ELF32/ELF64 · PE32/PE32+ (ithal tablosu cozulur) |
-| POSIX cagrilari | 68 (+ ELF yardimci vektoru, dosya destekli `mmap`, `clone`, `futex`, `SIGPIPE`) |
+| POSIX cagrilari | 68 (+ ELF yardimci vektoru, dosya destekli `mmap`, `clone`, `futex`, `SIGPIPE`, `EINTR`/`SA_RESTART`) |
 | NT/Win32 cagrilari | 78 (`KERNEL32.dll` 56 ihracat + `TCMKGUI.dll`) |
-| Ring 3 uygulamalari | 30 ELF + 12 PE |
+| Ring 3 uygulamalari | 31 ELF + 12 PE |
 | Kalici depolama | ATA PIO + MBR + TCMKFS (yazilabilir, i386) |
-| Kod | ~30 bin satir cekirdek + ~15 bin satir userland |
+| Kod | ~30 bin satir cekirdek + ~16 bin satir userland |
 
 Uyumluluk yuzeyi su alanlarda **iki ABI'de birden** kurulu: dosya
 sistemi (acma/okuma/yazma/kesme/gezinme/yeniden adlandirma), surec
@@ -42,9 +42,11 @@ tabani (POSIX TLS / Windows TEB), **surec yaratma**
 (`clone` -- `CreateThread`), **akislarin senkronizasyonu**
 (`futex` -- `WaitOnAddress`) ve **bloke eden borular**
 (`read`/`write`/`O_NONBLOCK` -- `ReadFile`/`WriteFile`/`PIPE_NOWAIT`).
+Sinyalin bekleyen bir cagriyi bolmesi (`EINTR`/`SA_RESTART`) yalnizca
+POSIX tarafinda var -- Win32'de karsiligi yok ve bu ayrim olculuyor.
 
 Her yetenek QEMU'da **olculerek** dogrulanmistir: `probe` (16 sinav),
-`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `bequest`
+`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `bequest`
 (6), `nested` (4), `winenv` (4) gibi programlar sonucu hem ekrana hem
 seri gunluge yaziyor. Olcumler yol boyunca gercek hatalar buldu -- dolan
 VFS tablosu, `CreateFileA`'nin cevrilmeyen Windows yollari, `GDT`
@@ -1984,12 +1986,16 @@ degistikten sonra ayni sekilde calisiyor (regresyon kosusu).
 
 ### Bilerek yapilmayanlar
 
-* **`SA_RESTART` ve `SA_SIGINFO` yok** ve **kabul de edilmiyor**:
-  taninmayan bayraklar `set_handler`da atiliyor. Saklamak, karsiligi
-  olmayan bir bayragin calistigi izlenimini verirdi. `SA_RESTART`in
-  anlamli olmasi icin once kesilebilir bir bloklayan cagri gerekir;
-  `pause`/`sigsuspend` POSIX'te zaten hicbir kosulda yeniden
-  baslatilmaz.
+* ~~**`SA_RESTART` yok.**~~ Bu not su gerekceyle yazilmisti:
+  *"`SA_RESTART`in anlamli olmasi icin once kesilebilir bir bloklayan
+  cagri gerekir."* O cagrilar geldi (bloke eden borular), ve hemen
+  ardindan `SA_RESTART` da geldi -- bkz. [Sinyal bekleyen bir cagriyi
+  boler mi?](#sinyal-bekleyen-bir-cagriyi-boler-mi). Gerekce dogruydu;
+  sirasi da oyle.
+* **`SA_SIGINFO` yok** ve **kabul de edilmiyor**: taninmayan bayraklar
+  `set_handler`da atiliyor. Saklamak, karsiligi olmayan bir bayragin
+  calistigi izlenimini verirdi. `pause`/`sigsuspend` ise POSIX'te
+  zaten hicbir kosulda yeniden baslatilmaz.
 * **Dort katman siniri.** Gercek programlarda ikiden derin ic ice
   sinyal patolojiktir; sinira dayanildiginda teslim ertelenir.
 
@@ -5083,6 +5089,137 @@ degil, **iki goreve** aitmis.
   ileti kipi (`PIPE_TYPE_MESSAGE`) yok; `PeekNamedPipe`in
   `lpBytesLeftThisMessage` cikisi bu yuzden her zaman sifir.
 
+## Sinyal bekleyen bir cagriyi boler mi?
+
+Bu soru ancak bir onceki batidan **sonra** anlamli oldu: bloke eden
+cagrilar gelene kadar bolunecek bir sey yoktu. Artik bos bir borudan
+okumak bekliyor, ve o bekleyisin ortasinda sinyal gelirse ne olacagi
+POSIX'in en ince -- ve en cok hataya yol acan -- ayrintisi.
+
+```
+[intr] A EINTR:             gecti (bekleyen okuma bolundu, -EINTR dondu)
+[intr] B isleyici calisti:  gecti (bolen sinyal gercekten teslim edildi)
+[intr] C veri tukenmedi:    gecti (bolunen okuma veriyi yemedi)
+[intr] D SA_RESTART:        gecti (sinyal geldi, cagri yeniden basladi, veri geldi)
+[intr] E yok sayilan bolmez:gecti (sinyale ragmen veri gelene kadar beklendi)
+[intr] F yazma da boluner:  gecti (bekleyen yazma bolundu, -EINTR dondu)
+```
+
+![intr](docs/screenshot-intr.png)
+
+### `EINTR`: POSIX'in meshur puruzu
+
+```text
+  read(bos_boru)          <- bekliyor
+    ...sinyal gelir...
+  isleyici calisir
+  read -> -EINTR          <- veri gelmedi, cagri YARIDA kesildi
+```
+
+`EINTR` denetlemeyi unutmak UNIX tarihinin en yaygin hatalarindan biri:
+program normalde calisir, ama bir sinyal geldigi anda sessizce yanlis
+dallanir. Sinav C bu yuzden ayri duruyor -- bolunen okumanin veriyi
+**tuketmedigini** gostermek sart, yoksa `EINTR` sessiz veri kaybi
+olurdu.
+
+### `SA_RESTART`: puruzu gorunmez kilmak
+
+Isleyici `SA_RESTART` ile kurulursa cekirdek cagriyi **kendisi**
+yeniden baslatiyor ve cagiran hicbir sey fark etmiyor.
+
+Uygulamasi, bu batinin en zarif parcasi: cekirdek cerceveyi **geri
+sariyor**.
+
+```rust
+pub unsafe fn rewind_for_restart(&mut self, number: usize, from_interrupt: bool) {
+    let mut ctx = self.user_context_via(from_interrupt);
+    ctx.eip = ctx.eip.wrapping_sub(SYSCALL_INSTRUCTION_BYTES);
+    ctx.eax = number as u32;
+    self.set_user_context_via(from_interrupt, &ctx);
+}
+```
+
+Iki sey geri aliniyor: komut isaretcisi iki bayt ve cagri numarasi.
+Numara sart, cunku donus degeri onun ustune yaziliyor. Sonra
+`deliver_pending` bu cerceveyi kaydedip isleyiciye atliyor; `sigreturn`
+onu yukleyince cagri **kendiliginden** yeniden calisiyor. Argumanlar
+hic dokunulmadigi icin ayrica geri yuklenmiyor.
+
+Sira burada her seyi belirliyor: geri sarma `deliver_pending`den
+**once** olmali. Cekirdek icinde donguye girip yeniden denemek yanlis
+olurdu -- isleyici henuz calismamis olurdu.
+
+Iki bayt sayisi tesadufen uc kapida da ayni: `int 0x80` (0xCD 0x80),
+`int 0x2E` (0xCD 0x2E) ve `syscall` (0x0F 0x05). Tek sabitle iki
+mimari.
+
+Tarihsel not: eski `signal(2)` yuzu bayragi kendiliginden koyar, ham
+`sigaction` koymaz. Ayni programin farkli libc'lerde farkli
+davranmasinin sebebi tam olarak buydu. TCMK'nin userland'inde de ayrim
+korundu -- `install` bayraksiz, `install_with` istege bagli.
+
+### Yok sayilan sinyal bolmez
+
+`SIG_IGN` olan bir sinyal hicbir sey yapmiyor demektir; bekleyen bir
+okumayi kaldirmasinin sebebi yok. Cekirdek bu yuzden `deliverable`
+degil ayri bir sorgu kullaniyor:
+
+```rust
+pub fn interrupts_call(task: usize) -> bool { ... handler != SIG_IGN ... }
+```
+
+Ayrimi yapmasaydik, yok sayilan bir sinyal bekleyen programi bosuna
+`EINTR` ile uyandirirdi.
+
+### Win32'de bunun karsiligi yok
+
+Sinyal diye bir sey olmadigi icin `ReadFile` boyle bolunmez. En yakin
+kavram **alertable bekleme** (`ReadFileEx`, `SleepEx` ile APC teslimi)
+ve o da acikca istenmeli. Yani POSIX'te bolunme **varsayilan**,
+Win32'de **opt-in** -- ve TCMK'de Win32 tarafinda alertable bekleme
+yok, dolayisiyla bolunme de yok.
+
+### Olcumun buldugu hata: sinav yanlis sebeple geciyordu
+
+E sinavi ilk halinde `SIG_IGN` ayrimi **kaldirilmis** bir cekirdekte
+bile geciyordu -- yani olctugunu sandigi seyi olcmuyordu.
+
+Sebep sinavin kendisindeydi. D sinavinin kardes akisi hala kosarken E
+kendi borusunu aciyor; D'nin tanimlayicilari kapandigi icin numaralar
+**geri donusturuluyor** ve kardes E'nin borusuna yaziyordu. E "veri
+geldi" diye geciyordu, ama veriyi yazan yanlis kardesti.
+
+Iki duzeltme gerekti:
+
+* Her sinav kardesini `clone_joinable` + `join_thread` ile **bitmesini
+  bekleyerek** birakiyor. Zamanlamaya degil, bitise bagli.
+* E'ye bir **sure sarti** eklendi: kardes sinyali 120 ms'de, veriyi
+  240 ms'de gonderiyor; okuma sinyalde bolunseydi erken donerdi. "Veri
+  geldi" tek basina yetmiyor -- **ne zaman** geldigi de olculmeli.
+
+Duzeltmeden sonra ayni hatali cekirdek E'yi dogru teshisle dusuruyor:
+`SIG_IGN olan sinyal cagriyi BOLDU`. Bir sinavin gecmesi, olctugunu
+sandigi seyi olctugu anlamina gelmiyor -- ve bunu anlamanin tek yolu
+onu **hatali surumde** kosturmak.
+
+### Bilerek yapilmayanlar
+
+* **Yalnizca boru okuma/yazmasi bolunuyor.** `waitpid`, `poll` ve
+  `WaitForSingleObject` sinyalle bolunmez; gercek POSIX'te ucu de
+  `EINTR` dondurebilir.
+* **`SA_RESTART` yalnizca `read`/`write` icin.** Gercek Linux'ta hangi
+  cagrinin yeniden baslatilabilecegi cagri basina tanimlidir
+  (`ERESTARTSYS` / `ERESTARTNOHAND` / `ERESTART_RESTARTBLOCK`) ve
+  ornegin `nanosleep` kalan sureyle yeniden baslar. Burada oyle bir
+  siniflandirma yok.
+* **Bolen sinyal secimi en dusuk numara.** Birden fazla sinyal
+  bekliyorsa `SA_RESTART` karari ilk teslim edilecek olana gore
+  veriliyor; gercek Linux da ayni siradan teslim ediyor, ama kararin
+  inceliklerine girmiyoruz.
+* **Varsayilani "oldur" olan sinyal yeniden baslatmaz.** Mantikli
+  (geri donulmeyecek), ama gercek Linux'ta karar teslim aninda
+  veriliyor, burada onceden.
+
 ## Alfa'nin bilinen sinirlari
 
 Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
@@ -5117,10 +5254,9 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
   saf hesap dongusu sinyali gormez (`spin` boyle); `SIGKILL` ise
   isbirligi gerektirmedigi icin her zaman calisir. Ayrica maskeleme
   `siginfo`/`sigaction` bayraklari ve
-  gercek-zamanli sinyaller yok; isleyici icinde ikinci bir sinyal teslim
-  edilmez (ic ice cagri yok). Maskeleme (`sigprocmask`) ve `alarm` var
-  (yukari bkz.), ama `sigaction` bayraklari (`SA_RESTART`, `SA_SIGINFO`)
-  ve `sigsuspend`/`sigwait` yok.
+  gercek-zamanli sinyaller yok. Maskeleme (`sigprocmask`), `alarm` ve
+  `sigsuspend` var; `SA_RESTART` bu batiyla geldi (yukari bkz.).
+  `SA_SIGINFO` ve `sigwait` yok.
 - **Surec gruplari yok.** `waitpid` belirli bir cocugu ve `-1`
   ("herhangi bir cocuk") bicimlerini destekler, ama `pid < -1` (surec
   grubu) ve `WUNTRACED`/`WCONTINUED` yok. Is-parcacigi grubu (`tgid`)

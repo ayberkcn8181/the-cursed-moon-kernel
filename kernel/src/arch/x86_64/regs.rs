@@ -378,4 +378,28 @@ impl SyscallFrame {
         iret.add(2).write(ctx.rflags);
         iret.add(3).write(ctx.rsp);
     }
+
+    /// Cagriyi **yeniden calistirilmak uzere** geri sarar (`SA_RESTART`).
+    ///
+    /// Iki sey geri aliniyor: komut isaretcisi iki bayt (`int 0x80`,
+    /// `int 0x2E` ve `syscall` -- ucu de iki bayt) ve cagri numarasi.
+    /// Numara sart, cunku donus degeri onun ustune yaziliyor.
+    ///
+    /// Sonrasinda `deliver_pending` bu cerceveyi kaydedip isleyiciye
+    /// atliyor; `sigreturn` onu geri yukleyince cagri kendiliginden
+    /// yeniden calisiyor. Argumanlar dokunulmadigi icin ayrica geri
+    /// yuklenmesi gerekmiyor.
+    ///
+    /// # Safety
+    /// `user_context_via` ile ayni kosul: cerceve Ring 3'ten gelmeli.
+    pub unsafe fn rewind_for_restart(&mut self, number: usize, from_interrupt: bool) {
+        let mut ctx = self.user_context_via(from_interrupt);
+        ctx.rip = ctx.rip.wrapping_sub(SYSCALL_INSTRUCTION_BYTES);
+        ctx.rax = number as u64;
+        self.set_user_context_via(from_interrupt, &ctx);
+    }
 }
+
+/// `syscall` (0x0F 0x05) ve `int 0x80`/`int 0x2E` (0xCD 0xNN) -- ucu de
+/// iki bayt. Geri sarma bu yuzden tek bir sabitle yapilabiliyor.
+const SYSCALL_INSTRUCTION_BYTES: u64 = 2;

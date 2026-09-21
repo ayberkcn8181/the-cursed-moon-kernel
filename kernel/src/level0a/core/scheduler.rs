@@ -1016,8 +1016,20 @@ pub fn wake_signal_waiter(task: usize) {
     }
     unsafe {
         let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
-        if (*tasks.add(task)).state == TaskState::SigWait {
-            (*tasks.add(task)).state = TaskState::Ready;
+        match (*tasks.add(task)).state {
+            TaskState::SigWait => (*tasks.add(task)).state = TaskState::Ready,
+            // Bloke eden bir cagrida (bos borudan okuma gibi) bekleyen
+            // gorev de kalkmali: POSIX'te sinyal boyle bir cagriyi
+            // **boler** ve `EINTR` dondurur. Uyandirmasaydik, sinyal
+            // ancak cagri kendiliginden bitince gorulurdu -- yani belki
+            // hic.
+            TaskState::AddrWait => {
+                (*tasks.add(task)).state = TaskState::Ready;
+                (*tasks.add(task)).wait_addr = 0;
+                (*tasks.add(task)).wait_kernel = false;
+                (*tasks.add(task)).wait_timed = false;
+            }
+            _ => {}
         }
     }
 }

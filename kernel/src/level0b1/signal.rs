@@ -115,10 +115,34 @@ pub const SA_NODEFER: u32 = 0x4000_0000;
 /// haline getirdi.
 pub const SA_RESETHAND: u32 = 0x8000_0000;
 
+/// Bolunen bir sistem cagrisi, isleyici dondukten sonra **yeniden
+/// calistirilir**.
+///
+/// POSIX'in en ince ayrintilarindan biri. Bloke eden bir cagri (bos
+/// borudan `read` gibi) sirasinda sinyal gelirse iki secenek var:
+///
+/// ```text
+///   SA_RESTART yok -> cagri -EINTR ile doner, program kendisi yeniden dener
+///   SA_RESTART var -> cekirdek cagriyi kendisi yeniden baslatir
+/// ```
+///
+/// Ikincisi `EINTR`i **gorunmez** kilar ve cogu program bunu ister --
+/// `EINTR` denetlemeyi unutan kod, sinyal geldiginde sessizce bozulur.
+/// Eski `signal(2)` yuzu bu yuzden bayragi kendiliginden koyar; ham
+/// `sigaction` koymaz.
+///
+/// Uygulamasi: cagri bolununce cerceve **geri sariliyor** -- komut
+/// isaretcisi iki bayt geri aliniyor (`int 0x80` da `syscall` da iki
+/// bayt) ve cagri numarasi geri yaziliyor. Sonra `deliver_pending` o
+/// cerceveyi kaydedip isleyiciye atliyor; `sigreturn` onu geri
+/// yukleyince cagri kendiliginden yeniden calisiyor. Gercek Linux'un
+/// `ERESTARTSYS` mekanizmasi da budur.
+pub const SA_RESTART: u32 = 0x1000_0000;
+
 /// Cekirdegin tanidigi bayraklar. Digerleri sessizce yok sayilir --
 /// `SA_RESTART` gibi, karsiligi olmayan bir bayragi kabul ediyormus gibi
 /// yapmak yaniltici olurdu (bkz. README).
-pub const SUPPORTED_FLAGS: u32 = SA_NODEFER | SA_RESETHAND;
+pub const SUPPORTED_FLAGS: u32 = SA_NODEFER | SA_RESETHAND | SA_RESTART;
 
 /// Surec basina yerlestirmeler. Gorev kimligiyle indekslenir; `fork`
 /// bunlari kopyalar (`clone_into`), `execve`/cikis sifirlar (`reset`).
@@ -301,8 +325,8 @@ pub fn set_handler(
             handler,
             restorer,
             // Taninmayan bayraklar **atilir**. Kabul ediyormus gibi
-            // saklamak, `SA_RESTART` gibi karsiligi olmayan bir bayragin
-            // calistigi izlenimini verirdi.
+            // saklamak, karsiligi olmayan bir bayragin calistigi
+            // izlenimini verirdi.
             flags: flags & SUPPORTED_FLAGS,
             // SIGKILL hicbir yolla engellenemez; `sa_mask` de bir yol.
             mask: mask & !UNBLOCKABLE,
@@ -379,6 +403,72 @@ pub fn deliverable(task: usize) -> bool {
         return false;
     }
     PENDING[task].load(Ordering::SeqCst) & !BLOCKED[task].load(Ordering::SeqCst) != 0
+}
+
+/// Bekleyen sinyal, bloke eden bir cagriyi **bolmeli** mi?
+///
+/// `deliverable`dan farki: yok sayilan (`SIG_IGN`) sinyaller cagriyi
+/// bolmez. POSIX'in kurali bu ve mantikli -- yok sayilan bir sinyal
+/// hicbir sey yapmiyor demektir, bekleyen bir okumayi kaldirmasinin
+/// sebebi yok. Ayrimi yapmasaydik, yok sayilan bir sinyal bekleyen
+/// programi bosuna `EINTR` ile uyandirirdi.
+pub fn interrupts_call(task: usize) -> bool {
+    if task >= scheduler::MAX_TASKS {
+        return false;
+    }
+    let mask = PENDING[task].load(Ordering::SeqCst) & !BLOCKED[task].load(Ordering::SeqCst);
+    if mask == 0 {
+        return false;
+    }
+    let width = MAX_SIGNAL as usize + 1;
+    unsafe {
+        let table = core::ptr::addr_of!(DISPOSITIONS) as *const Disposition;
+        for signo in 0..=MAX_SIGNAL {
+            if mask & (1 << signo) == 0 {
+                continue;
+            }
+            if table.add(task * width + signo as usize).read().handler != SIG_IGN {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Bolunen cagri, isleyici dondukten sonra yeniden calistirilmali mi?
+///
+/// Bolen sinyalin `SA_RESTART` bayragina bakar. Birden fazla sinyal
+/// bekliyorsa **ilk teslim edilecek** olan belirler -- `deliver_pending`
+/// de en dusuk numarayi once teslim ediyor, yani ikisi ayni sinyale
+/// bakiyor.
+pub fn restart_after_signal(task: usize) -> bool {
+    if task >= scheduler::MAX_TASKS {
+        return false;
+    }
+    let mask = PENDING[task].load(Ordering::SeqCst) & !BLOCKED[task].load(Ordering::SeqCst);
+    if mask == 0 {
+        return false;
+    }
+    let width = MAX_SIGNAL as usize + 1;
+    unsafe {
+        let table = core::ptr::addr_of!(DISPOSITIONS) as *const Disposition;
+        for signo in 0..=MAX_SIGNAL {
+            if mask & (1 << signo) == 0 {
+                continue;
+            }
+            let d = table.add(task * width + signo as usize).read();
+            if d.handler == SIG_IGN {
+                continue;
+            }
+            // Varsayilan davranis sureci oldurecek: yeniden baslatmanin
+            // anlami yok, zaten geri donulmeyecek.
+            if d.handler == SIG_DFL {
+                return false;
+            }
+            return d.flags & SA_RESTART != 0;
+        }
+    }
+    false
 }
 
 /// POSIX `pause`: teslim edilebilir bir sinyal gelene kadar uyur.

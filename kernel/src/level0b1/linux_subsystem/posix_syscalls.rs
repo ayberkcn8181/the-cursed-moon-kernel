@@ -450,6 +450,26 @@ impl PollEntry {
     };
 }
 
+/// Bolunen bir cagriyi yeniden baslatmak gerekiyor mu?
+///
+/// Gerekiyorsa cerceveyi geri sarar ve `true` doner; cagiran o zaman
+/// **donus degeri yazmadan** cikmali. Gerekmiyorsa `false` doner ve
+/// cagiran `-EINTR` yazar.
+///
+/// Sirasi onemli: geri sarma `deliver_pending`den **once** oluyor, yani
+/// isleyiciye atlamadan hemen once. Isleyici kaydedilen cerceveyi
+/// (geri sarilmis olani) gorur ve `sigreturn` onu yukleyince cagri
+/// kendiliginden yeniden calisir. Gercek Linux'un `ERESTARTSYS`
+/// mekanizmasinin aynisi.
+fn restart_or_eintr(frame: &mut SyscallFrame, number: u32, from_interrupt: bool) -> bool {
+    let task = crate::level0a::core::scheduler::current_id();
+    if !crate::level0b1::signal::restart_after_signal(task) {
+        return false;
+    }
+    unsafe { frame.rewind_for_restart(number as usize, from_interrupt) };
+    true
+}
+
 /// `fcntl` govdesi -- iki mimaride de ayni.
 fn fcntl(fd_num: usize, command: usize, argument: usize) -> i32 {
     use crate::level0a::core::fd;
@@ -498,6 +518,7 @@ fn errno_of(err: KernelError) -> i32 {
         // ikisini esitler. Bloke olmayan bos bir boru bunu dondurur.
         KernelError::WouldBlock => -EAGAIN,
         KernelError::BrokenPipe => -EPIPE,
+        KernelError::Interrupted => -EINTR,
     }
 }
 
@@ -559,11 +580,27 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
                 let _ = crate::level0b1::signal::raise(task, crate::level0b1::signal::SIGPIPE);
                 -EPIPE
             }
+            // Bekleyen yazma sinyalle bolundu.
+            Err(KernelError::Interrupted) => {
+                if restart_or_eintr(frame, SYS_WRITE, from_interrupt) {
+                    return;
+                }
+                -EINTR
+            }
             Err(e) => errno_of(e),
         },
 
         SYS_READ => match unsafe { kernel_api::read(arg1 as u32, arg2 as *mut u8, arg3) } {
             Ok(read) => read as i32,
+            // Bekleyen okuma sinyalle bolundu. `SA_RESTART` varsa cagiran
+            // bunu **hic gormez**: cerceve geri sarilir ve isleyici
+            // dondukten sonra `read` yeniden calisir.
+            Err(KernelError::Interrupted) => {
+                if restart_or_eintr(frame, SYS_READ, from_interrupt) {
+                    return;
+                }
+                -EINTR
+            }
             Err(e) => errno_of(e),
         },
 
