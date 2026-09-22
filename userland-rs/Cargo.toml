@@ -53,6 +53,10 @@ name = "intr"
 path = "src/bin/intr.rs"
 
 [[bin]]
+name = "death"
+path = "src/bin/death.rs"
+
+[[bin]]
 name = "winprobe"
 path = "src/win/probe.rs"
 
@@ -83,6 +87,10 @@ path = "src/win/sync.rs"
 [[bin]]
 name = "winpipe"
 path = "src/win/pipe.rs"
+
+[[bin]]
+name = "windeath"
+path = "src/win/death.rs"
 
 [profile.dev]
 panic = "abort"

@@ -1493,13 +1493,36 @@ pub fn waitpid(pid: usize, status: &mut u32, options: usize) -> isize {
 
 /// `WEXITSTATUS`: durum kelimesinden cikis kodunu cikarir.
 ///
-/// Gercek POSIX'te ayrica `WIFSIGNALED`/`WTERMSIG` vardir: sinyalle
-/// olen bir surec sinyal numarasini **dusuk** bitlere yazar ve cikis
-/// kodu alani bos kalir. TCMK bunun yerine kabuk gelenegi olan
-/// `128 + signo`yu cikis koduna koyuyor, yani sinyalle olen bir cocuk
-/// burada `141` (128+SIGPIPE) olarak gorunur. Ayrim README'de yazili.
+/// Yalnizca `exited` dogruyken anlamlidir. Durum kelimesi iki ayri
+/// soruyu ayni yerde cevaplar:
+///
+/// ```text
+///   normal cikis  -> (kod & 0xFF) << 8    exited(), exit_status()
+///   sinyalle olum ->  signo & 0x7F        signalled(), term_signal()
+/// ```
 pub fn exit_status(status: u32) -> u32 {
     (status >> 8) & 0xFF
+}
+
+/// `WIFEXITED`: cocuk **kendi istegiyle** mi cikti?
+pub fn exited(status: u32) -> bool {
+    status & 0x7F == 0
+}
+
+/// `WIFSIGNALED`: cocugu bir **sinyal** mi oldurdu?
+///
+/// Cokme de buraya girer: cekirdek sayfa hatasini `SIGSEGV`e ceviriyor
+/// (bkz. `exceptions::signal_of_vector`). Yani "cocuk coktu mu" sorusu
+/// POSIX'te ayri bir kavram degil -- sinyalle olumun bir turu.
+pub fn signalled(status: u32) -> bool {
+    status & 0x7F != 0
+}
+
+/// `WTERMSIG`: cocugu olduren sinyal.
+///
+/// Yalnizca `signalled` dogruyken anlamlidir.
+pub fn term_signal(status: u32) -> u32 {
+    status & 0x7F
 }
 
 /// Yeni bir boru acar; `(okuma_fd, yazma_fd)` dondurur.

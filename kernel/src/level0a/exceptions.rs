@@ -153,6 +153,31 @@ pub unsafe fn dispatch(frame: &mut crate::arch::cpu::regs::ExceptionFrame, fault
     report_and_die(vector, error_code, frame.instruction_pointer(), frame.from_user(), fault_addr)
 }
 
+/// CPU istisnasini POSIX sinyaline cevirir.
+///
+/// Gercek UNIX'in eslemesi: donanim hatasinin **turu** sinyalin
+/// kimligini belirliyor. Ayrim onemli, cunku bir programin sifira
+/// bolmeye verecegi tepki ile gecersiz bellege erismeye verecegi tepki
+/// farkli olabilir.
+///
+/// Win32 yuzu bunu ayrica NTSTATUS'a ceviriyor (bkz.
+/// `nt_syscalls::ntstatus_of_signal`); orada esleme bire bir degil --
+/// `SIGFPE` hem sifira bolmeyi hem tasmayi kapsiyor.
+fn signal_of_vector(vector: usize) -> u32 {
+    use crate::level0b1::signal;
+    match vector {
+        // #DE sifira bolme, #OF tasma, #MF/#XM kayan nokta.
+        0 | 4 | 16 | 19 => signal::SIGFPE,
+        // #UD gecersiz komut.
+        6 => signal::SIGILL,
+        // #BP kesme noktasi -- gercek UNIX'te SIGTRAP; TCMK'de ayri bir
+        // sinyal yok, en yakin anlam SIGILL.
+        3 => signal::SIGILL,
+        // #GP ve #PF: gecersiz bellek erisimi.
+        _ => signal::SIGSEGV,
+    }
+}
+
 /// Tum istisnalarin ortak, **donusu olmayan** govdesi.
 ///
 /// `from_user`: hata Ring 3'ten mi geldi (CS'in RPL'i 3 mu)?
@@ -216,6 +241,13 @@ pub fn report_and_die(vector: usize, error_code: usize, instruction_ptr: usize, 
         // Surec olduruluyor, sistem ayakta kaliyor. Bu, TCMK'nin
         // "yuksek hata toleransi" iddiasinin en somut noktasi.
         KILLED_PROCESSES.fetch_add(1, Ordering::Relaxed);
+
+        // **Nasil** oldugu kaydediliyor: ebeveyn `waitpid` ile bunu
+        // soracak. Kaydetmezsek cokme, sifir kodlu normal bir cikistan
+        // ayirt edilemezdi -- ve bir kabuk "basarili" derdi.
+        crate::level0a::core::scheduler::set_current_exit_signal(signal_of_vector(vector));
+        crate::level0a::core::scheduler::set_current_exit_code(0);
+
         crate::println!(
             "[LEVEL-0b2] Surec sonlandirildi; sistem calismaya devam ediyor."
         );

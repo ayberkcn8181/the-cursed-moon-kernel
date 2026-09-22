@@ -68,6 +68,12 @@ pub const NT_USER_CURSOR_POS: u32 = 0x2006;
 // parametre sayisi uc ile sinirli degildir, yani `CreateFileA`'nin yedi
 // parametresi ve `WriteConsoleA`'nin cikti parametresi desteklenebilir.
 pub const NT_EXIT_PROCESS_W32: u32 = 0x3000;
+/// `TerminateProcess`in Win32 yuzu -- **yigin** argumanli.
+///
+/// `NtTerminateProcess` (0x1000 araligi) registerdan okur; thunk ise
+/// argumanlari yigina koyar. Ayni numaraya bindirmek, `ExitProcess`
+/// icin bir kez yapilmis ve dll.rs'te uyari olarak yazilmis bir hata.
+pub const NT_TERMINATE_PROCESS_W32: u32 = 0x3040;
 pub const NT_SLEEP_MS: u32 = 0x3001;
 pub const NT_GET_TICK_COUNT: u32 = 0x3002;
 pub const NT_WIN32_CLOSE_HANDLE: u32 = 0x3003;
@@ -309,6 +315,45 @@ pub fn clear_last_error(task: usize) {
 /// `PIPE_NOWAIT` -- Win32'nin "bloke olma" kipi.
 const PIPE_NOWAIT: u32 = 0x0000_0001;
 
+/// Bir gorevin olumunu **Win32'nin** cikis kodu bicimine cevirir.
+///
+/// Iki ABI'nin ayrisma noktasi burasi ve ikisi de kendi icinde tutarli:
+///
+/// ```text
+///   POSIX  durum kelimesi iki alana bolunur:
+///            WIFEXITED  -> cikis kodu
+///            WIFSIGNALED -> olduren sinyal
+///
+///   Win32  tek bir DWORD:
+///            normal cikis -> cagiranin verdigi kod
+///            cokme        -> NTSTATUS (0xC0000005 gibi)
+/// ```
+///
+/// Windows "nasil oldu" sorusunu ayri bir alanla degil, cikis kodunun
+/// **degerini** sececek bir kurala baglamis: NTSTATUS araligi
+/// (0xC0000000+) cokme demek. Yer tasarrufu degil, tarih -- NT'de her
+/// sey zaten NTSTATUS konusuyor.
+///
+/// Esleme kayipli: `SIGFPE` hem sifira bolmeyi hem tasmayi kapsiyor,
+/// Windows'ta ikisi ayri koddur. Sinyal POSIX'in dogal temsili oldugu
+/// icin cekirdek onu sakliyor; buradaki cevrim en yakin NTSTATUS'u
+/// veriyor ve kaybi README'de yazili.
+fn win32_exit_code(code: u32, signal: u32) -> u32 {
+    use crate::level0b1::signal as sig;
+    if signal == 0 {
+        return code;
+    }
+    match signal {
+        sig::SIGSEGV => 0xC000_0005, // STATUS_ACCESS_VIOLATION
+        sig::SIGILL => 0xC000_001D,  // STATUS_ILLEGAL_INSTRUCTION
+        sig::SIGFPE => 0xC000_0094,  // STATUS_INTEGER_DIVIDE_BY_ZERO
+        // Disaridan sonlandirma: Windows'ta `TerminateProcess`in
+        // birakacagi koda en yakin anlam.
+        sig::SIGKILL | sig::SIGTERM => 0xC000_013A, // STATUS_CONTROL_C_EXIT
+        _ => 0xC000_0005,
+    }
+}
+
 /// Bu tutamac, yazan ucu kapanmis bir boru mu?
 ///
 /// `ReadFile`in sifir donusunu hataya cevirmek icin gerekiyor; yalnizca
@@ -436,6 +481,12 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
     let status: u32 = match number {
         NT_TERMINATE_PROCESS => {
             // NtTerminateProcess(ProcessHandle, ExitStatus). Geri donmez.
+            //
+            // **Register** argumanli (0x1000 araligi): yigin blogu
+            // okunmaz. `TerminateProcess`in Win32 yuzu bu yuzden ayri
+            // bir serviste (`NT_TERMINATE_PROCESS_W32`) -- ikisini tek
+            // numaraya bindirmek, thunk'in yigina koydugu argumanlari
+            // hic okumayan bir isleyiciye dusmek olurdu.
             kernel_api::exit_current_task(arg2 as u32);
         }
 
@@ -605,6 +656,47 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
         // `ExitProcess` **butun grubu** sonlandirir: bir is parcacigi
         // bunu cagirdiginda kardesleri de durur. Windows'un sozlesmesi
         // de budur ve `ExitThread` ile arasindaki tek fark bu.
+        // TerminateProcess(hProcess, uExitCode)
+        //
+        // `ExitProcess` ile ayni is gibi gorunuyor ama farkli bir soru
+        // soruyor: "kendimi bitir" degil, "sunu bitir". Ayrimi tutamac
+        // yapiyor -- 0 ve `GetCurrentProcess()` sahte tutamaci (-1)
+        // "kendim" demek.
+        //
+        // POSIX'te tam karsiligi **yok**: `kill` yalnizca sinyali secer,
+        // cikis durumunu sinyalin kendisi belirler. Burada olduren taraf
+        // kodu da seciyor, yani `GetExitCodeProcess` ile gorunen deger
+        // olduruleni degil **oldureni** yansitiyor.
+        NT_TERMINATE_PROCESS_W32 => {
+            let handle = arg(args, 0).unwrap_or(0) as usize;
+            let code = arg(args, 1).unwrap_or(0);
+            let me = crate::level0a::core::scheduler::current_id();
+            let target = match handle.checked_sub(PROCESS_HANDLE_FLAG) {
+                Some(task) if task != me => Some(task),
+                _ => None,
+            };
+
+            match target {
+                None => {
+                    let group = crate::level0a::core::scheduler::group_of(me);
+                    crate::level0a::core::scheduler::terminate_group(group, me);
+                    kernel_api::exit_current_task(code);
+                }
+                Some(task) => {
+                    crate::level0a::core::scheduler::set_exit_code(task, code);
+                    crate::level0a::core::scheduler::set_exit_signal(task, 0);
+                    remember_exit(task, code);
+                    match crate::level0a::core::scheduler::terminate(task) {
+                        Ok(()) => WIN32_TRUE,
+                        Err(_) => {
+                            set_last_error(ERROR_INVALID_HANDLE);
+                            WIN32_FALSE
+                        }
+                    }
+                }
+            }
+        }
+
         NT_EXIT_PROCESS_W32 => {
             // ExitProcess(UINT uExitCode) -- geri donmez.
             //
@@ -1622,16 +1714,22 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
                         // Bitmis ama toplanmamissa kodu simdi saklayalim:
                         // sonraki `GetExitCodeProcess` icin tek sans bu.
                         if state == crate::level0a::core::scheduler::TaskState::Terminated {
-                            remember_exit(task, crate::level0a::core::scheduler::exit_code_of(task));
+                            remember_exit(
+                                task,
+                                win32_exit_code(
+                                    crate::level0a::core::scheduler::exit_code_of(task),
+                                    crate::level0a::core::scheduler::exit_signal_of(task),
+                                ),
+                            );
                         }
                         WAIT_OBJECT_0
                     } else if timeout == 0 {
                         WAIT_TIMEOUT
                     } else {
-                        if let Some(code) =
+                        if let Some((code, signal)) =
                             crate::level0a::core::scheduler::wait_for_task(task)
                         {
-                            remember_exit(task, code);
+                            remember_exit(task, win32_exit_code(code, signal));
                         }
                         WAIT_OBJECT_0
                     }
@@ -1659,7 +1757,14 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
                             if crate::level0a::core::scheduler::state_of(task)
                                 == crate::level0a::core::scheduler::TaskState::Terminated =>
                         {
-                            crate::level0a::core::scheduler::exit_code_of(task)
+                            // Coken bir surec burada **NTSTATUS** ile
+                            // gorunur: Windows "nasil oldu" bilgisini
+                            // ayri bir alanda degil, cikis kodunun
+                            // degerinde tasir.
+                            win32_exit_code(
+                                crate::level0a::core::scheduler::exit_code_of(task),
+                                crate::level0a::core::scheduler::exit_signal_of(task),
+                            )
                         }
                         None => STILL_ACTIVE,
                     };
@@ -1932,7 +2037,14 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
                             if crate::level0a::core::scheduler::state_of(task)
                                 == crate::level0a::core::scheduler::TaskState::Terminated =>
                         {
-                            crate::level0a::core::scheduler::exit_code_of(task)
+                            // Coken bir surec burada **NTSTATUS** ile
+                            // gorunur: Windows "nasil oldu" bilgisini
+                            // ayri bir alanda degil, cikis kodunun
+                            // degerinde tasir.
+                            win32_exit_code(
+                                crate::level0a::core::scheduler::exit_code_of(task),
+                                crate::level0a::core::scheduler::exit_signal_of(task),
+                            )
                         }
                         None => STILL_ACTIVE,
                     };
@@ -2569,6 +2681,18 @@ fn store_out(block: usize, index: usize, value: u32) {
 /// bildirdigi register: i386'da EDX, x86_64'te RDX. Mimariden bagimsiz
 /// kalmasi icin tek yerde toplanmistir.
 /// Beklenmis bir cocugun cikis kodunu saklar.
+/// Bir yuva yeniden kullanilirken saklanmis cikis kodunu siler.
+///
+/// Olmazsa `GetExitCodeProcess` **onceki kiracinin** kodunu dondurur:
+/// yeni baslamis bir surec, yuvasi daha once kullanilmis oldugu icin
+/// "coktan bitmis" gorunur. Olcumde tam bu oldu -- `STILL_ACTIVE`
+/// beklenen yerde eski bir deger cikti.
+pub fn forget_exit(task: usize) {
+    if task < crate::level0a::core::scheduler::MAX_TASKS {
+        REAPED_EXIT[task].store(u32::MAX, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 fn remember_exit(task: usize, code: u32) {
     if task < crate::level0a::core::scheduler::MAX_TASKS {
         REAPED_EXIT[task].store(code, core::sync::atomic::Ordering::Relaxed);

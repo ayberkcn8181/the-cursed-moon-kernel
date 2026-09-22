@@ -359,11 +359,13 @@ fn main() {
                     sys::close(read_end);
                     sys::close(write_end);
                     let reaped = sys::waitpid(id as usize, &mut child_code, 0) >= 0;
-                    // Durum **paketlenmis** gelir: cikis kodu 8-15.
-                    // bitlerde. Ham degeri karsilastirmak 141 yerine
-                    // 36096 gormek olurdu.
-                    child_code = sys::exit_status(child_code);
-                    reaped && child_code == 128 + tcmk::signal::SIGPIPE
+                    // Durum **paketlenmis** gelir ve iki ayri soruyu
+                    // cevaplar. Burada sorulan "hangi kodla cikti" degil,
+                    // "neyle oldu": `WIFSIGNALED` + `WTERMSIG`.
+                    let killed = sys::signalled(child_code);
+                    let by = sys::term_signal(child_code);
+                    child_code = by;
+                    reaped && killed && by == tcmk::signal::SIGPIPE
                 }
                 _ => false,
             }
@@ -373,11 +375,11 @@ fn main() {
     checks[6] = Check {
         name: "G varsayilan olum",
         detail: if g {
-            "yakalamayan cocuk 141 ile oldu"
-        } else if child_code == 7 {
-            "cocuk OLMEDI, yazma geri dondu"
+            "yakalamayan cocuk SIGPIPE ile oldu"
+        } else if child_code == 0 {
+            "cocuk OLMEDI, normal cikis gorundu"
         } else {
-            "cocuk beklenemedi ya da kod yanlis"
+            "cocuk beklenemedi ya da sinyal yanlis"
         },
         passed: g,
     };

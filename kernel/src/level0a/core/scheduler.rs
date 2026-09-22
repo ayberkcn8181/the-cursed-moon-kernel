@@ -92,6 +92,24 @@ pub struct Task {
     pub wait_for: usize,
     /// Gorev sonlandiginda birakilan cikis kodu; `waitpid` bunu okur.
     pub exit_code: u32,
+    /// Gorevi **oldiren sinyal** (0 = normal cikis).
+    ///
+    /// "Nasil oldu" sorusunun cevabi, "ne dondurdu"den ayri tutulmak
+    /// zorunda -- cunku iki ABI bu ikisini bambaska bicimlerde
+    /// paketliyor:
+    ///
+    /// ```text
+    ///   POSIX  durum kelimesi: cikis kodu 8-15. bitlerde,
+    ///          olduren sinyal 0-6. bitlerde (WIFEXITED / WIFSIGNALED)
+    ///   Win32  tek bir DWORD: normal cikista kod, cokmede NTSTATUS
+    ///          (ornegin 0xC0000005 = ACCESS_VIOLATION)
+    /// ```
+    ///
+    /// Tek alanda tutup `128 + signo` yazmak kabuk gelenegidir,
+    /// cekirdegin degil; oyle yapilsaydi `WIFSIGNALED` soran bir program
+    /// yanilirdi. Sinyal POSIX'in dogal temsili oldugu icin burada o
+    /// saklaniyor; Win32 yuzu onu NTSTATUS'a ceviriyor.
+    pub exit_signal: u32,
     /// POSIX `nice` degeri: -20 (en yuksek oncelik) .. 19 (en dusuk).
     ///
     /// Oncelik, gorevin **zaman diliminin uzunlugunu** belirler; secim
@@ -187,6 +205,7 @@ impl Task {
             waitable: false,
             stack_top: 0,
             exit_code: 0,
+            exit_signal: 0,
             group: 0,
             wait_addr: 0,
             wait_kernel: false,
@@ -352,6 +371,10 @@ fn spawn_inner(
         (*tasks.add(index)).wake_tick = 0;
         (*tasks.add(index)).wait_for = 0;
         (*tasks.add(index)).exit_code = 0;
+        (*tasks.add(index)).exit_signal = 0;
+        // NT tarafinin sakladigi cikis kodu da yuvaya bagli: temizlemezsek
+        // yeni surec, onceki kiracinin kodunu gosterir.
+        crate::level0b1::nt_subsystem::nt_syscalls::forget_exit(index);
         (*tasks.add(index)).parent = CURRENT.load(Ordering::Relaxed);
         (*tasks.add(index)).waitable = waitable;
         // Siradan bir gorev kendi grubunun lideridir. Is parcaciklari
@@ -1520,6 +1543,51 @@ pub fn set_current_exit_code(code: u32) {
     }
 }
 
+/// Calisan gorevin **olum sebebini** kaydeder (0 = normal cikis).
+pub fn set_current_exit_signal(signo: u32) {
+    unsafe {
+        let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+        (*tasks.add(CURRENT.load(Ordering::Relaxed))).exit_signal = signo;
+    }
+}
+
+/// Bir gorevi oldiren sinyal (0 = normal cikis).
+pub fn exit_signal_of(index: usize) -> u32 {
+    if index >= MAX_TASKS {
+        return 0;
+    }
+    unsafe {
+        let tasks = core::ptr::addr_of!(TASKS) as *const Task;
+        (*tasks.add(index)).exit_signal
+    }
+}
+
+/// Disaridan sonlandirilan bir gorevin cikis kodunu kaydeder.
+///
+/// `TerminateProcess` icin gerekiyor: Windows'ta olduren taraf kodu
+/// **secebiliyor**. POSIX'te bunun karsiligi yok -- `kill` yalnizca
+/// sinyali secer, kodu sinyalin kendisi belirler.
+pub fn set_exit_code(index: usize, code: u32) {
+    if index >= MAX_TASKS {
+        return;
+    }
+    unsafe {
+        let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+        (*tasks.add(index)).exit_code = code;
+    }
+}
+
+/// Disaridan sonlandirilan bir gorevin olum sebebini kaydeder.
+pub fn set_exit_signal(index: usize, signo: u32) {
+    if index >= MAX_TASKS {
+        return;
+    }
+    unsafe {
+        let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+        (*tasks.add(index)).exit_signal = signo;
+    }
+}
+
 /// Bir gorevin cikis kodu.
 pub fn exit_code_of(index: usize) -> u32 {
     if index >= MAX_TASKS {
@@ -1540,7 +1608,7 @@ pub fn exit_code_of(index: usize) -> u32 {
 ///
 /// `None` doner: gecersiz indeks, kendini beklemek, ya da idle gorevinin
 /// cagirmasi (idle bloke edilemez -- masaustu dongusudur).
-pub fn wait_for_task(child: usize) -> Option<u32> {
+pub fn wait_for_task(child: usize) -> Option<(u32, u32)> {
     let current = CURRENT.load(Ordering::Relaxed);
     let count = TASK_COUNT.load(Ordering::Relaxed);
     if child >= count || child == current || current == 0 {
@@ -1554,8 +1622,9 @@ pub fn wait_for_task(child: usize) -> Option<u32> {
     // Zaten bitmisse beklemeye gerek yok; toplandigi icin yuva serbest.
     if state_of(child) == TaskState::Terminated {
         let code = exit_code_of(child);
+        let signal = exit_signal_of(child);
         crate::arch::cpu::without_interrupts(|| release_slot(child));
-        return Some(code);
+        return Some((code, signal));
     }
 
     crate::arch::cpu::without_interrupts(|| unsafe {
@@ -1581,12 +1650,15 @@ pub fn wait_for_task(child: usize) -> Option<u32> {
     //
     // Cikis kodu her turda saklaniyor: yuva serbest kalinca deger
     // silinir, yani onu **gormusken** almak gerekiyor.
-    let mut last_code = 0u32;
+    // Cikis kodu **ve olum sebebi** birlikte aliniyor: ikisi de yuva
+    // serbest kalinca siliniyor, yani ikisini de gormusken almak
+    // gerekiyor.
+    let mut last = (0u32, 0u32);
     loop {
         yield_now();
         match state_of(child) {
             TaskState::Terminated => {
-                last_code = exit_code_of(child);
+                last = (exit_code_of(child), exit_signal_of(child));
                 break;
             }
             TaskState::Unused => break,
@@ -1597,7 +1669,7 @@ pub fn wait_for_task(child: usize) -> Option<u32> {
     // Yuva hala bizdeyse geri ver; baskasi verdiyse `release_slot` zaten
     // etkisiz.
     crate::arch::cpu::without_interrupts(|| release_slot(child));
-    Some(last_code)
+    Some(last)
 }
 
 /// `waitpid(-1)`: cagiranin **herhangi bir** cocugunu bekler.
@@ -1605,7 +1677,7 @@ pub fn wait_for_task(child: usize) -> Option<u32> {
 /// Once sonlanmis bir cocuk aranir (varsa hemen toplanir); yoksa canli
 /// bir cocuk bulunup onun bitmesi beklenir. Hic cocuk yoksa `None`
 /// doner -- POSIX'te bu `ECHILD`'dir.
-pub fn wait_for_any() -> Option<(usize, u32)> {
+pub fn wait_for_any() -> Option<(usize, u32, u32)> {
     let current = CURRENT.load(Ordering::Relaxed);
     let count = TASK_COUNT.load(Ordering::Relaxed);
 
@@ -1620,8 +1692,9 @@ pub fn wait_for_any() -> Option<(usize, u32)> {
                 && (*tasks.add(i)).state == TaskState::Terminated
             {
                 let code = exit_code_of(i);
+                let signal = exit_signal_of(i);
                 crate::arch::cpu::without_interrupts(|| release_slot(i));
-                return Some((i, code));
+                return Some((i, code, signal));
             }
         }
     }
@@ -1637,7 +1710,7 @@ pub fn wait_for_any() -> Option<(usize, u32)> {
                 && (*tasks.add(i)).state != TaskState::Unused
         };
         if is_child {
-            return wait_for_task(i).map(|code| (i, code));
+            return wait_for_task(i).map(|(code, signal)| (i, code, signal));
         }
     }
 
@@ -1645,7 +1718,7 @@ pub fn wait_for_any() -> Option<(usize, u32)> {
 }
 
 /// Bitmis bir cocugu bekleMEDEN toplar (`waitpid` + `WNOHANG`).
-pub fn reap_finished_child(parent: usize) -> Option<(usize, u32)> {
+pub fn reap_finished_child(parent: usize) -> Option<(usize, u32, u32)> {
     let count = TASK_COUNT.load(Ordering::Relaxed);
     for i in 0..count {
         if i == parent {
@@ -1657,8 +1730,9 @@ pub fn reap_finished_child(parent: usize) -> Option<(usize, u32)> {
         };
         if finished {
             let code = exit_code_of(i);
+            let signal = exit_signal_of(i);
             crate::arch::cpu::without_interrupts(|| release_slot(i));
-            return Some((i, code));
+            return Some((i, code, signal));
         }
     }
     None

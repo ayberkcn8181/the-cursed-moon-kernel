@@ -27,10 +27,10 @@ masaustu sunuyor.
 | Mimariler | i386 (Multiboot1, `int 0x80`) · x86_64 (Multiboot2, `syscall`) |
 | Ikili bicimleri | ELF32/ELF64 · PE32/PE32+ (ithal tablosu cozulur) |
 | POSIX cagrilari | 68 (+ ELF yardimci vektoru, dosya destekli `mmap`, `clone`, `futex`, `SIGPIPE`, `EINTR`/`SA_RESTART`) |
-| NT/Win32 cagrilari | 78 (`KERNEL32.dll` 56 ihracat + `TCMKGUI.dll`) |
-| Ring 3 uygulamalari | 31 ELF + 12 PE |
+| NT/Win32 cagrilari | 79 (`KERNEL32.dll` 57 ihracat + `TCMKGUI.dll`) |
+| Ring 3 uygulamalari | 32 ELF + 13 PE |
 | Kalici depolama | ATA PIO + MBR + TCMKFS (yazilabilir, i386) |
-| Kod | ~30 bin satir cekirdek + ~16 bin satir userland |
+| Kod | ~30 bin satir cekirdek + ~17 bin satir userland |
 
 Uyumluluk yuzeyi su alanlarda **iki ABI'de birden** kurulu: dosya
 sistemi (acma/okuma/yazma/kesme/gezinme/yeniden adlandirma), surec
@@ -44,9 +44,11 @@ tabani (POSIX TLS / Windows TEB), **surec yaratma**
 (`read`/`write`/`O_NONBLOCK` -- `ReadFile`/`WriteFile`/`PIPE_NOWAIT`).
 Sinyalin bekleyen bir cagriyi bolmesi (`EINTR`/`SA_RESTART`) yalnizca
 POSIX tarafinda var -- Win32'de karsiligi yok ve bu ayrim olculuyor.
+Bir surecin **nasil oldugu** da iki ABI'de bambaska paketleniyor
+(`WIFSIGNALED` -- `GetExitCodeProcess` + NTSTATUS).
 
 Her yetenek QEMU'da **olculerek** dogrulanmistir: `probe` (16 sinav),
-`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `bequest`
+`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `bequest`
 (6), `nested` (4), `winenv` (4) gibi programlar sonucu hem ekrana hem
 seri gunluge yaziyor. Olcumler yol boyunca gercek hatalar buldu -- dolan
 VFS tablosu, `CreateFileA`'nin cevrilmeyen Windows yollari, `GDT`
@@ -5062,13 +5064,11 @@ degil, **iki goreve** aitmis.
   girdi hattindan geciyor -- ayri bir bati.
 * ~~**Yazma bloke etmiyor.**~~ Artik ediyor (yukari bkz.); simetri tam.
 * ~~**`SIGPIPE` yok.**~~ Artik var ve varsayilan davranisi olduruyor.
-* **`WIFSIGNALED`/`WTERMSIG` yok.** Gercek POSIX'te sinyalle olen bir
-  surec, sinyal numarasini durum kelimesinin **dusuk** bitlerine yazar
-  ve cikis kodu alani bos kalir. TCMK bunun yerine kabuk gelenegi olan
-  `128 + signo`yu cikis koduna koyuyor -- yani `waitpid` ile toplanan
-  bir SIGPIPE olumu `141` olarak gorunur, `WIFSIGNALED` ile degil.
-  Kabuklarin kullandigi sayi dogru, ama ayrimi soran bir program
-  yanilir.
+* ~~**`WIFSIGNALED`/`WTERMSIG` yok.**~~ Artik var ve durum kelimesi
+  POSIX'in kodlamasini kullaniyor; cokmeler de sinyale cevriliyor.
+  Bkz. [Bir surecin nasil oldugunu
+  ogrenmek](#bir-surecin-nasil-oldugunu-ogrenmek). `WCOREDUMP` ve
+  `WIFSTOPPED` hala yok.
 * **`PIPE_BUF` atomikligi yok.** POSIX, `PIPE_BUF` (genelde 4096) bayta
   kadar yazmalarin **bolunmeden** yapilacagini garanti eder; TCMK'de
   tampon 1 KiB ve kisa donus her boyda mumkun. Iki yazicinin satirlari
@@ -5219,6 +5219,146 @@ onu **hatali surumde** kosturmak.
 * **Varsayilani "oldur" olan sinyal yeniden baslatmaz.** Mantikli
   (geri donulmeyecek), ama gercek Linux'ta karar teslim aninda
   veriliyor, burada onceden.
+
+## Bir surecin nasil oldugunu ogrenmek
+
+`waitpid` bir sayi dondurur, ama o sayi bir sayi degil: iki ayri soruyu
+ayni kelimede cevaplayan **paketlenmis** bir durumdur.
+
+```
+[death]    A normal cikis: gecti (WIFEXITED dogru, kod 42)
+[death]    B sinyal degil: gecti (normal cikista WIFSIGNALED yanlis)
+[death]    C SIGKILL:      gecti (WIFSIGNALED dogru, WTERMSIG 9)
+[death]    D cokme:        gecti (gecersiz erisim SIGSEGV oldu)
+[death]    E sifira bolme: gecti (SIGFPE oldu (SIGSEGV degil))
+[death]    F ayrim:        gecti (exit(9) ile SIGKILL(9) ayri gorunuyor)
+
+[windeath] A normal cikis:    gecti (cocugun kodu aynen gorundu)
+[windeath] B hala kosuyor:    gecti (bitmemisken STILL_ACTIVE gorundu)
+[windeath] C cokme:           gecti (coken cocuk 0xC0000005 gosterdi)
+[windeath] D ayrim yok:       gecti (cokme ile kod tek alanda)
+[windeath] E bekleme:         gecti (WaitForSingleObject bitisi gordu)
+[windeath] F TerminateProcess:gecti (olduren taraf kodu secti (5))
+```
+
+![death](docs/screenshot-death.png)
+![windeath](docs/screenshot-windeath.png)
+
+### Iki soru, iki kodlama
+
+| | POSIX | Win32 |
+|---|---|---|
+| kodlama | durum kelimesi **iki alana** bolunur | **tek** DWORD |
+| normal cikis | `(kod & 0xFF) << 8` -- `WIFEXITED` | cagiranin verdigi kod |
+| sinyalle olum | `signo & 0x7F` -- `WIFSIGNALED` | -- |
+| cokme | `SIGSEGV`/`SIGFPE`/`SIGILL` | NTSTATUS (`0xC0000005`) |
+| "coktu mu" sorusu | ayri bir alan | kodun **degeri** |
+
+POSIX'te "cocuk coktu mu" diye ayri bir soru **yok**: cekirdek sayfa
+hatasini `SIGSEGV`e, sifira bolmeyi `SIGFPE`ye ceviriyor. Cokme,
+sinyalle olumun bir turu.
+
+Windows tam tersini yapmis. Orada sinyal olmadigi icin "nasil oldu"
+bilgisi cikis kodunun **degerine** gomulu: NTSTATUS araligi
+(`0xC0000000+`) "bu normal bir kod degil" demenin yolu. Yer tasarrufu
+degil, tarih -- NT'de her sey zaten NTSTATUS konusuyor.
+
+Bedeli var ve `windeath` D bunu bilerek olcuyor: `ExitProcess(0xC0000005)`
+diyen bir surec **cokmus gibi gorunur**, cunku ayrim sozlesmeye degil
+sayinin araligina dayaniyor. POSIX'te bu imkansiz -- `death` F tam
+olarak onu gosteriyor: `exit(9)` ile `SIGKILL` (9) ayni sayiyi tasiyor
+ama durum kelimeleri farkli, cunku farkli alanlarda duruyorlar.
+
+### Kabuk gelenegi cekirdegin kodlamasi degil
+
+Uzun sure sinyalle olen bir surec icin `128 + signo` **cikis koduna**
+yaziliyordu. `141` dogru bir sayi -- ama kabuklarin gosterim
+gelenegidir, cekirdegin kodlamasi degil. `WIFSIGNALED` soran bir
+program "normal cikti, kodu 141" cevabini alirdi.
+
+Cekirdek artik ikisini ayri tutuyor:
+
+```rust
+/// Gorevi **oldiren sinyal** (0 = normal cikis).
+pub exit_signal: u32,
+```
+
+Paketleme her ABI'nin kendi yuzunde yapiliyor: POSIX `store_status_of`,
+Win32 `win32_exit_code`. Cekirdek ikisinden birini tercih etmiyor.
+
+### Cokme -> sinyal eslemesi gercekten yapiliyor
+
+Butun cokmeler tek bir sinyale eslenseydi `death` D yine gecerdi ama
+esleme yapilmamis olurdu. `E` bu yuzden ayri: sifira bolme `SIGFPE`
+vermeli, `SIGSEGV` degil.
+
+```text
+  #DE (0), #OF (4), #MF (16), #XM (19)  -> SIGFPE
+  #UD (6), #BP (3)                      -> SIGILL
+  #GP (13), #PF (14) ve digerleri       -> SIGSEGV
+```
+
+Ekrandaki "cokme sig: 11 / bolme sig: 8" sayilari olcumun kendisi.
+
+### Olcumun buldugu uc hata
+
+Bu bati uc ayri hata buldu ve **hicbiri** ilk baslanan yerde degildi.
+
+**1. Sinav, dilin kendi kuralina takildi.** `E` ilk halinde Rust'in `/`
+isleciyle sifira boluyordu ve "istisna hic olusmadi" diye kaldi.
+Cekirdek dogruydu: Rust sifira bolmeyi **derleme aninda** yakalayip
+panik uretiyor, yani `div` komutu hic calismiyor ve CPU istisnasi
+olusmuyor. Cekirdegin eslemesini sinamak icin komutu ham asm ile
+yurutmek gerekti.
+
+**2. `TerminateProcess` yanlis servis araligina konuldu.** `dll.rs`'te
+tam bu hataya karsi yazilmis bir uyari duruyordu: 0x1000 araligindaki
+servisler argumanlari **registerdan** okuyor, thunk ise yigina koyuyor.
+Uyariya ragmen ayni hataya dusuldu ve `windeath` 0x80000001 koduyla --
+yani bir **tutamac** degeriyle -- olerek bunu gosterdi. Cozum, 0x3000
+araliginda ayri bir Win32 yuzu (`NT_TERMINATE_PROCESS_W32`).
+
+**3. `GetExitCodeProcess` onceki kiracinin kodunu donduruyordu.** NT
+tarafi cikis kodlarini gorev indeksine gore sakliyor ve yuva yeniden
+kullanildiginda temizlemiyordu. Yeni baslamis bir surec, yuvasi daha
+once kullanilmis oldugu icin "coktan bitmis" gorunuyordu. `spawn_inner`
+artik `forget_exit` cagiriyor.
+
+Ayrica `windeath` B **kararsizdi**: `hello` uzerinde "hala kosuyor?"
+diye soruyordu ve o program o kadar hizli bitiyor ki soru bir yarisa
+donusuyordu -- olcum kosularinda geciyor, ekran goruntusu alinirken
+kaliyordu. Kararsiz bir sinav, olctugunu sandigi seyi olcmuyor demektir.
+Sonsuza kadar kosan bir cocuga (`plasma`) gecildi; `spin` daha dogal
+gorunuyordu ama **yalnizca i386'da** gomulu ve x86_64'te sinav sessizce
+kaliyordu. Duzeltmeden sonra uc ard arda kosuda 12/12.
+
+### `TerminateProcess`: POSIX'te karsiligi olmayan bir yetenek
+
+Win32'de olduren taraf cikis kodunu **seciyor**:
+
+```text
+  POSIX  kill(pid, SIGKILL)        -> kodu sinyal belirler
+  Win32  TerminateProcess(h, 5)    -> kodu CAGIRAN belirler
+```
+
+Yani `GetExitCodeProcess` ile gorunen deger olduruleni degil
+**oldureni** yansitabiliyor. Bu cagri bu batiyla geldi; oncesinde
+`NtTerminateProcess` tutamaci yok sayip her zaman **cagirani**
+olduruyordu -- `ExitProcess` icin dogru, `TerminateProcess` icin degil.
+
+### Bilerek yapilmayanlar
+
+* **`WCOREDUMP` yok** -- cekirdek dokumu diye bir sey yok.
+* **`WIFSTOPPED`/`WUNTRACED` yok**: durdurulmus surec kavrami yok
+  (`SIGSTOP`/`SIGCONT` de yok).
+* **Esleme kayipli.** `SIGFPE` hem sifira bolmeyi hem tasmayi kapsiyor;
+  Windows'ta ikisi ayri NTSTATUS. Sinyal POSIX'in dogal temsili oldugu
+  icin cekirdek onu sakliyor, Win32 yuzu en yakin kodu veriyor.
+* **`#BP` icin `SIGTRAP` yok** -- ayri bir sinyal tanimlanmadi, en yakin
+  anlam `SIGILL`.
+* **Coken bir PE'nin istisna kodu SEH'ten bagimsiz.** Isleyici
+  sahiplenirse surec zaten olmuyor; bu bolum yalnizca **sahipsiz**
+  istisnalari anlatiyor.
 
 ## Alfa'nin bilinen sinirlari
 

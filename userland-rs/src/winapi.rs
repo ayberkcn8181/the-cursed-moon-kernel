@@ -410,6 +410,15 @@ extern "system" {
     /// devam eder. `ExitProcess` ile arasindaki tek fark budur.
     pub fn ExitThread(exit_code: Dword) -> !;
 
+    /// **Baska** bir sureci sonlandirir ve cikis kodunu **cagiran**
+    /// secer.
+    ///
+    /// POSIX'te bunun tam karsiligi yok: `kill` yalnizca sinyali secer,
+    /// cikis durumunu sinyalin kendisi belirler. Windows'ta olduren
+    /// taraf kodu yaziyor -- yani `GetExitCodeProcess` ile gorunen
+    /// deger, olduruleni degil oldureni yansitiyor.
+    pub fn TerminateProcess(process: Handle, exit_code: Dword) -> Bool;
+
     /// Bitmis bir is parcaciginin cikis kodu.
     ///
     /// Hala kosuyorsa `STILL_ACTIVE` (259) doner -- yani "bitti mi"

@@ -282,13 +282,39 @@ fn return_errno(frame: &mut SyscallFrame, errno: i32) {
 /// `WEXITSTATUS(status)` = `(status >> 8) & 0xFF` calisir. Isaretci NULL
 /// olabilir (POSIX'te de oyle); o zaman yazilmaz ve cagri basarilidir.
 fn store_status(ptr: usize, code: u32) -> bool {
+    store_status_of(ptr, code, 0)
+}
+
+/// `waitpid`in durum kelimesini POSIX'in kodlamasiyla yazar.
+///
+/// Durum ham bir sayi degil, **paketlenmis** bir kelimedir ve iki ayri
+/// soruyu ayni yerde cevaplar:
+///
+/// ```text
+///   normal cikis  -> (kod & 0xFF) << 8      WIFEXITED,  WEXITSTATUS
+///   sinyalle olum ->  signo & 0x7F          WIFSIGNALED, WTERMSIG
+/// ```
+///
+/// Ayrimi yapmak sart. Uzun sure yapilmiyordu: sinyalle olen bir surec
+/// icin `128 + signo` cikis koduna yaziliyordu. O sayi **kabuklarin**
+/// gosterim gelenegi, cekirdegin kodlamasi degil -- ve `WIFSIGNALED`
+/// soran bir program "normal cikti, kodu 141" cevabini alirdi.
+///
+/// Cekirdek artik ikisini ayri tutuyor (bkz. `Task.exit_signal`) ve
+/// paketleme burada yapiliyor.
+fn store_status_of(ptr: usize, code: u32, signo: u32) -> bool {
     if ptr == 0 {
         return true;
     }
     if !mmu::is_user_accessible(ptr) || !mmu::is_user_accessible(ptr + 3) {
         return false;
     }
-    unsafe { (ptr as *mut u32).write_unaligned((code & 0xFF) << 8) };
+    let status = if signo != 0 {
+        signo & 0x7F
+    } else {
+        (code & 0xFF) << 8
+    };
+    unsafe { (ptr as *mut u32).write_unaligned(status) };
     true
 }
 
@@ -701,8 +727,8 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
                 if nohang {
                     // Bitmis cocuk varsa topla, yoksa 0.
                     match crate::level0a::core::scheduler::reap_finished_child(me) {
-                        Some((pid, code)) => {
-                            if !store_status(status_ptr, code) {
+                        Some((pid, code, signal)) => {
+                            if !store_status_of(status_ptr, code, signal) {
                                 return_errno(frame, -EFAULT);
                             } else {
                                 frame.set_return(pid);
@@ -713,8 +739,8 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
                     return;
                 }
                 match crate::level0a::core::scheduler::wait_for_any() {
-                    Some((pid, code)) => {
-                        if !store_status(status_ptr, code) {
+                    Some((pid, code, signal)) => {
+                        if !store_status_of(status_ptr, code, signal) {
                             return_errno(frame, -EFAULT);
                         } else {
                             frame.set_return(pid);
@@ -735,7 +761,8 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
                     0
                 } else {
                     let code = crate::level0a::core::scheduler::exit_code_of(child);
-                    if !store_status(status_ptr, code) {
+                    let signal = crate::level0a::core::scheduler::exit_signal_of(child);
+                    if !store_status_of(status_ptr, code, signal) {
                         -EFAULT
                     } else {
                         child as i32
@@ -743,8 +770,8 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
                 }
             } else {
                 match crate::level0a::core::scheduler::wait_for_task(child) {
-                    Some(code) => {
-                        if !store_status(status_ptr, code) {
+                    Some((code, signal)) => {
+                        if !store_status_of(status_ptr, code, signal) {
                             -EFAULT
                         } else {
                             child as i32

@@ -459,6 +459,18 @@ static KERNEL32: &[Export] = &[
         // hNamedPipe, lpMode, lpMaxCollectionCount, lpCollectDataTimeout
         stack_bytes: 16,
     },
+    // `ExitProcess` ile ayni servise iner ama farkli bir soru sorar:
+    // "kendimi bitir" degil, "sunu bitir". Ayrimi tutamac yapiyor.
+    Export {
+        name: "TerminateProcess",
+        ordinal: 57,
+        // 0x3000 araligi: yigin argumanli. `NtTerminateProcess`
+        // (0x1000) yazmak, ExitProcess icin bir kez yapilmis hatanin
+        // aynisi olurdu -- bkz. yukaridaki uyari.
+        service: nt::NT_TERMINATE_PROCESS_W32,
+        // hProcess, uExitCode
+        stack_bytes: 8,
+    },
 ];
 
 /// `TCMKGUI.dll` -- win32k cagrilarinin kullanici modundaki yuzu.

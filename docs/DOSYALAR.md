@@ -282,6 +282,7 @@ gunluge yazarlar ve olcum bunlardan okunur.
 | `probe.rs` (16 sinav) | POSIX yuzeyinin genis sinavi: `stat`, `access`, `uname`, saat, `writev`, TLS, **yardimci vektor**. |
 | `quoted.rs` (4 sinav) | `execve(yol, argv[], envp[])`: dizi bicimi, `argv[0]` korunmasi, `envp` degistirmesi. |
 | `mapped.rs` (4 sinav) | Dosya destekli `mmap`: icerik, hizasiz ofset reddi, dosya sonu sifirlamasi. |
+| `death.rs` (6 sinav) | Cocugun **nasil** oldugu: `WIFEXITED`/`WIFSIGNALED`/`WTERMSIG`, cokmenin `SIGSEGV`e ve sifira bolmenin `SIGFPE`ye eslenmesi, `exit(9)` ile `SIGKILL(9)`un ayirt edilmesi. |
 | `intr.rs` (6 sinav) | `EINTR` ve `SA_RESTART`: bekleyen okuma/yazmanin sinyalle bolunmesi, bolunen cagrinin veriyi tuketmemesi, cerceve geri sarilarak yeniden baslatma, ve yok sayilan sinyalin **bolmemesi**. |
 | `blocking.rs` (9 sinav) | Bloke eden boru okumasi **ve yazmasi**: bekleme, dosya sonu, `O_NONBLOCK` ile `-EAGAIN`, uc durumun ayriligi, `pipe2`, ve `SIGPIPE` -- yakalamayan bir `fork` cocugunun 141 ile oldugu `waitpid` ile olculuyor. |
 | `sync.rs` (5 sinav) | `futex`: uyandirma, zaman asimi, cekismesiz kilidin cekirdege inmemesi, `CLONE_CHILD_CLEARTID` ile `join`, paylasilan sayacin kilitle korunmasi. |
@@ -341,6 +342,7 @@ almazlar.
 | Is parcaciklari | `thread.rs`, `scheduler.rs` (`Task.group`) |
 | Kilit / bekleme | `futex.rs`, `scheduler.rs` (`wait_on_address`) |
 | Boru / bloke okuma | `pipe.rs`, `kernel_api.rs` (`read_pipe_blocking`) |
+| Olum sebebi | `scheduler.rs` (`Task.exit_signal`), `exceptions.rs` (`signal_of_vector`), `nt_syscalls.rs` (`win32_exit_code`) |
 | EINTR / SA_RESTART | `signal.rs` (`interrupts_call`), `regs.rs` (`rewind_for_restart`) |
 | Windows uyumlulugu | `pe32.rs`, `dll.rs`, `teb.rs`, `seh.rs` |
 | Linux uyumlulugu | `elf32.rs`, `posix_syscalls.rs`, `signal.rs` |

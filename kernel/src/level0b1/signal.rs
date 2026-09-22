@@ -270,8 +270,10 @@ pub fn raise(target: usize, signo: u32) -> Result<(), SignalError> {
         // Kendi kendine gonderilmisse cagri zincirinden cikmak gerekir,
         // bu yuzden ayri yol.
         if target == scheduler::current_id() {
-            crate::level0a::kernel_api::exit_current_task(128 + SIGKILL);
+            scheduler::set_current_exit_signal(SIGKILL);
+            crate::level0a::kernel_api::exit_current_task(0);
         }
+        scheduler::set_exit_signal(target, SIGKILL);
         return scheduler::terminate(target)
             .map_err(|_| SignalError::NoSuchTask);
     }
@@ -768,7 +770,12 @@ pub unsafe fn deliver_pending(frame: &mut SyscallFrame, from_interrupt: bool) {
                         name_of(signo)
                     );
                     DELIVERED.fetch_add(1, Ordering::Relaxed);
-                    crate::level0a::kernel_api::exit_current_task(128 + signo);
+                    // Cikis kodu degil, **olum sebebi** kaydediliyor.
+                    // `128 + signo` kabuk gelenegidir; cekirdek ikisini
+                    // ayri tutmak zorunda, yoksa `WIFSIGNALED` soran bir
+                    // program yanilir.
+                    scheduler::set_current_exit_signal(signo);
+                    crate::level0a::kernel_api::exit_current_task(0);
                 }
                 continue;
             }
