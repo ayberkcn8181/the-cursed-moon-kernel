@@ -178,7 +178,7 @@ cevirisi** yapip Level-0a'nin ortak API'sine devreder.
 | `pit.rs` | 8253/8254 zamanlayici, 100 Hz. Nabiz sayaci burada artar. |
 | `exceptions.rs` | Butun 32 CPU istisnasinin ortak govdesi. Kurtarilabilir mi (COW, talep uzerine sayfalama), SEH'e devredilebilir mi, yoksa olumcul mu. |
 | `syscall_msr.rs` | x86_64'un `syscall` komutu icin MSR kurulumu (`STAR`, `LSTAR`, `SFMASK`). |
-| `installer.rs` | Sistemi diske kuran akis (`install` komutu). |
+| `installer.rs` | Sistemi diske kuran akis (`install` komutu). Yalnizca i386: zincir gercek mod kodudur, x86_64'te komut acikca reddeder. |
 | `messages.rs` | Acilista ekrana yazilan metinler; tek yerde toplanmis. |
 | `mod.rs` | Modul agaci. |
 
@@ -319,7 +319,7 @@ almazlar.
 | `sync_font.py` | Ayni yazi tipini cekirdek ve userland kopyalarina yayar. |
 | `gen_hello_elf64.py` | Elle kodlanmis en kucuk ELF64. Yukleyicinin **dar yolunu** sinar -- derleyici cikti bir ikilinin gizledigi varsayimlari acar. |
 | `gen_pe_hello.py` | Ayni is, PE32 icin. |
-| `make_disk.py` | ISO'nun arkasina TCMKFS bolumu ekleyip MBR bolum tablosunu yazar. Root gerektirmez. |
+| `make_disk.py` | ISO'nun arkasina TCMKFS bolumu ekleyip MBR bolum tablosunu yazar. Root gerektirmez. Cekirdegin ELF sinifina gore onyukleme zincirini secer: ELF32'de TCMK'nin kendi iki asamali onyukleyicisi gomulur, ELF64'te alan bos birakilir ve disk GRUB ile acilir. |
 
 ---
 

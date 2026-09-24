@@ -63,6 +63,20 @@ def chs_dummy():
     return bytes([0xFE, 0xFF, 0xFF])
 
 
+def is_elf64(path):
+    """Cekirdek imaji 64-bit mi?
+
+    Ayrim onyukleme **zincirini** belirliyor: TCMK'nin kendi iki asamali
+    onyukleyicisi 16/32-bit gercek mod kodudur ve yalnizca ELF32 bir
+    cekirdegi yukleyebilir. x86_64 cekirdegi GRUB (Multiboot2) ile
+    aciliyor, o yuzden o imajda onyukleyici alani bos birakiliyor --
+    diskin kendisi ve TCMKFS bolumu aynen kuruluyor.
+    """
+    with open(path, "rb") as f:
+        head = f.read(5)
+    return head[:4] == b"\x7fELF" and head[4] == 2
+
+
 def read_elf_segments(path):
     """ELF32'nin PT_LOAD segmentlerini (offset, paddr, filesz, memsz) doner."""
     data = open(path, "rb").read()
@@ -125,15 +139,26 @@ def build(iso_path, out_path, data_mib, stage2_path, kernel_path):
     if not os.path.exists(iso_path):
         sys.exit("ISO bulunamadi: %s (once `make iso`)" % iso_path)
 
-    stage2 = open(stage2_path, "rb").read()
-    if len(stage2) > STAGE2_SECTORS * SECTOR:
-        sys.exit("2. asama %d sektore sigmiyor" % STAGE2_SECTORS)
+    # Kendi onyukleyici zinciri yalnizca ELF32 icin kuruluyor (bkz.
+    # `is_elf64`). 64-bit imajda bu alan bos kaliyor ve disk GRUB'in
+    # hibrit MBR'siyle aciliyor -- amac disk **erisimi**, kendi
+    # onyukleyicisini 64-bit'e tasimak degil.
+    own_boot = not is_elf64(kernel_path)
 
-    blob, entry, bss_start, bss_end = build_blob(kernel_path)
-    blob_sectors = (len(blob) + SECTOR - 1) // SECTOR
-    if KERNEL_BLOB_SECTOR + blob_sectors > DATA_START_SECTOR:
-        sys.exit("cekirdek blogu onyukleyici alanina sigmiyor (%d sektor)"
-                 % blob_sectors)
+    stage2 = b""
+    blob = b""
+    blob_sectors = 0
+    entry = bss_start = bss_end = 0
+    if own_boot:
+        stage2 = open(stage2_path, "rb").read()
+        if len(stage2) > STAGE2_SECTORS * SECTOR:
+            sys.exit("2. asama %d sektore sigmiyor" % STAGE2_SECTORS)
+
+        blob, entry, bss_start, bss_end = build_blob(kernel_path)
+        blob_sectors = (len(blob) + SECTOR - 1) // SECTOR
+        if KERNEL_BLOB_SECTOR + blob_sectors > DATA_START_SECTOR:
+            sys.exit("cekirdek blogu onyukleyici alanina sigmiyor (%d sektor)"
+                     % blob_sectors)
 
     shutil.copyfile(iso_path, out_path)
     iso_size = os.path.getsize(out_path)
@@ -144,14 +169,15 @@ def build(iso_path, out_path, data_mib, stage2_path, kernel_path):
     part_start = ((part_start + align - 1) // align) * align
     part_sectors = data_mib * 1024 * 1024 // SECTOR
 
-    stage2 = patch_stage2(
-        stage2,
-        part_start + KERNEL_BLOB_SECTOR,
-        blob_sectors,
-        entry,
-        bss_start,
-        bss_end,
-    )
+    if own_boot:
+        stage2 = patch_stage2(
+            stage2,
+            part_start + KERNEL_BLOB_SECTOR,
+            blob_sectors,
+            entry,
+            bss_start,
+            bss_end,
+        )
 
     with open(out_path, "r+b") as f:
         f.truncate((part_start + part_sectors) * SECTOR)
@@ -184,21 +210,27 @@ def build(iso_path, out_path, data_mib, stage2_path, kernel_path):
         f.seek(0)
         f.write(mbr)
 
-        # Onyukleyici alani: 2. asama ve cekirdek blogu.
-        f.seek((part_start + BOOT_AREA_SECTOR) * SECTOR)
-        f.write(stage2)
-        f.seek((part_start + KERNEL_BLOB_SECTOR) * SECTOR)
-        f.write(blob)
+        # Onyukleyici alani: 2. asama ve cekirdek blogu. 64-bit imajda
+        # bos birakiliyor; veri bloklari zaten DATA_START_SECTOR'dan
+        # sonra basladigi icin dosya sistemi bundan etkilenmiyor.
+        if own_boot:
+            f.seek((part_start + BOOT_AREA_SECTOR) * SECTOR)
+            f.write(stage2)
+            f.seek((part_start + KERNEL_BLOB_SECTOR) * SECTOR)
+            f.write(blob)
 
     total_mib = os.path.getsize(out_path) // (1024 * 1024)
     print("%s: %d MiB toplam" % (out_path, total_mib))
     print("  bolum 1: ISO hibrit (GRUB + cekirdek), %d KiB" % (iso_size // 1024))
     print("  bolum %d: TCMKFS  lba=%d  %d MiB" % (slot + 1, part_start, data_mib))
-    print("    2. asama     : lba=%d  %d bayt"
-          % (part_start + BOOT_AREA_SECTOR, len(stage2)))
-    print("    cekirdek blob: lba=%d  %d sektor (%d KiB)"
-          % (part_start + KERNEL_BLOB_SECTOR, blob_sectors, len(blob) // 1024))
-    print("    entry=0x%08x  bss=0x%08x..0x%08x" % (entry, bss_start, bss_end))
+    if own_boot:
+        print("    2. asama     : lba=%d  %d bayt"
+              % (part_start + BOOT_AREA_SECTOR, len(stage2)))
+        print("    cekirdek blob: lba=%d  %d sektor (%d KiB)"
+              % (part_start + KERNEL_BLOB_SECTOR, blob_sectors, len(blob) // 1024))
+        print("    entry=0x%08x  bss=0x%08x..0x%08x" % (entry, bss_start, bss_end))
+    else:
+        print("    onyukleyici alani: bos (64-bit cekirdek GRUB ile aciliyor)")
 
 
 def main():

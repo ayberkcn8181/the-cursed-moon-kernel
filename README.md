@@ -103,7 +103,7 @@ bolumunde yazili.
 | 9f | **Saat**: `time`/`clock_gettime` + `GetSystemTime(AsFileTime)` | ✅ (i386 + x86_64, ELF + PE) |
 | 9g | **`uname`** + `GetVersionExA`, **`fsync`** + `FlushFileBuffers` | ✅ (i386 + x86_64, ELF + PE) |
 | 9h | **Gercek Linux numaralari**: `exit_group` `nanosleep` `sched_yield` `writev` `getppid` | ✅ (i386 + x86_64) |
-| 5g | **Kesme**: `ftruncate` `O_TRUNC` + `SetEndOfFile` `CREATE_ALWAYS` | ✅ (i386; x86_64'te disk yok) |
+| 5g | **Kesme**: `ftruncate` `O_TRUNC` + `SetEndOfFile` `CREATE_ALWAYS` | ✅ (i386 + x86_64, ELF + PE) |
 | 9i | **`readv`**, **`getuid`/`geteuid`** ailesi, **`GetModuleFileNameA`** | ✅ (i386 + x86_64, ELF + PE) |
 | 9j | **Is-parcacigi tabani**: `set_thread_area` (i386) / `arch_prctl` (x86_64) | ✅ (i386 + x86_64) |
 | 7g | **TEB** (`fs:[0x18]` / `gs:[0x30]`, son hata TEB'de de) | ✅ (PE32 + PE32+) |
@@ -1256,6 +1256,68 @@ Cekirdek yazilabilir bolumu **sabit bir LBA'ya gomerek degil, bolum
 tablosundan bularak** acar; imajin duzeni degistiginde cekirdegi yeniden
 derlemek gerekmez.
 
+### x86_64 da diskten aciliyor
+
+Uzun sure "x86_64'te disk yok" yaziyordu ve bu, bir **kod** siniri gibi
+okunuyordu. Degildi: surucu yigininda (`ata.rs`, `block.rs`,
+`partition.rs`, `tcmkfs.rs`) mimariye ozel **tek bir** `cfg` yok. Eksik
+olan yalnizca disk imajinin uretilmesiydi -- `tools/make_disk.py` her
+imaja TCMK'nin kendi iki asamali onyukleyicisini gomuyor ve o zincir
+16/32-bit gercek mod kodu oldugu icin cekirdek ELF'inin ELF32 olmasini
+sart kosuyordu. 64-bit cekirdekte betik hata verip duruyordu:
+
+```
+ELF32 bekleniyordu: target/x86_64-tcmk/release/tcmk-kernel
+```
+
+Yani "disk yok" degil, "imaj uretilemiyor" idi. Ayrim onemli, cunku
+cozum de bambaska: sarj edilecek sey cekirdek degil, betigin sartiydi.
+
+Betik artik cekirdegin ELF sinifina bakiyor. ELF32 ise eski davranis
+aynen surer (kendi onyukleyicisi gomulur); ELF64 ise **onyukleyici alani
+bos birakilir** ve disk GRUB'in hibrit MBR'siyle acilir -- ki o MBR'yi
+`grub-mkrescue` zaten yaziyordu.
+
+```
+bolum 1  ISO hibrit (GRUB + cekirdek)
+bolum 2  TCMKFS
+           sektor 40..8191   i386: 2. asama + cekirdek blogu
+                             x86_64: BOS
+           sektor 8192..     dosya sistemi veri bloklari
+```
+
+Dosya sistemi bundan etkilenmiyor: veri bloklari zaten 8192. sektorden
+sonra basliyor, yani ayni yerlesim iki mimaride de gecerli.
+
+Amac disk **erisimi**, kendi onyukleyicisini 64-bit'e tasimak degil --
+`install` komutu x86_64'te acikca reddediyor ("kurulum su an yalnizca
+i386'da destekleniyor") ve bu bilincli.
+
+Olcum, diskten acilan x86_64'te:
+
+```
+[LEVEL-0a] servis block        [ACTIVE]
+[LEVEL-0a] disk: ata-pio 'QEMU HARDDISK' 145408 sektor (71 MiB)
+[LEVEL-0a] disk: bolum 2 tur=0x7f (TCMKFS) lba=14336 sektor=131072
+tcmk> format onayla
+bicimlendirildi: 60 MiB kullanilabilir
+tcmk> save /home/kanit.txt merhaba-x86-64
+15 bayt yazildi: /home/kanit.txt
+```
+
+...ve **QEMU kapatilip yeniden acildiktan sonra**:
+
+```
+[LEVEL-0a] tcmkfs: baglandi -- 1 dosya, 4 KiB / 61440 KiB kullanimda
+tcmk> cat /home/kanit.txt
+merhaba-x86-64
+```
+
+Sinav tarafinda: diskten acilan iki mimari de `probe` 16/16 ve
+`winprobe` 12/12 veriyor. Onceden yalnizca i386'da gecen dort sinav
+(`ftruncate`, `O_TRUNC`, `SetEndOfFile`, `CREATE_ALWAYS`) artik
+x86_64'te de geciyor -- "atlandi" satiri kalmadi.
+
 ### Uygulama "kurmak"
 
 `cp` diskteki bir kopyayi olusturur, `run` onu oradan calistirir:
@@ -1629,8 +1691,8 @@ Uc yeni `KernelError` degeri iki ABI'ye de ayri ayri cevriliyor:
 Olcum: dolu bir dizini silmeye calisinca `browse` **"dizin bos degil"**
 diyor ve girdi sayisi degismiyor; `/bin/hello`yu silmeye calisinca
 **"silinemedi"** diyor -- RAMFS dosyalari cekirdek imajinin parcasidir,
-Ring 3'ten silinemezler. x86_64'te (disk yok) `mkdir` **"basarisiz"**
-donuyor, cekirdek cokmuyor.
+Ring 3'ten silinemezler. Disksiz acilista (yalnizca ISO) `mkdir`
+**"basarisiz"** donuyor, cekirdek cokmuyor.
 
 ### Bilerek yapilmayanlar
 
@@ -1907,7 +1969,7 @@ Sinav bir kere de yanlis "kaldi" demisti: karsilastirma sabit bir yola
 sessizce basarisiz olunca sinav basarisiz gorunuyordu -- oysa devralma
 dogru calisiyordu, yalnizca gidilecek dizin yoktu. Karsilastirma
 **ebeveynin gercek dizinine** cevrildi; sinanan sey "cocuk ebeveynle
-ayni yerde mi", bir yol adinin kendisi degil. x86_64'te (disk yok) ayni
+ayni yerde mi", bir yol adinin kendisi degil. Disksiz acilista ayni
 sinav kokten kosuyor ve yine geciyor.
 
 ### Olcum bir hata daha buldu
@@ -2515,8 +2577,12 @@ ister** (RAMFS salt okunur); disk yoksa "gecti" degil **"atlandi"**
 bildiriliyor -- calismayan bir yetenegi calisiyor sanmak, sinavin
 kendisini degersiz kilardi.
 
+Ayrim artik mimari degil, **nasil acildigin**: iki mimari de diskten
+acilabiliyor (bkz. "x86_64 da diskten aciliyor"), ISO'dan acilinca
+ikisinde de ayni dort sinav atlaniyor.
+
 ```text
-i386 (disk bagli)                    x86_64 (yalnizca ISO)
+diskten acilis (iki mimari)          ISO'dan acilis (iki mimari)
 [probe] J ftruncate:    gecti        [probe] J ftruncate:    atlandi
 [probe] K O_TRUNC:      gecti        [probe] K O_TRUNC:      atlandi
 [winprobe] G SetEndOfFile:  gecti    [winprobe] G SetEndOfFile:  atlandi
