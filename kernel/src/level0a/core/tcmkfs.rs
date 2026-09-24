@@ -50,21 +50,27 @@ pub const MAGIC: u32 = 0x4B4D_4354;
 ///
 /// 2 = **dizinler**. Inode'a `parent` alani eklendi ve `name` artik tam
 /// yolu degil tek bir **bileseni** tasiyor; kok dizin 0 numarali
-/// inode'dur. Surum 1 imajlari bu yuzden baglanmaz -- yeniden
-/// bicimlendirme gerekir.
-pub const VERSION: u32 = 2;
+/// inode'dur.
+///
+/// 3 = **tavanlarin kalkmasi**. Uc sey birden degisti ve ucu de
+/// yerlesimi bozdugu icin tek surumde toplandi:
+///
+/// * inode sayisi 64 -> 512,
+/// * dosya basina **dolayli blok** (160 KiB -> 4 MiB + 160 KiB),
+/// * metaveri onyukleyici alaninin **arkasina** tasindi.
+///
+/// Ucuncusu ilkinin sartiydi: 512 inode'luk tablo 256 sektor tutuyor,
+/// oysa eski yerlesimde tablo 1. sektorde basliyor ve 40. sektorde
+/// onyukleyici alani geliyordu. Tabloyu buyutmek onyukleyiciyi ezerdi.
+///
+/// Eski surum imajlari baglanmaz -- yeniden bicimlendirme gerekir.
+pub const VERSION: u32 = 3;
 
 pub const BLOCK_SIZE: usize = 4096;
 const SECTORS_PER_BLOCK: u32 = (BLOCK_SIZE / SECTOR_SIZE) as u32;
 
-pub const MAX_INODES: usize = 64;
+pub const MAX_INODES: usize = 512;
 const INODE_SIZE: usize = 256;
-const INODE_TABLE_SECTOR: u32 = 1;
-const INODE_TABLE_SECTORS: u32 = (MAX_INODES * INODE_SIZE / SECTOR_SIZE) as u32; // 32
-
-const BITMAP_SECTOR: u32 = INODE_TABLE_SECTOR + INODE_TABLE_SECTORS; // 33
-const BITMAP_SECTORS: u32 = 4;
-const MAX_BLOCKS: usize = (BITMAP_SECTORS as usize * SECTOR_SIZE) * 8; // 16384
 
 // Onyukleyici alani sabitleri: yalnizca i386'nin kurulum modulu kullanir
 // (boot zinciri su an i386'ya ozgu). Yerlesimin kendisi mimariden
@@ -78,19 +84,44 @@ pub const STAGE2_SECTORS: u32 = 32;
 #[cfg_attr(target_arch = "x86_64", allow(dead_code))]
 pub const KERNEL_BLOB_SECTOR: u32 = BOOT_AREA_SECTOR + STAGE2_SECTORS;
 
-/// Veri bloklarinin basladigi sektor. Onyukleyici alaninin hemen ardindan,
-/// 4 MiB sinirinda baslar.
+/// Onyukleyici alaninin bittigi (metaverinin basladigi) sektor.
 ///
 /// Alan basta 2 MiB idi; gomulu Ring 3 uygulamalari cogaldikca cekirdek
 /// imaji oraya sigmaz oldu (`make disk` acikca hata verir, sessizce
-/// bozulmaz). Sinir bu yuzden ikiye katlandi -- `tools/make_disk.py`
-/// icindeki ayni adli sabitle birlikte degistirilmeli.
-const DATA_START_SECTOR: u32 = 8192;
+/// bozulmaz). Sinir bu yuzden ikiye katlandi --
+/// `tools/make_disk.py` icindeki ayni adli sabitle birlikte
+/// degistirilmeli.
+pub const BOOT_AREA_END_SECTOR: u32 = 8192;
+
+// Metaveri onyukleyici alaninin **arkasinda**. Onceki yerlesimde inode
+// tablosu 1. sektorde basliyordu ve 39 sektor sonra onyukleyici alanina
+// carpiyordu -- yani tablo hicbir zaman 64 inode'dan buyuyemezdi.
+// Arkaya tasimak o tavani kaldirdi; superblock yerinde kaldi (0.
+// sektor), cunku onu bulmak icin once okunabilmesi gerekiyor.
+const INODE_TABLE_SECTOR: u32 = BOOT_AREA_END_SECTOR; // 8192
+const INODE_TABLE_SECTORS: u32 = (MAX_INODES * INODE_SIZE / SECTOR_SIZE) as u32; // 256
+
+const BITMAP_SECTOR: u32 = INODE_TABLE_SECTOR + INODE_TABLE_SECTORS; // 8448
+const BITMAP_SECTORS: u32 = 32;
+/// Bitmap'in adresleyebilecegi en fazla blok: 32 sektor = 131072 bit,
+/// yani 512 MiB veri. Onceki 4 sektor 64 MiB'da tikaniyordu.
+const MAX_BLOCKS: usize = (BITMAP_SECTORS as usize * SECTOR_SIZE) * 8; // 131072
+
+/// Veri bloklarinin basladigi sektor: metaverinin hemen ardindan.
+const DATA_START_SECTOR: u32 = BITMAP_SECTOR + BITMAP_SECTORS; // 8480
 
 /// Dosya basina dogrudan blok isaretcisi sayisi.
 pub const DIRECT_BLOCKS: usize = 40;
-pub const MAX_FILE_SIZE: usize = DIRECT_BLOCKS * BLOCK_SIZE;
+/// Bir dolayli blogun tasidigi blok numarasi sayisi (4096 / 4).
+pub const POINTERS_PER_BLOCK: usize = BLOCK_SIZE / 4;
+/// Azami dosya boyu: 40 dogrudan + 1024 dolayli blok.
+pub const MAX_FILE_SIZE: usize = (DIRECT_BLOCKS + POINTERS_PER_BLOCK) * BLOCK_SIZE;
 pub const MAX_NAME: usize = 64;
+
+/// "Blok yok" isareti -- **veri blogu numarasi olarak kullanilamaz**,
+/// cunku 0 gecerli bir bloktur (bicimlendirilmis bir diskte ilk tahsis
+/// edilen blok tam olarak odur).
+const NO_BLOCK: u32 = u32::MAX;
 
 pub const KIND_FREE: u32 = 0;
 pub const KIND_FILE: u32 = 1;
@@ -156,12 +187,20 @@ struct Inode {
     /// Dizin agacini **cocuk -> ebeveyn** yonunde tutmak bilincli: bir
     /// dizinin icerigi sabit boyutlu bir listeye sigmak zorunda kalmaz,
     /// "bu dizinin cocuklari" sorusu inode tablosunun taranmasiyla
-    /// cevaplanir. 64 inode'luk bir tabloda tarama zaten ucuzdur.
+    /// cevaplanir. Birkac yuz girdilik bir tabloda tarama ucuzdur.
     parent: u32,
     /// Yolun **tek bir bileseni** (surum 2 oncesinde tam yoldu).
     name: [u8; MAX_NAME],
     blocks: [u32; DIRECT_BLOCKS],
-    _pad: [u8; INODE_SIZE - 20 - MAX_NAME - DIRECT_BLOCKS * 4],
+    /// Dolayli blogun numarasi, **bir fazlasiyla**; 0 = yok.
+    ///
+    /// Kaydirma sart: 0 gecerli bir veri blogu numarasidir, yani duz
+    /// saklansa "dolayli blogum yok" ile "dolayli blogum 0 numarali
+    /// blok" ayirt edilemezdi -- ve bicimlendirilmis bir diskte ilk
+    /// tahsis edilen blok tam olarak 0'dir, yani hata ilk buyuk
+    /// dosyada cikardi.
+    indirect: u32,
+    _pad: [u8; INODE_SIZE - 24 - MAX_NAME - DIRECT_BLOCKS * 4],
 }
 
 impl Inode {
@@ -174,7 +213,8 @@ impl Inode {
             parent: 0,
             name: [0; MAX_NAME],
             blocks: [0; DIRECT_BLOCKS],
-            _pad: [0; INODE_SIZE - 20 - MAX_NAME - DIRECT_BLOCKS * 4],
+            indirect: 0,
+            _pad: [0; INODE_SIZE - 24 - MAX_NAME - DIRECT_BLOCKS * 4],
         }
     }
 }
@@ -189,6 +229,20 @@ static mut INODES: [Inode; MAX_INODES] = [Inode::empty(); MAX_INODES];
 static mut BITMAP: [u8; BITMAP_SECTORS as usize * SECTOR_SIZE] =
     [0; BITMAP_SECTORS as usize * SECTOR_SIZE];
 static mut SCRATCH: [u8; BLOCK_SIZE] = [0; BLOCK_SIZE];
+/// Dolayli blok icin **ayri** bir tampon.
+///
+/// `SCRATCH` ile paylasilamaz: `write` veri blogunu orada kurarken ayni
+/// anda blok numarasini dolayli bloktan okumak zorunda kaliyor.
+static mut INDIRECT: [u8; BLOCK_SIZE] = [0; BLOCK_SIZE];
+
+/// `INDIRECT` tamponunda hangi blok duruyor (`NO_BLOCK` = bos).
+static INDIRECT_CACHED: AtomicU32 = AtomicU32::new(NO_BLOCK);
+/// Tampon diske yazilmayi bekliyor mu.
+static INDIRECT_DIRTY: AtomicBool = AtomicBool::new(false);
+
+/// Bitmap'in kirli sektor araligi; `LO > HI` "degismedi" demek.
+static BITMAP_LO: AtomicU32 = AtomicU32::new(u32::MAX);
+static BITMAP_HI: AtomicU32 = AtomicU32::new(0);
 
 static MOUNTED: AtomicBool = AtomicBool::new(false);
 static PART_LBA: AtomicU32 = AtomicU32::new(0);
@@ -246,6 +300,35 @@ fn flush_inodes() -> Result<(), FsError> {
     Ok(())
 }
 
+/// **Tek** bir inode'un durdugu sektoru yazar.
+///
+/// Tablo 64'ten 512 inode'a cikinca tam flush 16 KiB'dan 128 KiB'a
+/// cikti -- ve `write` her cagrinin sonunda tam flush yapiyordu, yani
+/// 200 KiB'lik bir dosya 6 MiB'lik gereksiz PIO yazmasi demek olurdu.
+/// Bir sektorde iki inode duruyor (512 / 256), yani tek bir degisiklik
+/// icin 512 bayt yetiyor.
+///
+/// Komsu inode da ayni sektorde yaziliyor; onbellek zaten diskteki
+/// dogru degeri tuttugu icin bu bir kayip degil.
+fn flush_inode(index: usize) -> Result<(), FsError> {
+    if index >= MAX_INODES {
+        return Err(FsError::NotFound);
+    }
+    let sector = (index * INODE_SIZE / SECTOR_SIZE) as u32;
+    let offset = sector as usize * SECTOR_SIZE;
+    unsafe {
+        let bytes = core::slice::from_raw_parts(
+            core::ptr::addr_of!(INODES) as *const u8,
+            MAX_INODES * INODE_SIZE,
+        );
+        io(block::write(
+            part_lba() + INODE_TABLE_SECTOR + sector,
+            1,
+            &bytes[offset..offset + SECTOR_SIZE],
+        ))
+    }
+}
+
 fn load_inodes() -> Result<(), FsError> {
     unsafe {
         let bytes = core::slice::from_raw_parts_mut(
@@ -265,15 +348,25 @@ fn load_inodes() -> Result<(), FsError> {
 }
 
 fn flush_bitmap() -> Result<(), FsError> {
+    let lo = BITMAP_LO.load(Ordering::Relaxed);
+    let hi = BITMAP_HI.load(Ordering::Relaxed);
+    if lo > hi {
+        // Hicbir bit degismedi.
+        return Ok(());
+    }
+    BITMAP_LO.store(u32::MAX, Ordering::Relaxed);
+    BITMAP_HI.store(0, Ordering::Relaxed);
     unsafe {
         let bytes = core::slice::from_raw_parts(
             core::ptr::addr_of!(BITMAP) as *const u8,
             BITMAP_SECTORS as usize * SECTOR_SIZE,
         );
+        let from = lo as usize * SECTOR_SIZE;
+        let to = (hi as usize + 1) * SECTOR_SIZE;
         io(block::write(
-            part_lba() + BITMAP_SECTOR,
-            BITMAP_SECTORS as u8,
-            bytes,
+            part_lba() + BITMAP_SECTOR + lo,
+            (hi - lo + 1) as u8,
+            &bytes[from..to],
         ))
     }
 }
@@ -318,7 +411,24 @@ fn bit_get(index: u32) -> bool {
     }
 }
 
+/// Bitmap'in hangi sektorleri degisti.
+///
+/// Tam flush 2 KiB'dan 16 KiB'a cikti; her blok tahsisinde bunu diske
+/// yazmak bos bir masraf. Degisen aralik genellikle **tek** sektor.
+fn bitmap_touch(byte_index: usize) {
+    let sector = (byte_index / SECTOR_SIZE) as u32;
+    BITMAP_LO.fetch_min(sector, Ordering::Relaxed);
+    BITMAP_HI.fetch_max(sector, Ordering::Relaxed);
+}
+
+/// Butun bitmap'i kirli isaretler (`format` icin).
+fn bitmap_touch_all() {
+    BITMAP_LO.store(0, Ordering::Relaxed);
+    BITMAP_HI.store(BITMAP_SECTORS - 1, Ordering::Relaxed);
+}
+
 fn bit_set(index: u32, value: bool) {
+    bitmap_touch(index as usize / 8);
     unsafe {
         let bitmap = core::ptr::addr_of_mut!(BITMAP) as *mut u8;
         let byte = bitmap.add(index as usize / 8);
@@ -350,6 +460,135 @@ fn free_block(index: u32) {
     }
 }
 
+// --- Dolayli blok ---
+//
+// 40 dogrudan isaretciden sonrasi tek bir **dolayli** blokta duruyor: o
+// blok 4096/4 = 1024 blok numarasi tasiyor, yani dosya tavani
+// 40 * 4 KiB + 1024 * 4 KiB = 4 MiB + 160 KiB.
+//
+// Iki kademeli (double indirect) yok ve bu bilincli: bir kademe tavani
+// 26 katina cikariyor, ikincisi ise bu boyuttaki bir diskte zaten
+// ulasilamayacak bir sayiya. Karsiliginda her erisim bir blok okumasi
+// daha ederdi.
+//
+// O okumayi da onbellek yutuyor: ardisik bir yazmada butun isaretciler
+// **ayni** dolayli blokta oldugu icin tampon bir kez okunur, degisiklik
+// bellekte birikir ve cagrinin sonunda bir kez yazilir.
+
+fn indirect_buf() -> &'static mut [u8] {
+    unsafe {
+        core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(INDIRECT) as *mut u8, BLOCK_SIZE)
+    }
+}
+
+/// Kirli tamponu diske yazar.
+fn indirect_flush() -> Result<(), FsError> {
+    if !INDIRECT_DIRTY.load(Ordering::Relaxed) {
+        return Ok(());
+    }
+    let block = INDIRECT_CACHED.load(Ordering::Relaxed);
+    INDIRECT_DIRTY.store(false, Ordering::Relaxed);
+    if block == NO_BLOCK {
+        return Ok(());
+    }
+    write_block(block, indirect_buf())
+}
+
+/// Istenen dolayli blogu tampona getirir.
+fn indirect_load(block: u32) -> Result<(), FsError> {
+    if INDIRECT_CACHED.load(Ordering::Relaxed) == block {
+        return Ok(());
+    }
+    indirect_flush()?;
+    read_block(block, indirect_buf())?;
+    INDIRECT_CACHED.store(block, Ordering::Relaxed);
+    Ok(())
+}
+
+/// Blok serbest birakilirken tamponu gecersiz kilar.
+///
+/// Olmazsa ayni numara baska bir dosyaya **veri** blogu olarak verilince
+/// onbellek eski isaretcileri sunmaya devam ederdi.
+fn indirect_forget(block: u32) {
+    if INDIRECT_CACHED.load(Ordering::Relaxed) == block {
+        INDIRECT_CACHED.store(NO_BLOCK, Ordering::Relaxed);
+        INDIRECT_DIRTY.store(false, Ordering::Relaxed);
+    }
+}
+
+fn indirect_get(block: u32, slot: usize) -> Result<u32, FsError> {
+    indirect_load(block)?;
+    let buf = indirect_buf();
+    let at = slot * 4;
+    Ok(u32::from_le_bytes([buf[at], buf[at + 1], buf[at + 2], buf[at + 3]]))
+}
+
+fn indirect_set(block: u32, slot: usize, value: u32) -> Result<(), FsError> {
+    indirect_load(block)?;
+    let at = slot * 4;
+    indirect_buf()[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    INDIRECT_DIRTY.store(true, Ordering::Relaxed);
+    Ok(())
+}
+
+/// Dosyanin `n` numarali **mantiksal** blogunun disk blok numarasi.
+fn block_at(inode: &Inode, n: usize) -> Result<u32, FsError> {
+    if n < DIRECT_BLOCKS {
+        return Ok(inode.blocks[n]);
+    }
+    let slot = n - DIRECT_BLOCKS;
+    if slot >= POINTERS_PER_BLOCK || inode.indirect == 0 {
+        return Err(FsError::FileTooLarge);
+    }
+    indirect_get(inode.indirect - 1, slot)
+}
+
+/// `n` numarali mantiksal bloga disk blogunu baglar.
+///
+/// Dolayli alana ilk kez uzanildiginda dolayli blogu da tahsis eder --
+/// ve onu **sifirlayarak**: blok daha once baska bir dosyanindi, icindeki
+/// eski baytlar blok numarasi olarak okunurdu.
+fn set_block_at(inode: &mut Inode, n: usize, block: u32) -> Result<(), FsError> {
+    if n < DIRECT_BLOCKS {
+        inode.blocks[n] = block;
+        return Ok(());
+    }
+    let slot = n - DIRECT_BLOCKS;
+    if slot >= POINTERS_PER_BLOCK {
+        return Err(FsError::FileTooLarge);
+    }
+    if inode.indirect == 0 {
+        let fresh = alloc_block().ok_or(FsError::Full)?;
+        indirect_flush()?;
+        indirect_buf().fill(0);
+        INDIRECT_CACHED.store(fresh, Ordering::Relaxed);
+        INDIRECT_DIRTY.store(true, Ordering::Relaxed);
+        inode.indirect = fresh + 1;
+    }
+    indirect_set(inode.indirect - 1, slot, block)
+}
+
+/// `from`..`to` mantiksal bloklarini serbest birakir.
+///
+/// Dosya dolayli alanin tumden disina dustuyse dolayli blok da geri
+/// verilir; birakilmazsa her kucultme bir blok sizdirirdi.
+fn free_range(inode: &mut Inode, from: usize, to: usize) -> Result<(), FsError> {
+    for i in from..to {
+        let block = block_at(inode, i)?;
+        free_block(block);
+        if i < DIRECT_BLOCKS {
+            inode.blocks[i] = 0;
+        }
+    }
+    if from <= DIRECT_BLOCKS && inode.indirect != 0 {
+        let stale = inode.indirect - 1;
+        indirect_forget(stale);
+        free_block(stale);
+        inode.indirect = 0;
+    }
+    Ok(())
+}
+
 // --- Bicimlendirme / baglama ---
 
 /// Bolumu TCMKFS olarak bicimlendirir. **Mevcut veriyi yok eder.**
@@ -363,6 +602,10 @@ pub fn format(label: &str) -> Result<(), FsError> {
     let total = capacity_blocks(sectors);
     TOTAL_BLOCKS.store(total, Ordering::Relaxed);
     FREE_BLOCKS.store(total, Ordering::Relaxed);
+    // Onceki dosya sisteminden kalan dolayli blok tamponu bu diskte
+    // bambaska bir seyi gosterir; yazilmadan atiliyor.
+    INDIRECT_CACHED.store(NO_BLOCK, Ordering::Relaxed);
+    INDIRECT_DIRTY.store(false, Ordering::Relaxed);
 
     unsafe {
         let inodes = core::ptr::addr_of_mut!(INODES) as *mut Inode;
@@ -372,6 +615,8 @@ pub fn format(label: &str) -> Result<(), FsError> {
         let bitmap = core::ptr::addr_of_mut!(BITMAP) as *mut u8;
         core::ptr::write_bytes(bitmap, 0, BITMAP_SECTORS as usize * SECTOR_SIZE);
     }
+    // Bicimlendirme butun bitmap'i degistirir; kismi flush yetmez.
+    bitmap_touch_all();
 
     let mut sb = SuperBlock {
         magic: MAGIC,
@@ -436,6 +681,8 @@ pub fn mount() -> Result<(), FsError> {
     let total = sb.total_blocks.min(capacity_blocks(sectors));
     TOTAL_BLOCKS.store(total, Ordering::Relaxed);
 
+    INDIRECT_CACHED.store(NO_BLOCK, Ordering::Relaxed);
+    INDIRECT_DIRTY.store(false, Ordering::Relaxed);
     load_inodes()?;
     load_bitmap()?;
 
@@ -462,6 +709,7 @@ pub fn sync() -> Result<(), FsError> {
     if !mounted() {
         return Err(FsError::NotMounted);
     }
+    indirect_flush()?;
     flush_inodes()?;
     flush_bitmap()?;
 
@@ -678,7 +926,7 @@ pub fn mkdir(path: &str) -> Result<usize, FsError> {
     }
     let (parent, leaf) = split_parent(path)?;
     let index = allocate_inode(parent, leaf, KIND_DIR)?;
-    flush_inodes()?;
+    flush_inode(index)?;
     Ok(index)
 }
 
@@ -701,7 +949,7 @@ pub fn rmdir(path: &str) -> Result<(), FsError> {
         return Err(FsError::NotEmpty);
     }
     *inode_ref(index).ok_or(FsError::NotFound)? = Inode::empty();
-    flush_inodes()?;
+    flush_inode(index)?;
     Ok(())
 }
 
@@ -756,7 +1004,7 @@ pub fn rename(old: &str, new: &str) -> Result<(), FsError> {
         inode.name[i] = b;
     }
     inode.parent = parent as u32;
-    flush_inodes()
+    flush_inode(index)
 }
 
 /// Bir inode'un iceren dizini.
@@ -817,7 +1065,7 @@ pub fn create(path: &str) -> Result<usize, FsError> {
     }
     let (parent, leaf) = split_parent(path)?;
     let index = allocate_inode(parent, leaf, KIND_FILE)?;
-    flush_inodes()?;
+    flush_inode(index)?;
     Ok(index)
 }
 
@@ -833,12 +1081,11 @@ pub fn remove(index: usize) -> Result<(), FsError> {
     }
 
     let used = block_count(inode.size as usize);
-    for i in 0..used {
-        free_block(inode.blocks[i]);
-    }
+    free_range(inode, 0, used)?;
     *inode = Inode::empty();
 
-    flush_inodes()?;
+    indirect_flush()?;
+    flush_inode(index)?;
     flush_bitmap()?;
     Ok(())
 }
@@ -875,7 +1122,7 @@ pub fn read(index: usize, offset: usize, buf: &mut [u8]) -> Result<usize, FsErro
                 core::ptr::addr_of_mut!(SCRATCH) as *mut u8,
                 BLOCK_SIZE,
             );
-            read_block(inode.blocks[block_index], scratch)?;
+            read_block(block_at(inode, block_index)?, scratch)?;
             buf[done..done + chunk].copy_from_slice(&scratch[in_block..in_block + chunk]);
         }
         done += chunk;
@@ -904,16 +1151,20 @@ pub fn write(index: usize, offset: usize, data: &[u8]) -> Result<usize, FsError>
     let needed = block_count(end);
     let have = block_count(inode.size as usize);
     for i in have..needed {
-        match alloc_block() {
-            Some(block) => inode.blocks[i] = block,
+        // Tahsis iki asamali: once veri blogu, sonra isaretcinin
+        // yerlestirilmesi -- ve ikincisi de (dolayli blok gerekiyorsa)
+        // tahsis edebilir, yani ayrica basarisiz olabilir.
+        let block = match alloc_block() {
+            Some(block) => block,
             None => {
-                // Geri al: bu cagride tahsis edilenleri birak.
-                for j in have..i {
-                    free_block(inode.blocks[j]);
-                    inode.blocks[j] = 0;
-                }
+                free_range(inode, have, i)?;
                 return Err(FsError::Full);
             }
+        };
+        if let Err(e) = set_block_at(inode, i, block) {
+            free_block(block);
+            free_range(inode, have, i)?;
+            return Err(e);
         }
     }
 
@@ -931,15 +1182,16 @@ pub fn write(index: usize, offset: usize, data: &[u8]) -> Result<usize, FsError>
             );
             // Kismi blok yazimi: once oku, sonra uzerine yaz
             // (read-modify-write) -- yoksa blogun geri kalani cope doner.
+            let block = block_at(inode, block_index)?;
             if chunk < BLOCK_SIZE {
                 if block_index < have {
-                    read_block(inode.blocks[block_index], scratch)?;
+                    read_block(block, scratch)?;
                 } else {
                     scratch.fill(0);
                 }
             }
             scratch[in_block..in_block + chunk].copy_from_slice(&data[done..done + chunk]);
-            write_block(inode.blocks[block_index], scratch)?;
+            write_block(block, scratch)?;
         }
         done += chunk;
     }
@@ -949,7 +1201,8 @@ pub fn write(index: usize, offset: usize, data: &[u8]) -> Result<usize, FsError>
     }
     inode.mtime = crate::level0a::drivers::rtc::unix_time();
 
-    flush_inodes()?;
+    indirect_flush()?;
+    flush_inode(index)?;
     flush_bitmap()?;
     Ok(done)
 }
@@ -988,22 +1241,21 @@ pub fn truncate(index: usize, length: usize) -> Result<(), FsError> {
     let needed = block_count(length);
 
     if length < old {
-        for i in needed..have {
-            free_block(inode.blocks[i]);
-            inode.blocks[i] = 0;
-        }
+        free_range(inode, needed, have)?;
     } else if length > old {
         // Once tahsis (yarim birakmamak icin), sonra sifirlama.
         for i in have..needed {
-            match alloc_block() {
-                Some(block) => inode.blocks[i] = block,
+            let block = match alloc_block() {
+                Some(block) => block,
                 None => {
-                    for j in have..i {
-                        free_block(inode.blocks[j]);
-                        inode.blocks[j] = 0;
-                    }
+                    free_range(inode, have, i)?;
                     return Err(FsError::Full);
                 }
+            };
+            if let Err(e) = set_block_at(inode, i, block) {
+                free_block(block);
+                free_range(inode, have, i)?;
+                return Err(e);
             }
         }
         unsafe {
@@ -1014,22 +1266,24 @@ pub fn truncate(index: usize, length: usize) -> Result<(), FsError> {
             // Eski son blogun kuyrugu: blok zaten bu dosyanin, o yuzden
             // once okunup yalnizca eski boyun otesi sifirlaniyor.
             if old % BLOCK_SIZE != 0 && have > 0 {
-                let last = have - 1;
-                read_block(inode.blocks[last], scratch)?;
+                let last = block_at(inode, have - 1)?;
+                read_block(last, scratch)?;
                 scratch[old % BLOCK_SIZE..].fill(0);
-                write_block(inode.blocks[last], scratch)?;
+                write_block(last, scratch)?;
             }
             // Yeni bloklar bastan sona sifir.
             scratch.fill(0);
             for i in have..needed {
-                write_block(inode.blocks[i], scratch)?;
+                let block = block_at(inode, i)?;
+                write_block(block, scratch)?;
             }
         }
     }
 
     inode.size = length as u32;
     inode.mtime = crate::level0a::drivers::rtc::unix_time();
-    flush_inodes()?;
+    indirect_flush()?;
+    flush_inode(index)?;
     flush_bitmap()?;
     Ok(())
 }

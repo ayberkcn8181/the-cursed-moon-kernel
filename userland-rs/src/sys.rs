@@ -1423,6 +1423,14 @@ pub mod kstat {
     pub const TASKS: usize = 4;
     /// Toplam gorev yuvasi.
     pub const TASK_SLOTS: usize = 5;
+    /// Dosya sisteminde bos blok sayisi (disk yoksa 0).
+    pub const FS_FREE_BLOCKS: usize = 6;
+    /// Dosya sistemindeki toplam blok sayisi (disk yoksa 0).
+    pub const FS_TOTAL_BLOCKS: usize = 7;
+    /// Dosya sistemi blok boyu (bayt).
+    pub const FS_BLOCK_SIZE: usize = 8;
+    /// Azami dosya boyu (bayt).
+    pub const FS_MAX_FILE: usize = 9;
 }
 
 /// Bir cekirdek sayacini okur.
@@ -1456,6 +1464,29 @@ pub fn task_count() -> usize {
 /// Toplam gorev yuvasi (tavan).
 pub fn task_slots() -> usize {
     kstat(kstat::TASK_SLOTS)
+}
+
+/// Dosya sisteminde bos blok sayisi -- disk yoksa 0.
+///
+/// Bir sinavin "bu islem blok sizdirdi mi" sorusunu cevaplayabilmesi
+/// icin var: islemden once ve sonra okunup karsilastirilir.
+pub fn fs_free_blocks() -> usize {
+    kstat(kstat::FS_FREE_BLOCKS)
+}
+
+/// Dosya sistemindeki toplam blok sayisi -- disk yoksa 0.
+pub fn fs_total_blocks() -> usize {
+    kstat(kstat::FS_TOTAL_BLOCKS)
+}
+
+/// Dosya sistemi blok boyu (bayt).
+pub fn fs_block_size() -> usize {
+    kstat(kstat::FS_BLOCK_SIZE)
+}
+
+/// Azami dosya boyu (bayt) -- tavanin sinanabilmesi icin.
+pub fn fs_max_file_size() -> usize {
+    kstat(kstat::FS_MAX_FILE)
 }
 
 /// `set_tid_address`: olurken sifirlanacak yeri sonradan bildirir.

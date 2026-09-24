@@ -1120,6 +1120,10 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
             const KSTAT_THREADS_CREATED: usize = 3;
             const KSTAT_TASKS: usize = 4;
             const KSTAT_TASK_SLOTS: usize = 5;
+            const KSTAT_FS_FREE_BLOCKS: usize = 6;
+            const KSTAT_FS_TOTAL_BLOCKS: usize = 7;
+            const KSTAT_FS_BLOCK_SIZE: usize = 8;
+            const KSTAT_FS_MAX_FILE: usize = 9;
 
             let value = match arg1 {
                 KSTAT_ADDRESS_WAITS => crate::level0a::core::scheduler::address_waits(),
@@ -1128,6 +1132,13 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
                 KSTAT_THREADS_CREATED => crate::level0b1::thread::created(),
                 KSTAT_TASKS => crate::level0a::core::scheduler::live_task_count(),
                 KSTAT_TASK_SLOTS => crate::level0a::core::scheduler::MAX_TASKS,
+                // Dosya sistemi sayaclari: bir sinavin "blok sizdi mi"
+                // sorusunu Ring 3'ten cevaplayabilmesi icin. Disk yoksa
+                // ucu de sifir doner.
+                KSTAT_FS_FREE_BLOCKS => crate::level0a::core::tcmkfs::free_blocks() as usize,
+                KSTAT_FS_TOTAL_BLOCKS => crate::level0a::core::tcmkfs::total_blocks() as usize,
+                KSTAT_FS_BLOCK_SIZE => crate::level0a::core::tcmkfs::BLOCK_SIZE,
+                KSTAT_FS_MAX_FILE => crate::level0a::core::tcmkfs::MAX_FILE_SIZE,
                 _ => {
                     frame.set_return((-EINVAL) as usize);
                     return;

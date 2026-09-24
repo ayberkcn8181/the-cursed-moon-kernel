@@ -50,7 +50,7 @@ okumak da artik bekliyor: `read(0, ...)` POSIX'in varsayilanina uyuyor,
 beklemek istemeyen `poll` ya da `O_NONBLOCK` kullaniyor.
 
 Her yetenek QEMU'da **olculerek** dogrulanmistir: `probe` (16 sinav),
-`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (5), `bequest`
+`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (5), `bigfile` (6), `bequest`
 (6), `nested` (4), `winenv` (4) gibi programlar sonucu hem ekrana hem
 seri gunluge yaziyor. Olcumler yol boyunca gercek hatalar buldu -- dolan
 VFS tablosu, `CreateFileA`'nin cevrilmeyen Windows yollari, `GDT`
@@ -60,7 +60,9 @@ siniri, x86_64'te segment secicisinin taban MSR'sini silmesi, kesme ve
 her zaman acik olan `stdin`e `EBADF` diyen `fcntl`, yuvasini hic
 birakmayan bitmis is parcaciklari, yuvasi geri verilmis bir gorevi
 bekleyenin bir daha uyanmamasi -- ve her biri README'de kendi
-bolumunde yazili.
+bolumunde yazili. Olcum bir de sunu gosterdi: bir tavani kaldirmak,
+altinda duran daha sikisik bir tavani (VFS dugum tablosu) gormeden
+anlamsiz.
 
 **Tamamlanan fazlar:**
 
@@ -1067,15 +1069,24 @@ destegi olan kucuk bir dosya sistemi secildi. ext2 okuyucusu ileride VFS'e
 ### TCMKFS yerlesimi (bolum baslangicina gore, sektor)
 
 ```
-   0        superblock ("TCMK" imzasi, kapasite, etiket)
-   1..32    inode tablosu   (64 inode x 256 bayt)
-  33..36    blok bitmap'i   (16384 bit)
-  40..      veri bloklari   (blok = 4096 bayt = 8 sektor)
+      0        superblock ("TCMK" imzasi, kapasite, etiket)
+     40..8191  onyukleyici alani (i386 zinciri; x86_64'te bos)
+   8192..8447  inode tablosu   (512 inode x 256 bayt)
+   8448..8479  blok bitmap'i   (131072 bit -> 512 MiB)
+   8480..      veri bloklari   (blok = 4096 bayt = 8 sektor)
 ```
 
-Dosya basina 40 **dogrudan** blok isaretcisi -> azami 160 KiB. Inode
-tablosu ve bitmap bellekte onbelleklenir, degisiklikler aninda diske
-yazilir (write-through), her yazmadan sonra ATA cache-flush verilir.
+Metaveri onyukleyici alaninin **arkasinda** duruyor ve bu bir
+zorunluluktu: 512 inode'luk tablo 256 sektor tutuyor, oysa eski
+yerlesimde tablo 1. sektorde basliyor ve 40. sektorde onyukleyici
+geliyordu -- tabloyu buyutmek onyukleyiciyi ezerdi. Superblock yerinde
+kaldi (0. sektor), cunku gerisini bulmak icin once **o** okunabilmeli.
+
+Dosya basina 40 **dogrudan** blok isaretcisi ve bir **dolayli** blok ->
+azami 4 MiB + 160 KiB (bkz. "Tavanlar: dolayli blok ve 512 inode").
+Inode tablosu ve bitmap bellekte onbelleklenir, degisiklikler aninda
+diske yazilir (write-through), her yazmadan sonra ATA cache-flush
+verilir.
 
 ### IRQ14: disk artik kesmeyle bekliyor
 
@@ -1255,6 +1266,142 @@ bolum 2  0x7F  TCMKFS      -> kalici, yazilabilir veri
 Cekirdek yazilabilir bolumu **sabit bir LBA'ya gomerek degil, bolum
 tablosundan bularak** acar; imajin duzeni degistiginde cekirdegi yeniden
 derlemek gerekmez.
+
+### Tavanlar: dolayli blok ve 512 inode
+
+TCMKFS uzun sure iki sert sinirla yasadi ve ikisi de **yerlesimden**
+geliyordu -- yani kodun degil, diskteki duzenin sinirlariydi:
+
+```text
+  64 inode        inode tablosu 1. sektorde basliyor, 40. sektorde
+                  onyukleyici alani geliyor: tablo 39 sektoru asamaz
+  160 KiB/dosya   inode'da yalnizca 40 DOGRUDAN blok isaretcisi var
+```
+
+```
+[bigfile] A dolayli alan:  gecti (200 KiB yazildi (eski tavan 160 KiB))
+[bigfile] B sinir:         gecti (160 KiB'in iki yani da dogru)
+[bigfile] C derin okuma:   gecti (dosyanin sonu dogru geldi)
+[bigfile] D blok sizmiyor: gecti (bos blok sayisi tam geri geldi)
+[bigfile] E inode tavani:  gecti (80 dosya yaratildi ve geri acildi)
+[bigfile] F tavan duruyor: gecti (azami boyun otesi reddedildi)
+[bigfile] yazilan: 204800 bayt, azami: 4358144 bayt, blok: 4096 bayt
+```
+
+![bigfile](docs/screenshot-bigfile.png)
+
+#### Dolayli blok: klasik cozum, klasik sebep
+
+Dogrudan isaretciler bitince inode tek bir **bloga** isaret ediyor ve o
+blok 4096/4 = 1024 blok numarasi tasiyor:
+
+```text
+  mantiksal blok 0..39     -> inode.blocks[n]          (dogrudan)
+  mantiksal blok 40..1063  -> dolayli_blok[n - 40]     (bir okuma daha)
+```
+
+Tavan 160 KiB'dan **4 MiB + 160 KiB**'a cikti. Iki kademeli (double
+indirect) bilerek yok: bir kademe tavani 26 katina cikariyor, ikincisi
+ise bu boyuttaki bir diskte zaten ulasilamayacak bir sayiya.
+
+Isaretci inode'da **bir fazlasiyla** duruyor ve bu kaydirma sart:
+
+```rust
+/// Dolayli blogun numarasi, bir fazlasiyla; 0 = yok.
+indirect: u32,
+```
+
+Duz saklansaydi "dolayli blogum yok" ile "dolayli blogum 0 numarali
+blok" ayirt edilemezdi -- ve bicimlendirilmis bir diskte **ilk tahsis
+edilen blok tam olarak 0'dir**, yani hata ilk buyuk dosyada cikardi.
+
+#### Olcum: yazma-okuma tutarliligi bir sey kanitlamaz
+
+`bigfile` B sinavi, batinin en cok sey ogreten parcasi. `block_at`e
+bilerek bir kaydirma hatasi kondu (`slot + 1`) ve sonuc su oldu:
+
+```
+[bigfile] A dolayli alan:  gecti
+[bigfile] B sinir:         KALDI (sinirda veri YANLIS geldi)
+[bigfile] C derin okuma:   gecti
+```
+
+A ve C **gecti**. Sebebi ogretici: yazma yolu da okuma yolu da ayni
+`block_at`i kullaniyor, yani ayni yanlis yere yazip ayni yanlis yerden
+okuyor. Kendi icinde tutarli bir hata, "yazdigimi geri okuyabiliyorum"
+sinavindan gecer.
+
+B'yi ayiran sey, **sinirin iki yanini birlikte** okumasi: 160 KiB'in
+sekiz bayt oncesi son dogrudan bloktan, sekiz bayt sonrasi ilk dolayli
+bloktan geliyor. Kaydirma yalnizca ikinciyi etkiliyor, yani iki yanin
+ayni desende olmasi gerektigi an hata gorunur oluyor.
+
+Ders genel: bir dosya sistemi sinavinda "yazdim, okudum, ayni" yetmez;
+farkli yollardan gelen iki parcanin **birbiriyle** tutarli olmasi
+gerekiyor.
+
+#### D: sessizce dolan disk
+
+Dolayli blok da bir bloktur; dosya silinirken **o da** geri verilmeli.
+Verilmeseydi hicbir sey bozulmazdi -- disk yalnizca her buyuk dosyada
+bir blok kaybederdi. Gorunmesi en zor hata turu.
+
+Sinav bunu dogrudan olcuyor: silmeden once ve sonra bos blok sayisi.
+`kstat` bu yuzden uc sayac daha kazandi (bos blok, toplam blok, azami
+dosya boyu) -- Ring 3'ten sorulamayan bir seyi sinamak mumkun degildi.
+Bilerek bozulmus surumde:
+
+```
+[bigfile] D blok sizmiyor: KALDI (blok SIZDI (dolayli blok birakilmadi?))
+```
+
+#### Tabloyu buyutmek: olculmeyen tavan olcuye girdi
+
+Inode sayisini 64'ten 512'ye cikarmak tek basina bir sey degistirmezdi,
+cunku **daha sikisik** bir tavan vardi: VFS dugum tablosu 64 girdilikti
+ve acilista 46'si gomulu uygulamalarla doluydu. Yani diskte
+yaratilabilecek dosya sayisi 18'de bitiyordu. Tablo 256'ya cikarildi.
+
+`bigfile` E bu yuzden dosyalari yalnizca yaratmiyor, hepsini **geri
+aciyor**: yaratildi sanmak yetmez, VFS'e girmis olmalari gerekiyor.
+
+#### Kismi flush: bir tavan kaldirmanin gizli bedeli
+
+Tablo 16 KiB'dan 128 KiB'a cikinca her metaveri degisikligi 128 KiB'lik
+bir PIO yazmasi demek oldu -- ve `write` her cagrinin sonunda tam flush
+yapiyordu. 200 KiB'lik bir dosya 6 MiB'lik gereksiz yazma ederdi.
+
+Cozum, degisen **sektoru** yazmak:
+
+```text
+  flush_inode(index)   -> 512 bayt (bir sektorde iki inode duruyor)
+  flush_bitmap()       -> yalnizca kirli sektor araligi
+```
+
+Bitmap icin `bit_set` kirli araligi isaretliyor; degisen aralik
+neredeyse her zaman tek sektor. Sonuc, buyutmeden **once**kinden de az
+yazma.
+
+#### Bicim surumu 3
+
+Uc degisiklik de yerlesimi bozdugu icin tek surumde toplandi. Surum 2
+imajlari baglanmiyor; `format onayla` gerekiyor. Ayrim sessiz degil:
+
+```
+[LEVEL-0a] tcmkfs: baglanamadi -- disk bicimi surumu uyumsuz ('format onayla' gerekir)
+```
+
+#### Bilerek yapilmayanlar
+
+* **Iki kademeli dolayli blok yok.** Tavan 4 MiB; bu diskte 512 MiB'lik
+  bir dosya zaten sigmaz.
+* **Dolayli blok onbellegi tek girdilik.** Ardisik yazmada butun
+  isaretciler ayni blokta oldugu icin yetiyor; iki buyuk dosyaya
+  donusumlu yazmak her gecuste bir okuma-yazma ederdi.
+* **Inode tablosu hala sabit.** 512 girdi bicimlendirme aninda
+  ayriliyor; buyutmek yeniden bicimlendirme ister.
+* **Parcalanma yonetimi yok.** `alloc_block` ilk bos blogu veriyor;
+  bitisiklik gozetilmiyor.
 
 ### x86_64 da diskten aciliyor
 
@@ -5716,11 +5863,14 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
   yok -- o katman kullanici tarafina aittir. Oncelik devralma da yok:
   dusuk oncelikli bir akisin tuttugu kilit, yuksek oncelikliyi bekletir.
 - **Surec basina 512 KiB eslenir**, talep uzerine sayfalama yok.
-- **TCMKFS'te toplam 64 inode var** (dizinler de sayilir), dosya basina
-  160 KiB (yalnizca dogrudan blok isaretcileri) ve azami 8 seviye
-  derinlik. Dizin agaci gercek ve `.`/`..` calisiyor (yukari bkz.), ama
-  sembolik baglar, izinler ve sahiplik yok. Calisma dizini **kabuga**
-  aittir **degil**: her surecin kendi dizini var (yukari bkz.).
+- **TCMKFS'te toplam 512 inode var** (dizinler de sayilir), dosya basina
+  4 MiB + 160 KiB (40 dogrudan + 1024 dolayli blok isaretcisi; iki
+  kademeli dolayli blok yok) ve azami 8 seviye derinlik -- eski tavanlar
+  64 inode ve 160 KiB idi (yukari bkz.). VFS dugum tablosu 256 girdilik
+  ve acilista 46'si gomulu uygulamalara ait. Dizin agaci gercek ve
+  `.`/`..` calisiyor (yukari bkz.), ama sembolik baglar, izinler ve
+  sahiplik yok. Calisma dizini **kabuga** aittir **degil**: her surecin
+  kendi dizini var (yukari bkz.).
 - **DMA yok**: veri hala `in/out` ile kelime kelime tasinir. (Kabuk
   komutlari artik ayri bir gorevde kostugu icin kesmeyle bekliyor --
   yukari bkz.)

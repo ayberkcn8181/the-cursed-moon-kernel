@@ -35,7 +35,13 @@ use crate::level0a::core::{kmalloc, tcmkfs};
 ///
 /// Sinir buyutuldu **ve** dolulugu gorunur kilindi (bkz. `list`):
 /// bir sonraki dolusta sebep ekranda yazacak.
-pub const MAX_NODES: usize = 64;
+///
+/// Ikinci buyutme (64 -> 256) TCMKFS'in inode tavani 512'ye cikarken
+/// geldi. Olcmeden birakmak, kaldirilan tavanin **altinda** duran daha
+/// sikisik bir tavani gormezden gelmek olurdu: acilista 46 gomulu
+/// dosya kayitli, yani diskte yaratilabilecek dosya sayisi 18'de
+/// bitiyordu.
+pub const MAX_NODES: usize = 256;
 pub const MAX_PATH: usize = 64;
 
 /// Dugumun hangi arka uctan geldigi.

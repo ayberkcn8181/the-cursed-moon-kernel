@@ -8,9 +8,11 @@ alanini** doldurur:
 
     bolum 1  ISO hibrit -> GRUB + cekirdek (salt okunur, grub-mkrescue kurdu)
     bolum 2  0x7F       -> TCMKFS
-               sektor   40..71    2. asama (yamalanmis)
-               sektor   72..      cekirdek imaji (ham bellek blogu)
-               sektor 4096..      dosya sistemi veri bloklari
+               sektor    0        superblock
+               sektor   40..71    2. asama (yamalanmis, yalnizca ELF32)
+               sektor   72..8191  cekirdek imaji (ham bellek blogu)
+               sektor 8192..      inode tablosu + bitmap + veri bloklari
+                                  (`format` kurar, bu betik dokunmaz)
 
 Boylece **root gerekmeden** uretilen imaj hem GRUB ile hem de -- kabuktan
 `install` calistirildiktan sonra -- TCMK'nin kendi onyukleyicisiyle acilir.
@@ -38,7 +40,11 @@ ENTRY_SIZE = 16
 BOOT_AREA_SECTOR = 40
 STAGE2_SECTORS = 32
 KERNEL_BLOB_SECTOR = BOOT_AREA_SECTOR + STAGE2_SECTORS
-DATA_START_SECTOR = 8192
+#: Onyukleyici alaninin bittigi sektor -- core/tcmkfs.rs'teki
+#: BOOT_AREA_END_SECTOR ile ayni olmali. Metaveri (inode tablosu,
+#: bitmap) ve veri bloklari bunun arkasinda durur; bu betik oraya hic
+#: dokunmaz, `format` kurar.
+BOOT_AREA_END_SECTOR = 8192
 
 #: Cekirdek 1 MiB'a linklenir (boot/linker/i386.ld).
 KERNEL_BASE = 0x0010_0000
@@ -156,7 +162,7 @@ def build(iso_path, out_path, data_mib, stage2_path, kernel_path):
 
         blob, entry, bss_start, bss_end = build_blob(kernel_path)
         blob_sectors = (len(blob) + SECTOR - 1) // SECTOR
-        if KERNEL_BLOB_SECTOR + blob_sectors > DATA_START_SECTOR:
+        if KERNEL_BLOB_SECTOR + blob_sectors > BOOT_AREA_END_SECTOR:
             sys.exit("cekirdek blogu onyukleyici alanina sigmiyor (%d sektor)"
                      % blob_sectors)
 
@@ -211,8 +217,9 @@ def build(iso_path, out_path, data_mib, stage2_path, kernel_path):
         f.write(mbr)
 
         # Onyukleyici alani: 2. asama ve cekirdek blogu. 64-bit imajda
-        # bos birakiliyor; veri bloklari zaten DATA_START_SECTOR'dan
-        # sonra basladigi icin dosya sistemi bundan etkilenmiyor.
+        # bos birakiliyor; metaveri ve veri bloklari zaten
+        # BOOT_AREA_END_SECTOR'dan sonra basladigi icin dosya sistemi
+        # bundan etkilenmiyor.
         if own_boot:
             f.seek((part_start + BOOT_AREA_SECTOR) * SECTOR)
             f.write(stage2)

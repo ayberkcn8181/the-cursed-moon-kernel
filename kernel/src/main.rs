@@ -147,6 +147,9 @@ static DEATH_ELF: &[u8] = include_bytes!("../../userland/death.elf");
 /// Standart girdiden okumak bekler: poll / O_NONBLOCK / EINTR.
 #[cfg(target_arch = "x86")]
 static STDIN_ELF: &[u8] = include_bytes!("../../userland/stdin.elf");
+/// TCMKFS tavanlari: dolayli blok, inode sayisi, blok sizintisi.
+#[cfg(target_arch = "x86")]
+static BIGFILE_ELF: &[u8] = include_bytes!("../../userland/bigfile.elf");
 /// FindFirstFileA gosterimi -- ayni dizinler, Win32 yuzu.
 #[cfg(target_arch = "x86")]
 static WINFILES_EXE: &[u8] = include_bytes!("../../userland/winfiles.exe");
@@ -251,6 +254,8 @@ static INTR64: &[u8] = include_bytes!("../../userland/intr.elf64");
 static DEATH64: &[u8] = include_bytes!("../../userland/death.elf64");
 #[cfg(target_arch = "x86_64")]
 static STDIN64: &[u8] = include_bytes!("../../userland/stdin.elf64");
+#[cfg(target_arch = "x86_64")]
+static BIGFILE64: &[u8] = include_bytes!("../../userland/bigfile.elf64");
 
 /// **Windows (PE32+) uygulamalari** -- i386'dakilerle ayni kaynak, ayni
 /// ithal kutuphaneleri; degisen yalnizca hedef. Taban 0x140000000
@@ -323,6 +328,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/intr", INTR_ELF),
     ("/bin/death", DEATH_ELF),
     ("/bin/stdin", STDIN_ELF),
+    ("/bin/bigfile", BIGFILE_ELF),
     ("/bin/winclock.exe", WINCLOCK_EXE),
     ("/bin/winpad.exe", WINPAD_EXE),
     ("/bin/winfiles.exe", WINFILES_EXE),
@@ -373,6 +379,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/intr", INTR64),
     ("/bin/death", DEATH64),
     ("/bin/stdin", STDIN64),
+    ("/bin/bigfile", BIGFILE64),
     ("/bin/winclock.exe", WINCLOCK_EXE64),
     ("/bin/winpad.exe", WINPAD_EXE64),
     ("/bin/winfiles.exe", WINFILES_EXE64),
