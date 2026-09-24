@@ -11,6 +11,27 @@
 //! pencere bilmez), ama pencere acildiktan sonra girdi/cikti tamamen
 //! standart.
 //!
+//! ## Neden once `poll`
+//!
+//! Bu programin ilk hali her karede dogrudan `read(0, ...)` cagiriyordu
+//! ve tus yoksa cekirdek 0 donuyordu. O davranis POSIX'e aykiriydi:
+//! standart girdiden okumak, veri gelene kadar **bekler**. Cekirdek
+//! duzeltilince ayni dongu pencereyi donduracakti -- cizim, okuma
+//! donunceye kadar duracakti.
+//!
+//! Cozum "bloke etmeyi kapatmak" degil; bloke etme POSIX'in dogru
+//! varsayilani. Cozum, her karede cizen bir programin once **sormasi**:
+//!
+//! ```text
+//!   poll(stdin, 0)  -> hazir mi?
+//!     hayir -> ciz, bir sonraki kare
+//!     evet  -> read(0) bekletmeden doner
+//! ```
+//!
+//! Ayni sey gercek Linux'ta da boyle yazilirdi; `O_NONBLOCK` ikinci
+//! secenek, ama o zaman `EAGAIN` denetlemek gerekir. Ikisinin farki
+//! `stdin` sinavinda olculuyor.
+//!
 //! Tuslar: yazi,  ESC -> cik
 
 #![no_std]
@@ -41,10 +62,18 @@ fn main() {
     let mut total_reads = 0usize;
 
     loop {
-        // Standart girdiden oku. Bloke etmez: tus yoksa 0 doner, yani
-        // cizim dongusu akici kalir.
+        // Once sor, sonra oku. `poll` sifir zaman asimiyla hemen doner;
+        // hazir demezse `read` cagirilmaz ve cizim dongusu akici kalir.
+        let mut watch = [sys::PollFd::new(sys::STDIN, sys::POLLIN)];
+        let ready = sys::poll(&mut watch, 0) > 0 && watch[0].ready(sys::POLLIN);
+
         let mut chunk = [0u8; 16];
-        let n = sys::read(sys::STDIN, &mut chunk);
+        // Hazir oldugu icin bu okuma beklemeden doner.
+        let n = if ready {
+            sys::read(sys::STDIN, &mut chunk)
+        } else {
+            0
+        };
         if n > 0 {
             total_reads += 1;
             for &key in &chunk[..n as usize] {
@@ -74,7 +103,7 @@ fn draw(win: &mut Window, text: &[u8], reads: usize) {
     win.clear(BG);
 
     win.fill(0, 0, w, 22, PANEL);
-    win.text(6, 3, "girdi: read(0)   cikti: write(1)", ACCENT);
+    win.text(6, 3, "girdi: poll+read(0)  cikti: write(1)", ACCENT);
 
     // Basit sarma.
     let columns = w.saturating_sub(12) / CELL_W;

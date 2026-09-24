@@ -57,6 +57,10 @@ name = "death"
 path = "src/bin/death.rs"
 
 [[bin]]
+name = "stdin"
+path = "src/bin/stdin.rs"
+
+[[bin]]
 name = "winprobe"
 path = "src/win/probe.rs"
 

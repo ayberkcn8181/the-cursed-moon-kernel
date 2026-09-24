@@ -1726,10 +1726,17 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
                     } else if timeout == 0 {
                         WAIT_TIMEOUT
                     } else {
-                        if let Some((code, signal)) =
-                            crate::level0a::core::scheduler::wait_for_task(task)
-                        {
-                            remember_exit(task, win32_exit_code(code, signal));
+                        let reaped = crate::level0a::core::scheduler::wait_for_task(task);
+                        // Saklanmis bir kod varsa ustune yazma. Bir is
+                        // parcacigi yuvasini cikarken kendisi biraktigi
+                        // icin `wait_for_task` onu **gormus** olmayabilir
+                        // ve sifir doner; oysa gercek kod cikis aninda
+                        // zaten saklanmisti. Kosulsuz yazmak, 42 ile
+                        // biten bir akisi 0 gostermeye yetiyordu.
+                        if remembered_exit(task).is_none() {
+                            if let Some((code, signal)) = reaped {
+                                remember_exit(task, win32_exit_code(code, signal));
+                            }
                         }
                         WAIT_OBJECT_0
                     }
@@ -2691,6 +2698,16 @@ pub fn forget_exit(task: usize) {
     if task < crate::level0a::core::scheduler::MAX_TASKS {
         REAPED_EXIT[task].store(u32::MAX, core::sync::atomic::Ordering::Relaxed);
     }
+}
+
+/// Bir **is parcaciginin** cikis kodunu yuvadan ayirarak saklar.
+///
+/// `GetExitCodeThread` bitmis bir akisin kodunu yuvanin `Terminated`
+/// durumundan okuyordu; yani kod, yuva zombi kaldigi surece vardi. Kodu
+/// buraya yazmak yuvanin hemen geri verilmesini mumkun kiliyor -- cagri
+/// zaten once bu tabloya bakiyor (bkz. `remembered_exit`).
+pub fn remember_thread_exit(task: usize, code: u32, signal: u32) {
+    remember_exit(task, win32_exit_code(code, signal));
 }
 
 fn remember_exit(task: usize, code: u32) {

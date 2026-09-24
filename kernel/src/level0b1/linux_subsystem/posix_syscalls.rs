@@ -505,7 +505,12 @@ fn fcntl(fd_num: usize, command: usize, argument: usize) -> i32 {
     const F_GETFL: usize = 3;
     const F_SETFL: usize = 4;
 
-    if fd::get(fd_num).is_none() {
+    // Yonlendirilmemis 0/1/2 tabloda yer tutmuyor ama **acik**: cekirdek
+    // onlari numaradan taniyip konsola/pencereye bagliyor. Yalnizca
+    // tabloya bakmak bu ucune `EBADF` demek olurdu -- ve `fcntl(0,
+    // F_SETFL, O_NONBLOCK)` tam olarak boyle sessizce basarisiz oluyordu:
+    // cagiran bayragi koydugunu saniyor, okuma yine bloke ediyordu.
+    if fd::get(fd_num).is_none() && fd_num >= fd::FIRST_FREE_FD {
         return -EBADF;
     }
     match command {
@@ -1113,12 +1118,16 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
             const KSTAT_ADDRESS_WAKES: usize = 1;
             const KSTAT_TICKS: usize = 2;
             const KSTAT_THREADS_CREATED: usize = 3;
+            const KSTAT_TASKS: usize = 4;
+            const KSTAT_TASK_SLOTS: usize = 5;
 
             let value = match arg1 {
                 KSTAT_ADDRESS_WAITS => crate::level0a::core::scheduler::address_waits(),
                 KSTAT_ADDRESS_WAKES => crate::level0a::core::scheduler::address_wakes(),
                 KSTAT_TICKS => crate::level0a::pit::ticks() as usize,
                 KSTAT_THREADS_CREATED => crate::level0b1::thread::created(),
+                KSTAT_TASKS => crate::level0a::core::scheduler::live_task_count(),
+                KSTAT_TASK_SLOTS => crate::level0a::core::scheduler::MAX_TASKS,
                 _ => {
                     frame.set_return((-EINVAL) as usize);
                     return;

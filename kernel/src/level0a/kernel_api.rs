@@ -451,25 +451,79 @@ pub unsafe fn read(fd_num: u32, buf: *mut u8, len: usize) -> Result<usize, Kerne
         // GUI uygulamasi ayni tuslara `win_poll_key` ile de ulasabilir --
         // ikisi ayni kuyrugu okur, yani hangisi once cagirirsa tusu o alir.
         //
-        // Okuma **bloke etmez**: tus yoksa 0 doner.
-        None if fd_num == FD_STDIN => {
-            let owner = scheduler::current_id();
-            let window = match crate::level0a::wm::first_window_of(owner) {
-                Some(w) => w,
-                None => return Ok(0),
-            };
-            let mut read = 0usize;
-            while read < slice.len() {
-                let key = crate::level0a::gui_api::poll_key(window);
-                if key == 0 {
-                    break;
-                }
-                slice[read] = key;
-                read += 1;
-            }
-            Ok(read)
-        }
+        // Okuma POSIX gibi **bekler**; kacis yollari icin bkz.
+        // `read_stdin_blocking`.
+        None if fd_num == FD_STDIN => read_stdin_blocking(slice),
         None => Err(KernelError::BadFileDescriptor),
+    }
+}
+
+/// Yonlendirilmemis `stdin`den **bloke ederek** okur.
+///
+/// POSIX'in sozlesmesi: tus yoksa gelene kadar beklenir. Uzun sure
+/// beklenmiyordu ve gerekce GUI idi -- bloke olan bir surec penceresini
+/// de dondurur. Gerekce hala gecerli, ama cozumu "hic beklememek"
+/// degil: bekleme **varsayilan**, beklememek isteyen `O_NONBLOCK` koyar
+/// ya da `poll` ile sorar. Cizim dongusu suren bir program zaten
+/// ikisinden birini yapmali; yapmayan bir program gercek Linux'ta da
+/// donardi.
+///
+/// Uc erken cikis var ve ucu de bilincli:
+///
+/// * **Pencere yok** -> `0`, yani dosya sonu. Tus gelecek bir yer
+///   olmadigi icin beklemenin anlami yok; bekleseydik pencereyi
+///   kapatan bir program sonsuza kadar asilirdi.
+/// * **Uyutulamayan baglam** (masaustu/kabuk gorevi) -> eski davranis.
+/// * **`O_NONBLOCK`** -> `WouldBlock`, yani `EAGAIN`.
+fn read_stdin_blocking(slice: &mut [u8]) -> Result<usize, KernelError> {
+    if slice.is_empty() {
+        return Ok(0);
+    }
+    let owner = scheduler::current_id();
+
+    loop {
+        // Pencere her turda yeniden araniyor: bekleme sirasinda
+        // kapanmis olabilir.
+        let window = match crate::level0a::wm::first_window_of(owner) {
+            Some(w) => w,
+            None => return Ok(0),
+        };
+
+        let mut read = 0usize;
+        while read < slice.len() {
+            let key = crate::level0a::gui_api::poll_key(window);
+            if key == 0 {
+                break;
+            }
+            slice[read] = key;
+            read += 1;
+        }
+        if read > 0 {
+            return Ok(read);
+        }
+
+        if fd::flags(FD_STDIN as usize) & fd::O_NONBLOCK != 0 {
+            return Err(KernelError::WouldBlock);
+        }
+        if !scheduler::current_can_block() {
+            return Ok(0);
+        }
+        if crate::level0b1::signal::interrupts_call(owner) {
+            return Err(KernelError::Interrupted);
+        }
+
+        scheduler::wait_on_kernel_key(crate::level0a::gui_api::input_key(window), None, || {
+            // Kesmeler kapaliyken son bakis. Pencere kaybolduysa da
+            // uyumamaliyiz: kimse uyandirmayacak.
+            !crate::level0a::gui_api::has_key(window)
+                && crate::level0a::wm::first_window_of(owner) == Some(window)
+        });
+
+        if crate::level0b1::signal::interrupts_call(owner)
+            && !crate::level0a::gui_api::has_key(window)
+        {
+            return Err(KernelError::Interrupted);
+        }
     }
 }
 
@@ -501,33 +555,6 @@ pub fn create_pipe() -> Result<(usize, usize), KernelError> {
     Ok((read_fd, write_fd))
 }
 
-// --- `poll(2)` olay bitleri (Linux ile ayni sayilar) ---
-/// Okunacak veri var (ya da dosya sonu).
-pub const POLLIN: u16 = 0x001;
-/// Yazilabilir: boruda yer var.
-pub const POLLOUT: u16 = 0x004;
-/// Hata: borunun okuyan ucu kalmadi (POSIX'te SIGPIPE'in sessiz hali).
-pub const POLLERR: u16 = 0x008;
-/// Karsi taraf kapandi: yazan uc kalmadi, artik veri gelmeyecek.
-pub const POLLHUP: u16 = 0x010;
-/// Boyle bir tanimlayici yok.
-pub const POLLNVAL: u16 = 0x020;
-
-/// Bir tanimlayicinin **su anki** hazirlik durumu.
-///
-/// `poll`'un tek gercek isi budur; gerisi (dongu, zaman asimi, kullanici
-/// bellegine yazma) cevre isidir. Kural her tur icin ayri:
-///
-/// | tanimlayici | hazir sayilma kosulu |
-/// |---|---|
-/// | dosya | her zaman (yerel dosya okumasi beklemez) |
-/// | boru okuma ucu | bekleyen bayt varsa `POLLIN`; yazan uc bittiyse `POLLHUP` |
-/// | boru yazma ucu | tamponda yer varsa `POLLOUT`; okuyan kalmadiysa `POLLERR` |
-/// | yonlendirilmemis stdin | pencerede bekleyen tus varsa `POLLIN` |
-/// | yonlendirilmemis stdout/stderr | her zaman `POLLOUT` (konsol) |
-///
-/// Tus kuyruguna **bakilir, tuketilmez**: `poll` veriyi yeseydi
-/// arkasindan gelen `read` bos donerdi.
 /// Boruya **bloke ederek** yazar.
 ///
 /// POSIX'te kismi yazma mesrudur: tampon dolduysa yazilabilen kadari
@@ -657,6 +684,33 @@ fn read_pipe_blocking(
     }
 }
 
+// --- `poll(2)` olay bitleri (Linux ile ayni sayilar) ---
+/// Okunacak veri var (ya da dosya sonu).
+pub const POLLIN: u16 = 0x001;
+/// Yazilabilir: boruda yer var.
+pub const POLLOUT: u16 = 0x004;
+/// Hata: borunun okuyan ucu kalmadi (POSIX'te SIGPIPE'in sessiz hali).
+pub const POLLERR: u16 = 0x008;
+/// Karsi taraf kapandi: yazan uc kalmadi, artik veri gelmeyecek.
+pub const POLLHUP: u16 = 0x010;
+/// Boyle bir tanimlayici yok.
+pub const POLLNVAL: u16 = 0x020;
+
+/// Bir tanimlayicinin **su anki** hazirlik durumu.
+///
+/// `poll`'un tek gercek isi budur; gerisi (dongu, zaman asimi, kullanici
+/// bellegine yazma) cevre isidir. Kural her tur icin ayri:
+///
+/// | tanimlayici | hazir sayilma kosulu |
+/// |---|---|
+/// | dosya | her zaman (yerel dosya okumasi beklemez) |
+/// | boru okuma ucu | bekleyen bayt varsa `POLLIN`; yazan uc bittiyse `POLLHUP` |
+/// | boru yazma ucu | tamponda yer varsa `POLLOUT`; okuyan kalmadiysa `POLLERR` |
+/// | yonlendirilmemis stdin | pencerede bekleyen tus varsa `POLLIN` |
+/// | yonlendirilmemis stdout/stderr | her zaman `POLLOUT` (konsol) |
+///
+/// Tus kuyruguna **bakilir, tuketilmez**: `poll` veriyi yeseydi
+/// arkasindan gelen `read` bos donerdi.
 pub fn readiness(fd_num: u32) -> u16 {
     match fd::get(fd_num as usize) {
         Some(entry) => match entry.kind {

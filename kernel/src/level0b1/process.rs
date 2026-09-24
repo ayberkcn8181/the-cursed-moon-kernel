@@ -634,6 +634,10 @@ unsafe fn enter_ring3(
     // Esleme nesneleri ve gorunumleri de surece ait: yeni imaj eskinin
     // taniticilarini devralamaz.
     crate::level0b1::nt_subsystem::mapping::reset(scheduler::current_id());
+    // Yonlendirilmemis stdin/stdout bayraklari da oyle: bu yuvada
+    // calismis onceki program `O_NONBLOCK` biraktiysa yeni program
+    // beklemeyen bir stdin ile baslar ve sebebini hic ogrenemez.
+    crate::level0a::core::fd::reset_std_flags(scheduler::current_group());
 
     // Ring 3 -> Ring 0 gecisleri icin ayri bir cekirdek yigini.
     let kstack = kmalloc::kmalloc_aligned(KERNEL_STACK_SIZE, 16).ok_or(SpawnError::OutOfMemory)?;

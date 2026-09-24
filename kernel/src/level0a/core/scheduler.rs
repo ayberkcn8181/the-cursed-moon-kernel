@@ -746,6 +746,32 @@ pub fn yield_now() {
     });
 }
 
+/// Biten bir **is parcaciginin** yuvasini zombi birakmadan geri verir.
+///
+/// Is parcaciklari `waitable` olarak yaratiliyor ve bunun bir sebebi
+/// var: Win32 yuzu bitmis bir akisin kodunu `GetExitCodeThread` ile
+/// soruyor ve cevabi yuvanin `Terminated` durumundan okuyor. Ama o
+/// yuvayi toplayacak kimse yok -- `waitpid` bir is parcacigini gormez,
+/// `pthread_join` ise clear-tid futeksiyle calisir ve cikis kodunu
+/// cekirdekten hic istemez.
+///
+/// Sonuc sessiz bir sizintiydi: biten her akis yuvasini sonsuza kadar
+/// tutuyordu. Olcum bunu `stdin` D sinavinda buldu -- dort akis yaratan
+/// `intr`den sonra `fork` "yuva yok" diye kaliyordu, ve sinav once
+/// cekirdegin stdin yolunu sucluyor gibi gorundu.
+///
+/// Cozum, cikis kodunu yuvadan **ayirmak**: NT tarafinin zaten tuttugu
+/// kayit tablosuna yazilip yuva hemen birakiliyor. `GetExitCodeThread`
+/// oraya oncelikle bakiyor, yani cevap degismiyor.
+fn reclaim_thread_slot(index: usize, code: u32, signal: u32) -> bool {
+    // Grup lideri bir surectir; onun yuvasi `waitpid` icin durmali.
+    if group_of(index) == index {
+        return false;
+    }
+    crate::level0b1::nt_subsystem::nt_syscalls::remember_thread_exit(index, code, signal);
+    true
+}
+
 /// Calisan gorevi sonlandirir ve bir daha asla ona donmez.
 pub fn terminate_current() -> ! {
     // Tanimlayicilari birak. Boru uclari icin sart: kapanmayan bir yazma
@@ -764,6 +790,14 @@ pub fn terminate_current() -> ! {
         let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
         let current = CURRENT.load(Ordering::Relaxed);
         (*tasks.add(current)).state = TaskState::Terminated;
+        // Is parcacigi: kodu sakla, yuvayi tutma.
+        if reclaim_thread_slot(
+            current,
+            (*tasks.add(current)).exit_code,
+            (*tasks.add(current)).exit_signal,
+        ) {
+            (*tasks.add(current)).waitable = false;
+        }
         // Kimse beklemeyecekse yuva hemen geri verilir. Beklenebilir
         // olanlar (fork cocuklari) `wait_for_task` toplayana kadar zombi
         // kalir; ebeveyni de oldulerse `reap_orphans` temizler.
@@ -874,8 +908,22 @@ fn wake_expired(count: usize) {
                 }
                 TaskState::Waiting => {
                     // Zamanla degil, beklenen gorevin bitmesiyle uyanir.
+                    //
+                    // Iki durum da "bitti" demek ve ikincisi uzun sure
+                    // eksikti: `Terminated` bitmis ama toplanmamis,
+                    // `Unused` ise yuvasi **coktan geri verilmis**
+                    // demektir. Yalnizca ilkine bakmak, yuvayi baskasi
+                    // (ya da gorevin kendisi) birakmissa bekleyeni
+                    // sonsuza kadar uyutuyordu -- `wait_for_task`in
+                    // kendi dongusu bu ikinci durumu zaten sayiyordu,
+                    // ama uyandirma hic gelmedigi icin o dongu
+                    // donmuyordu bile.
                     let target = task.wait_for - 1;
-                    if (*tasks.add(target)).state == TaskState::Terminated {
+                    let done = matches!(
+                        (*tasks.add(target)).state,
+                        TaskState::Terminated | TaskState::Unused
+                    );
+                    if done {
                         task.state = TaskState::Ready;
                         task.wait_for = 0;
                     }
@@ -1466,6 +1514,15 @@ pub fn terminate(index: usize) -> Result<(), &'static str> {
                 (*tasks.add(index)).state = TaskState::Terminated;
                 let space = (*tasks.add(index)).address_space;
                 (*tasks.add(index)).address_space = 0;
+                // Disaridan oldurulen bir is parcacigi da zombi
+                // kalmamali; ayni gerekce (bkz. `reclaim_thread_slot`).
+                if reclaim_thread_slot(
+                    index,
+                    (*tasks.add(index)).exit_code,
+                    (*tasks.add(index)).exit_signal,
+                ) {
+                    (*tasks.add(index)).waitable = false;
+                }
                 if !(*tasks.add(index)).waitable {
                     release_slot(index);
                 }
@@ -1508,6 +1565,23 @@ pub fn switch_count() -> usize {
 
 pub fn task_count() -> usize {
     TASK_COUNT.load(Ordering::Relaxed)
+}
+
+/// **Dolu** yuva sayisi -- `task_count` ile ayni sey degil.
+///
+/// `TASK_COUNT` tablonun ne kadarinin bir kez kullanildigini tutar, yani
+/// bir su seviyesi isareti: yuva geri verilince kucumuyor, cunku
+/// `spawn_inner` once `Unused` yuva ariyor ve ancak bulamazsa tabloyu
+/// buyutuyor. "Kac gorev yasiyor" sorusunu cevaplamak icin yuvalari
+/// gercekten saymak gerekiyor -- zombiler dahil, cunku onlar da yuva
+/// tutuyor.
+pub fn live_task_count() -> usize {
+    unsafe {
+        let tasks = core::ptr::addr_of!(TASKS) as *const Task;
+        (0..TASK_COUNT.load(Ordering::Relaxed))
+            .filter(|i| (*tasks.add(*i)).state != TaskState::Unused)
+            .count()
+    }
 }
 
 // --- Ring 3 baglami (gorev basina) ---

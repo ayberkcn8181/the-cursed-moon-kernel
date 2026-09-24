@@ -90,6 +90,18 @@ pub fn window_pos(id: usize) -> Result<usize, GuiError> {
         .ok_or(GuiError::BadWindow)
 }
 
+/// Bir pencerenin **girdi bekleme** anahtari.
+///
+/// Bos bir `read(0, ...)` burada uyuyor; `deliver_key` tus gelince
+/// kaldiriyor. Boru anahtarlariyla cakismayacak ayri bir aralik
+/// kullaniyor (bkz. `pipe::read_key`).
+pub fn input_key(window: usize) -> usize {
+    CONSOLE_KEY_BASE + window
+}
+
+/// Konsol girdi anahtarlarinin tabani.
+const CONSOLE_KEY_BASE: usize = 0x0003_0000;
+
 /// Pencereye bir tus olayi teslim eder (WM cagirir).
 pub fn deliver_key(id: usize, ascii: u8) {
     if id >= wm::MAX_WINDOWS {
@@ -105,6 +117,12 @@ pub fn deliver_key(id: usize, ascii: u8) {
         (*keys.add(id))[head] = ascii;
     }
     KEY_HEAD[id].store(next, Ordering::Relaxed);
+
+    // Bu pencerenin girdisinde bekleyen bir `read(0, ...)` varsa kaldir.
+    // Uyandirma olmasa, bloke eden stdin okumasi tus gelse bile
+    // uyanmazdi -- kuyruga yazmak yetmiyor, bekleyene haber vermek
+    // gerekiyor.
+    crate::level0a::core::scheduler::wake_kernel_key(input_key(id), usize::MAX);
 }
 
 /// Kuyrukta tus var mi -- **almadan** bakar.

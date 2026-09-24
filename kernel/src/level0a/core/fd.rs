@@ -178,9 +178,30 @@ pub fn get(fd: usize) -> Option<FileDescriptor> {
     }
 }
 
+/// Yonlendirilmemis `stdin`/`stdout`/`stderr` bayraklari.
+///
+/// 0, 1 ve 2 yonlendirilmemisken tabloda **yer tutmuyor**: cekirdek
+/// onlari numaradan taniyip konsola/pencereye bagliyor. Ama
+/// `fcntl(0, F_SETFL, O_NONBLOCK)` yine de calismali -- POSIX'te
+/// bloke olmamak stdin'in en cok istenen ozelligi.
+///
+/// Tablo gibi **grup** basina: kardes is parcaciklari ayni stdin'i
+/// paylasiyor.
+static STD_FLAGS: [[core::sync::atomic::AtomicU32; FIRST_FREE_FD]; scheduler::MAX_TASKS] =
+    [const {
+        [const { core::sync::atomic::AtomicU32::new(0) }; FIRST_FREE_FD]
+    }; scheduler::MAX_TASKS];
+
 /// Bir tanimlayicinin acik-dosya bayraklari.
 pub fn flags(fd: usize) -> u32 {
-    get(fd).map(|entry| entry.flags).unwrap_or(0)
+    if let Some(entry) = get(fd) {
+        return entry.flags;
+    }
+    // Yonlendirilmemis standart tanimlayici.
+    if fd < FIRST_FREE_FD {
+        return STD_FLAGS[scheduler::current_group()][fd].load(Ordering::Relaxed);
+    }
+    0
 }
 
 /// Bayraklari degistirir; tanimlayici yoksa `false`.
@@ -188,14 +209,37 @@ pub fn set_flags(fd: usize, flags: u32) -> bool {
     if fd >= MAX_FDS {
         return false;
     }
-    crate::arch::cpu::without_interrupts(|| unsafe {
+    let stored = crate::arch::cpu::without_interrupts(|| unsafe {
         let table = current_table();
         if !(*table.add(fd)).used {
             return false;
         }
         (*table.add(fd)).flags = flags;
         true
-    })
+    });
+    if stored {
+        return true;
+    }
+    if fd < FIRST_FREE_FD {
+        STD_FLAGS[scheduler::current_group()][fd].store(flags, Ordering::Relaxed);
+        return true;
+    }
+    false
+}
+
+/// Bir grubun standart tanimlayici bayraklarini sifirlar.
+///
+/// `execve` sonrasi yeni program bayraklari devralmamali: POSIX'te
+/// `O_NONBLOCK` acik dosya tanimina ait ve `exec` onu korur, ama TCMK'de
+/// yonlendirilmemis stdin bir dosya degil -- her program kendi
+/// varsayilanindan baslamali.
+pub fn reset_std_flags(group: usize) {
+    if group >= scheduler::MAX_TASKS {
+        return;
+    }
+    for fd in 0..FIRST_FREE_FD {
+        STD_FLAGS[group][fd].store(0, Ordering::Relaxed);
+    }
 }
 
 /// `O_NONBLOCK` -- Linux'ta i386 ve x86_64'te ayni sayi (0o4000).

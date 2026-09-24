@@ -269,7 +269,7 @@ gunluge yazarlar ve olcum bunlardan okunur.
 | `notes.rs` | Not defteri: yaz, kaydet, ac. Disk yolunun ucundan ucuna sinavi. |
 | `browse.rs` | Dosya gezgini; `getdents` ve `getcwd` kullanir. |
 | `menu.rs` | Uygulama baslatici (`execve`). |
-| `echo2.rs` | Argumanlari yazar -- en basit argv sinavi. |
+| `echo2.rs` | Klavyeyi POSIX yolundan okur: `poll(stdin)` ile sorar, `read(0)` ile alir, `write(1)` ile geri yazar. |
 | `crash.rs` | **Bilerek coker**: hata izolasyonunun sinavi. Sistem ayakta kalmali. |
 | `hog.rs`, `spin.rs` | CPU yiyen gorevler; yuk dengeleyici ve preemption sinavi. |
 | `twins.rs`, `race.rs` | Es zamanli gorevler. |
@@ -284,6 +284,7 @@ gunluge yazarlar ve olcum bunlardan okunur.
 | `mapped.rs` (4 sinav) | Dosya destekli `mmap`: icerik, hizasiz ofset reddi, dosya sonu sifirlamasi. |
 | `death.rs` (6 sinav) | Cocugun **nasil** oldugu: `WIFEXITED`/`WIFSIGNALED`/`WTERMSIG`, cokmenin `SIGSEGV`e ve sifira bolmenin `SIGFPE`ye eslenmesi, `exit(9)` ile `SIGKILL(9)`un ayirt edilmesi. |
 | `intr.rs` (6 sinav) | `EINTR` ve `SA_RESTART`: bekleyen okuma/yazmanin sinyalle bolunmesi, bolunen cagrinin veriyi tuketmemesi, cerceve geri sarilarak yeniden baslatma, ve yok sayilan sinyalin **bolmemesi**. |
+| `stdin.rs` (5 sinav) | Bloke eden standart girdi: `O_NONBLOCK` ile `-EAGAIN`, `poll`un "hazir degil" demesi, bekleyen okumanin sinyalle bolunmesi (gecen sure olculerek), penceresiz surecte dosya sonu, ve fd 0 bayrak tablosu. |
 | `blocking.rs` (9 sinav) | Bloke eden boru okumasi **ve yazmasi**: bekleme, dosya sonu, `O_NONBLOCK` ile `-EAGAIN`, uc durumun ayriligi, `pipe2`, ve `SIGPIPE` -- yakalamayan bir `fork` cocugunun 141 ile oldugu `waitpid` ile olculuyor. |
 | `sync.rs` (5 sinav) | `futex`: uyandirma, zaman asimi, cekismesiz kilidin cekirdege inmemesi, `CLONE_CHILD_CLEARTID` ile `join`, paylasilan sayacin kilitle korunmasi. |
 | `threads.rs` (5 sinav) | `clone`: paylasilan bellek ve tanimlayicilar, `gettid`/`getpid` ayrimi, ayni programda `fork` karsiti, ana akis cikinca kardesin yasamasi. |

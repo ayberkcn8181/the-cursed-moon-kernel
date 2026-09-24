@@ -45,17 +45,22 @@ tabani (POSIX TLS / Windows TEB), **surec yaratma**
 Sinyalin bekleyen bir cagriyi bolmesi (`EINTR`/`SA_RESTART`) yalnizca
 POSIX tarafinda var -- Win32'de karsiligi yok ve bu ayrim olculuyor.
 Bir surecin **nasil oldugu** da iki ABI'de bambaska paketleniyor
-(`WIFSIGNALED` -- `GetExitCodeProcess` + NTSTATUS).
+(`WIFSIGNALED` -- `GetExitCodeProcess` + NTSTATUS). Standart girdiden
+okumak da artik bekliyor: `read(0, ...)` POSIX'in varsayilanina uyuyor,
+beklemek istemeyen `poll` ya da `O_NONBLOCK` kullaniyor.
 
 Her yetenek QEMU'da **olculerek** dogrulanmistir: `probe` (16 sinav),
-`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `bequest`
+`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (5), `bequest`
 (6), `nested` (4), `winenv` (4) gibi programlar sonucu hem ekrana hem
 seri gunluge yaziyor. Olcumler yol boyunca gercek hatalar buldu -- dolan
 VFS tablosu, `CreateFileA`'nin cevrilmeyen Windows yollari, `GDT`
 siniri, x86_64'te segment secicisinin taban MSR'sini silmesi, kesme ve
 `syscall` kapilarinin farkli cerceve duzeni, hic calismamis olan
-`fork`+`execve` kalibi, hala kullanilan bir adres uzayinin yikilmasi --
-ve her biri README'de kendi bolumunde yazili.
+`fork`+`execve` kalibi, hala kullanilan bir adres uzayinin yikilmasi,
+her zaman acik olan `stdin`e `EBADF` diyen `fcntl`, yuvasini hic
+birakmayan bitmis is parcaciklari, yuvasi geri verilmis bir gorevi
+bekleyenin bir daha uyanmamasi -- ve her biri README'de kendi
+bolumunde yazili.
 
 **Tamamlanan fazlar:**
 
@@ -3434,20 +3439,28 @@ merhaba stdin          # -> pencerede goruntulenir
 
 ![echo2 -- read(0) ile klavye](docs/screenshot-echo2.png)
 
-Sag alttaki sayac gerceklesen `read` cagrisi sayisidir: 13 karakter, 13
-cagri -- kuyruk her karede bosaltildigi icin cagri basina bir tus dusuyor.
+Sag alttaki sayac gerceklesen `read` cagrisi sayisidir: kuyruk her
+karede bosaltildigi icin cagri basina bir tus dusuyor. (Ekran
+goruntusu programin ilk halinden; o surum her karede kosulsuz
+okuyordu, simdi once `poll` ile soruyor.)
 
 Ikisi de aynen x86_64'te de calisir; `sys.rs` cagri numarasini ve
 mekanizmasini (`int 0x80` / `syscall`) `cfg` ile ayirir, geri kalan kod
 tektir.
 
-### Bloke etmeyen `read`
+### Bloke etmeyen `read` (artik bloke ediyor)
 
-Gercek bir terminalde `read(0)` veri gelene kadar bekler. Burada beklemez:
-o an ne varsa doner, yoksa `0`. Neden borularla ayni: bloke olan bir surec
-kendi penceresini de dondurur. Terminal disiplini de yok -- satir tamponu,
-otomatik yankilama, `termios` yok; yankiyi uygulama kendi yapar (`echo2`
-okudugunu hem ekrana cizer hem `write(1)` ile geri yazar).
+Bu bolum uzun sure "gercek bir terminalde `read(0)` bekler, burada
+beklemez" diyordu. Gerekce de yaziliydi: bloke olan bir surec kendi
+penceresini de dondurur. Gerekce hala gecerli, ama vardigi sonuc
+yanlisti -- ayrinti "Standart girdiden okumak artik bekliyor"
+bolumunde. Kisaca: bekleme POSIX'in varsayilani, beklememek isteyen
+`poll` ile sorar ya da `O_NONBLOCK` koyar, ve `echo2` tam bu yuzden
+once soruyor.
+
+Terminal disiplini yok: satir tamponu, otomatik yankilama, `termios`
+yok; yankiyi uygulama kendi yapar (`echo2` okudugunu hem ekrana cizer
+hem `write(1)` ile geri yazar).
 
 ### Surec basina program break
 
@@ -5360,6 +5373,233 @@ olduruyordu -- `ExitProcess` icin dogru, `TerminateProcess` icin degil.
   sahiplenirse surec zaten olmuyor; bu bolum yalnizca **sahipsiz**
   istisnalari anlatiyor.
 
+## Standart girdiden okumak artik bekliyor
+
+Uzun sure `read(0, ...)` tus yoksa hemen `0` donuyordu. Sayi masum
+gorunuyor ama POSIX'te `0` **dosya sonu** demektir: girdi bitti, bir
+daha hic veri gelmeyecek. Gercek bir kabuk ya da `cat` bunu gorunce
+cikar -- yani klavye bagli oldugu halde program "girdi kapandi" diye
+sonlanirdi.
+
+```
+[stdin] A O_NONBLOCK:  gecti (tus yokken beklemeden -EAGAIN)
+[stdin] B poll:        gecti (tus yokken hazir degil dedi)
+[stdin] C bloke etti:  gecti (bekledi ve sinyalle bolundu)
+[stdin] D penceresiz:  gecti (penceresiz surecte 0 (dosya sonu))
+[stdin] E bayrak:      gecti (fd 0 bayragi yazilip geri okundu)
+[stdin] gorev yuvasi: 5/12
+[stdin] bekleme: 13 tik (en az 10), penceresiz okuma: 0
+```
+
+![stdin](docs/screenshot-stdin.png)
+
+### "Ama pencere donar" itirazi dogru, cevabi yanlisti
+
+Eski davranisin bir gerekcesi vardi ve gecerliydi: her karede cizen bir
+program bloke eden bir okuma yaparsa cizim durur. Yanlis olan,
+gerekceden cikarilan sonuctu -- "oyleyse cekirdek hic beklemesin".
+
+Gercek Linux'ta da bloke eder ve cozum programin kendisindedir. Iki
+dogru deyim var:
+
+```c
+  poll(stdin, 0)      /* hazir mi diye sor, degilse okuma */
+  O_NONBLOCK + read   /* oku, hazir degilse EAGAIN al */
+```
+
+`echo2` tam bu yuzden duzeltildi. Ilk hali her karede dogrudan
+`read(0, ...)` cagiriyordu; cekirdek dogru davranmaya baslayinca o
+program donacakti. Simdi once `poll` ile soruyor -- ve bu, cekirdegin
+duzeltilmesinin yan etkisi degil, dogru yazilmis bir GUI programinin
+zaten yapmasi gereken sey.
+
+### Uc bilincli kacis
+
+Cekirdek her kosulda uyumuyor:
+
+| durum | sonuc | gerekce |
+|---|---|---|
+| pencere yok | `0` (dosya sonu) | tus gonderebilecek kimse yok |
+| uyutulamaz gorev | `0` | masaustu/kabuk uyursa sistem donar |
+| `O_NONBLOCK` | `-EAGAIN` | cagiran acikca istemis |
+
+Ilki en onemlisi. Penceresi olmayan bir surecin klavyesi yoktur; onu
+uyutmak sonsuza kadar uyutmak olurdu. `stdin` D sinavi tam bunu
+olcuyor ve olcumu **zaman asimli**: sonuc bir boru uzerinden geliyor,
+ebeveyn 1,5 saniye bekliyor ve cevap gelmezse cocugu olduruyor. Hatali
+bir cekirdekte bu sinav asili kalmak yerine `penceresiz surec ASILI
+kaldi` diye kaliyor.
+
+### Uyandirma nereden geliyor
+
+Bekleyen gorev, cekirdek anahtar uzayinda uyuyor:
+
+```rust
+const CONSOLE_KEY_BASE: usize = 0x0003_0000;   // + pencere numarasi
+```
+
+Uyandiran tek yer `deliver_key`, yani pencere yoneticisinin tusu
+kuyruga koydugu an. Ayni desen borularda da kullaniliyor (`0x0001_0000`
+okuma, `0x0002_0000` yazma); anahtar uzaylarinin ayri taban degerleri
+olmasi, kullanici adresleriyle (`futex`) karismamalari icin.
+
+### Olcumun buldugu hata: `fcntl(0, F_SETFL, ...)` sessizce kaliyordu
+
+Sinav ilk kosusunda **asili kaldi**: A sinavi `O_NONBLOCK` koyup
+okuyordu ve okuma yine bekliyordu. Sebep cekirdegin bekleme yolunda
+degil, `fcntl`in girisindeydi:
+
+```rust
+if fd::get(fd_num).is_none() {
+    return -EBADF;
+}
+```
+
+Yonlendirilmemis 0/1/2 tanimlayici tablosunda **yer tutmuyor** --
+cekirdek onlari numaradan taniyip konsola/pencereye bagliyor. Yalnizca
+tabloya bakan bu denetim, her zaman acik olan uc tanimlayiciya `EBADF`
+diyordu. Cagiran bayragi koydugunu saniyor, donus degerine bakmiyor
+(kim bakar ki), ve okuma bloke etmeye devam ediyordu.
+
+Iki parca gerekti: denetimin standart tanimlayicilari gecirmesi, ve
+bayraklarin tutulacagi bir yer. 0/1/2'nin `FileDescriptor` kaydi
+olmadigi icin bayraklar **grup basina** ayri bir tabloda duruyor
+(`STD_FLAGS`) -- kardes is parcaciklari ayni `stdin`i paylastigi icin
+gorev basina degil, grup basina. `stdin` E sinavi bu tabloyu iki
+yonden olcuyor: yazilan bayrak geri okunuyor mu, ve temizlenince
+gercekten gidiyor mu.
+
+Tablo `execve`de sifirlaniyor. POSIX'te `O_NONBLOCK` acik dosya
+tanimina ait ve `exec` onu korur, ama burada yonlendirilmemis `stdin`
+bir dosya degil: gorev yuvalari geri kazanildigi icin temizlenmezse
+yeni bir program, yuvasinda calismis oncekinin biraktigi bayrakla
+baslardi.
+
+### C sinavi neden sureyi olcuyor
+
+`-EINTR` donmesi tek basina yetmez: hic beklemeden de bolunmus
+gorunebilirdi. Kardes is parcacigi 120 ms sonra sinyal gonderiyor ve
+sinav gecen sureyi PIT tiki cinsinden sayiyor. Olculen 12-13 tik, yani
+120-130 ms -- okuma gercekten uyudu.
+
+Hatali surumde (eski "hic bekleme" davranisi) sinav dogru teshisle
+kaliyor:
+
+```
+[stdin] A O_NONBLOCK: KALDI (0 dondu -- dosya sonu gibi davrandi)
+[stdin] C bloke etti: KALDI (0 dondu -- HIC beklemedi)
+[stdin] bekleme: 0 tik (en az 10), penceresiz okuma: 0
+```
+
+### Bilerek yapilmayanlar
+
+* **Terminal disiplini yok.** Satir tamponu, yankilama, `termios`,
+  `ICANON`/`ECHO` yok -- `read` tuslari ham verir, yankiyi uygulama
+  kendi yapar. `stdin` bekliyor olmasi onu bir terminal yapmiyor.
+* **`poll` hala bir dongu.** Bekleme kuyrugu degil, tik cozunurluklu
+  bir dongu; yani `poll(stdin, -1)` uyanmayi 10 ms'e kadar geciktirir.
+  Bloke eden `read` ise gercekten uyuyor.
+* **Cok pencereli surecte ilk pencere.** `read(0, ...)` surecin **ilk**
+  penceresinin kuyruguna bakiyor; hangi pencerenin "konsol" oldugunu
+  secme yolu yok.
+* **`stdin` yonlendirmesi bayraklari paylasmaz.** Yonlendirilmis bir
+  `stdin` normal tanimlayici kaydini kullanir; iki yol ayri tablolarda
+  durdugu icin yonlendirme sirasinda bayrak tasinmaz.
+
+### Olcumun buldugu ikinci hata: biten akislar yuvayi birakmiyordu
+
+D sinavi bir sure "penceresiz surec ASILI kaldi" diye kaliyordu -- ama
+yalnizca once baska uygulamalar kosturulduysa. Tek basina kosunca
+geciyordu, ve bu tam olarak yanlis teshise davetiye: hata cekirdegin
+stdin yolunda aranirdi.
+
+Aranmamasinin sebebi mesajin kendisiydi. Tek bir "kaldi" ifadesi uc
+ayri arizayi ortuyordu: cocugun uyuyup kalmasi, `EAGAIN` almasi, ve
+**cocugun hic var olmamasi**. Mesaj ayristirilinca cevap hemen geldi:
+
+```
+[stdin] D penceresiz: KALDI (catallanamadi -- gorev yuvasi kalmadi)
+[stdin] gorev yuvasi: 12/12
+```
+
+`fork` hic olmamisti. Sebebi `ps` gosterdi:
+
+```text
+   1 bitti      thread
+   6 bitti      thread
+   7 bitti      thread
+   8 bitti      thread
+```
+
+Dort bitmis is parcacigi yuvasini tutuyordu. Ikisi de dogru olan iki
+kural carpismisti:
+
+* Is parcacigi `waitable` yaratiliyordu, cunku Win32 yuzu bitmis bir
+  akisin kodunu `GetExitCodeThread` ile soruyor ve cevabi yuvanin
+  `Terminated` durumundan okuyor.
+* Ama o yuvayi toplayacak **kimse yok**: `waitpid` bir is parcacigini
+  gormez, `pthread_join` ise clear-tid futeksiyle calisir ve cikis
+  kodunu cekirdekten hic istemez.
+
+Sonuc, biten her akisin yuvayi sonsuza kadar tutmasiydi. Dort akis
+yaratan `intr`den sonra tavan (12 yuva) doluyor ve sonraki uygulamanin
+`fork`u sessizce kaliyordu.
+
+Cozum, cikis kodunu yuvadan **ayirmak**. NT tarafi zaten bir kayit
+tablosu tutuyor (`GetExitCodeProcess` toplanmis cocuklari oradan okuyor)
+ve `GetExitCodeThread` oraya zaten **once** bakiyor; akisin kodu oraya
+yaziliyor ve yuva hemen birakiliyor. Gercek Linux de ayni sonuca varir:
+`CLONE_THREAD` ile yaratilan bir akis kendini toplar, zombi birakmaz.
+
+Ayni kosu, duzeltmeden once ve sonra:
+
+```text
+  once:  gorev:11   (dordu 'bitti' durumunda thread)
+  sonra: gorev:7    (hicbiri yok)
+```
+
+### Bir duzeltmenin aciga cikardigi iki hata
+
+Yuvayi birakmak, uzun suredir **orada duran** ama hic tetiklenmemis iki
+hatayi gorunur yapti. Ikisi de `winsync`i dusurdu; ikisi de duzeltmenin
+kendisiyle degil, artik mumkun olan yeni bir sirayla ilgiliydi.
+
+**1. Bekleyen gorev bir daha uyanmiyordu.** `wait_for_task`in dongusu
+iki bitis durumunu de sayiyordu -- `Terminated` (bitmis, toplanmamis)
+ve `Unused` (yuvasi geri verilmis). Ama bekleyeni **uyandiran** kod
+yalnizca ilkine bakiyordu:
+
+```rust
+if (*tasks.add(target)).state == TaskState::Terminated {
+    task.state = TaskState::Ready;
+}
+```
+
+Bekleyen gorev `Waiting` durumundayken zamanlanmiyor, yani o dongu
+donmuyor bile. Yuva dogrudan `Unused`a gecince uyandirma hic gelmiyor
+ve `WaitForSingleObject(INFINITE)` sonsuza kadar bekliyordu. Kod
+oncesinde de yanlisti; yalnizca yuvayi dogrudan birakan bir yol
+olmadigi icin hic calismamisti.
+
+**2. Bekleme, saklanmis cikis kodunu siliyordu.** `WaitForSingleObject`
+bekledikten sonra kodu kosulsuz sakliyordu. Bir is parcacigi yuvasini
+**cikarken kendisi** biraktigi icin bekleyen taraf `Terminated` anini
+hic gormuyor ve sifir aliyor -- yani 42 ile biten bir akis 0
+gosteriyordu. Kayit zaten cikis aninda yapilmisti; bekleme artik
+yalnizca **bos** olan kaydi dolduruyor.
+
+Ikisi de olcumle bulundu: sinav once asili kaldi (birinci hata),
+duzeltilince `cikis kodu YANLIS` dedi (ikinci hata), ve ancak ondan
+sonra gecti. Arada hicbir asamada "gecti ama yanlis sebeple" olmadi --
+cunku `winsync` D iki soruyu birden soruyor: kosarken `STILL_ACTIVE`,
+bitince **42**.
+
+Sinav bu arada kalici bir olcum araci kazandi: `kstat(4)` **dolu** yuva
+sayisini, `kstat(5)` tavani veriyor. Dolu yuvayi saymak gerekiyordu,
+cunku cekirdegin `TASK_COUNT`u bir su seviyesi isareti -- tablonun ne
+kadarinin bir kez kullanildigini tutuyor, yuva geri verilince
+kucumuyor.
+
 ## Alfa'nin bilinen sinirlari
 
 Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
@@ -5386,10 +5626,12 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
   ayrica yazilmadi. `poll` bir bekleme kuyrugu degil, tik cozunurluklu
   bir dongudur: uyanma gecikmesi en fazla 10 ms. `dup` ayrica konumu
   paylastirmaz, kopyalar.
-- **Standart girdi bloke etmez.** `read(0, ...)` sahibinin penceresinde
-  biriken tuslari **o an ne varsa** dondurur, tus yoksa 0. Bloke eden bir
-  `read` GUI dongusunu de dondururdu; terminal disiplini (satir tamponu,
-  yankilama, `termios`) da yok -- yankiyi uygulama kendi yapar.
+- ~~**Standart girdi bloke etmez**~~ -- `read(0, ...)` artik POSIX gibi
+  **bekliyor** (yukari bkz.); beklememek isteyen `poll` ile sorar ya da
+  `O_NONBLOCK` koyar. Terminal disiplini (satir tamponu, yankilama,
+  `termios`) hala yok -- yankiyi uygulama kendi yapar. `read(0, ...)`
+  surecin **ilk** penceresinin kuyruguna bakiyor; hangi pencerenin
+  "konsol" oldugunu secme yolu yok.
 - **Sinyal teslimi syscall donusune baglidir.** Hicbir syscall yapmayan
   saf hesap dongusu sinyali gormez (`spin` boyle); `SIGKILL` ise
   isbirligi gerektirmedigi icin her zaman calisir. Ayrica maskeleme

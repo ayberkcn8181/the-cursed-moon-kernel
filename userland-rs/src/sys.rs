@@ -1419,6 +1419,10 @@ pub mod kstat {
     pub const TICKS: usize = 2;
     /// Kac is parcacigi yaratildi.
     pub const THREADS_CREATED: usize = 3;
+    /// Su anda **dolu** gorev yuvasi (zombiler dahil).
+    pub const TASKS: usize = 4;
+    /// Toplam gorev yuvasi.
+    pub const TASK_SLOTS: usize = 5;
 }
 
 /// Bir cekirdek sayacini okur.
@@ -1439,6 +1443,19 @@ pub fn address_wakes() -> usize {
 /// PIT tik sayaci -- 10 ms cozunurluk.
 pub fn ticks() -> usize {
     kstat(kstat::TICKS)
+}
+
+/// Su anda **dolu** gorev yuvasi sayisi (zombiler dahil).
+///
+/// `fork` ya da `clone` **neden** basarisiz oldugunu ayirt etmek icin:
+/// yuva kalmadiysa hata cekirdegin sinadigi yolda degil, tavanda.
+pub fn task_count() -> usize {
+    kstat(kstat::TASKS)
+}
+
+/// Toplam gorev yuvasi (tavan).
+pub fn task_slots() -> usize {
+    kstat(kstat::TASK_SLOTS)
 }
 
 /// `set_tid_address`: olurken sifirlanacak yeri sonradan bildirir.
