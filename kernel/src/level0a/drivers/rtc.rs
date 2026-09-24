@@ -99,7 +99,7 @@ pub fn now() -> Option<DateTime> {
     }
 
     let mut previous = read_raw();
-    // Ust ustę ayni sonucu verene kadar tekrarla: guncelleme tam okuma
+    // Ust uste ayni sonucu verene kadar tekrarla: guncelleme tam okuma
     // sirasinda gerceklesirse alanlar farkli anlara ait olurdu.
     loop {
         while update_in_progress() {

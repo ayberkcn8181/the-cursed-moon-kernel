@@ -82,7 +82,7 @@ pub const MAX_SIGNAL: u32 = 31;
 struct Disposition {
     /// `SIG_DFL`, `SIG_IGN` ya da Ring 3'teki isleyicinin adresi.
     handler: usize,
-    /// Isleyici donduğunde ziplanacak tramplen (kullanici tarafi verir).
+    /// Isleyici dondugunde ziplanacak tramplen (kullanici tarafi verir).
     restorer: usize,
     /// `SA_*` bayraklari (bkz. `SA_NODEFER`, `SA_RESETHAND`).
     flags: u32,

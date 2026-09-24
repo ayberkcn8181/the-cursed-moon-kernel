@@ -3,7 +3,7 @@
 //! TEB kurulduktan sonra (bkz. `teb.rs`) bir PE ikilisi `fs:[0]`da bir
 //! istisna zinciri **gorebiliyordu**, ama zincir hicbir zaman
 //! **yurutulmuyordu**: bir sayfa hatasi surecin sonu demekti. Bu modul o
-//! bosluğu kapatir.
+//! boslugu kapatir.
 //!
 //! ## Windows'un iki mekanizmasi
 //!
@@ -43,7 +43,7 @@
 //!
 //! ## POSIX tarafiyla iliskisi
 //!
-//! Bu, `level0b1::signal`in yaptigi isin Windows'çasidir. Iki yol da
+//! Bu, `level0b1::signal`in yaptigi isin Windows'casidir. Iki yol da
 //! "cekirdek kullanici yiginina bir cerceve kurar ve baglami cevirir"
 //! desenini kullanir; hatta ayni `UserContext` tipini paylasirlar. Fark
 //! cercevenin **bicimi**: POSIX bir sinyal numarasi verir, Windows bir

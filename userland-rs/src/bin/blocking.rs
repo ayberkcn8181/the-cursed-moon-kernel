@@ -52,7 +52,7 @@
 //! ```
 //!
 //! D sinavi asil meselenin kendisi: C ile B'nin ayni cagriyi ayni bos
-//! boruda farkli cevaplar vermesi. Ayni sayiyi dondurselerdi sadeleşme
+//! boruda farkli cevaplar vermesi. Ayni sayiyi dondurselerdi sadelesme
 //! surerdi.
 //!
 //! G ile H ayni olayin iki yuzu ve sirasi onemli. G, sinyali

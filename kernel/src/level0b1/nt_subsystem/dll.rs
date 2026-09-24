@@ -656,7 +656,7 @@ pub unsafe fn emit_thunk(at: usize, export: &Export) {
 /// > Cagiran, register argumanlari icin de yiginda **32 baytlik yer**
 /// > (golge alan / shadow space) ayirmak zorundadir.
 ///
-/// Bu alan tam olarak register argumanlarinin doküleceği yerdir ve
+/// Bu alan tam olarak register argumanlarinin dokulecegi yerdir ve
 /// besinci argumanin hemen oncesindedir. Yani dort registeri oraya
 /// dokmek, butun argumanlari **kesintisiz tek bir dizi** haline getirir:
 ///

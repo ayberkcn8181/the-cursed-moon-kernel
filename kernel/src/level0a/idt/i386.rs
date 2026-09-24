@@ -130,7 +130,7 @@ global_asm!(
 .global ex_stub_\vec
 .type ex_stub_\vec, @function
 ex_stub_\vec:
-    push 0                  /* sahte hata kodu -- duzeni tekdüze yapar */
+    push 0                  /* sahte hata kodu -- duzeni tekduze yapar */
     push \vec
     jmp exception_common
 .endm

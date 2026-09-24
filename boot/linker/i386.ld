@@ -1,4 +1,4 @@
-/* TCMK i386 linker script — bkz. mimari dokumaninin 5. bolumu (Bellek Haritasi). */
+/* TCMK i386 linker script -- bkz. mimari dokumaninin 5. bolumu (Bellek Haritasi). */
 ENTRY(_start)
 OUTPUT_FORMAT(elf32-i386)
 

@@ -1,6 +1,6 @@
 //! `nested` -- `sigaction` bayraklari ve **ic ice** sinyal teslimi.
 //!
-//! Bugune kadar TCMK'de bir isleyici koşarken **hicbir** sinyal teslim
+//! Bugune kadar TCMK'de bir isleyici kosarken **hicbir** sinyal teslim
 //! edilmiyordu. Sebep tasarimdaydi: saklanan Ring 3 baglami tek yuvaydi,
 //! ikinci bir teslim onu ezer ve surec asla eski yerine donemezdi. Yani
 //! suren bir `SIGUSR1` isleyicisi, gelen bir `SIGALRM`i bekletiyordu.
@@ -57,7 +57,7 @@ const ACCENT: u32 = 0x00B8_98FF;
 const OK: u32 = 0x0070_E090;
 const WARN: u32 = 0x00FF_8060;
 
-/// `SIGUSR1` isleyicisi su an koşuyor mu (kac katman)?
+/// `SIGUSR1` isleyicisi su an kosuyor mu (kac katman)?
 static IN_USR1: AtomicU32 = AtomicU32::new(0);
 /// `SIGALRM`, `SIGUSR1`in **icinde** mi kostu?
 static ALARM_NESTED: AtomicU32 = AtomicU32::new(0);

@@ -72,7 +72,7 @@ pub fn without_interrupts<F: FnOnce() -> R, R>(f: F) -> R {
 /// dispatcher -> Level-0b1 POSIX subsystem -> Level-0a.
 ///
 /// # Safety
-/// Isaretcı argumanlari gecerli bellek gostermelidir.
+/// Isaretci argumanlari gecerli bellek gostermelidir.
 pub unsafe fn syscall3(number: u32, arg1: u32, arg2: u32, arg3: u32) -> u32 {
     let ret: u32;
     asm!(

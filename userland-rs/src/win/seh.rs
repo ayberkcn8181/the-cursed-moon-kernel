@@ -22,7 +22,7 @@
 //!
 //! Ikinci satirin "yalnizca 32 bit" olmasi TCMK'nin eksigi degil,
 //! Windows'un kendi tercihi: Microsoft 64-bit'te tablo tabanli
-//! (`.pdata`) cozüme gecti. TCMK ayni ayrimi tasiyor, o yuzden F ve H
+//! (`.pdata`) cozume gecti. TCMK ayni ayrimi tasiyor, o yuzden F ve H
 //! sinavlari x86_64'te **atlanir**.
 //!
 //! Bir baska Windows tuhafligi da olculuyor: ayni anlami tasiyan donus

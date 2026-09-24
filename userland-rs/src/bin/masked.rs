@@ -6,7 +6,7 @@
 //! POSIX'te bir sinyali engellemek onu yok saymak degildir: engelli
 //! sinyal `PENDING` maskesinde durur ve engel kalkinca teslim edilir.
 //! Kritik bolge kalibi budur -- bolunmemesi gereken is maskeyle
-//! cevrelenir, sinyal kaybolmaz, yalnizca **erteленir**.
+//! cevrelenir, sinyal kaybolmaz, yalnizca **ertelenir**.
 //!
 //! ```text
 //!   sigprocmask(SIG_BLOCK,   1<<SIGUSR1)   -> artik gelmez, birikir

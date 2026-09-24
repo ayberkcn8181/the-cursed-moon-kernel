@@ -14,7 +14,7 @@
 //! ```
 //!
 //! Aradaki nesne bosuna degil: Windows'ta **adlandirilabilir** ve baska
-//! surecler ayni adla acip ayni belleği paylasabilir. POSIX'te ayni is
+//! surecler ayni adla acip ayni bellegi paylasabilir. POSIX'te ayni is
 //! `shm_open` ile ayri bir yoldan yapilir. TCMK adlandirmayi
 //! desteklemiyor -- ve bunu sessizce yok saymak yerine sinav B ile
 //! acikca olcuyor.

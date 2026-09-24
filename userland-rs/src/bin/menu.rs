@@ -46,7 +46,7 @@ fn main() {
                 // imajini ve adres uzayini birakip secilen programi ayni
                 // gorevde yukler.
                 sys::execve(ENTRIES[selected].1);
-                // Buraya dusuldüyse yukleme basarisiz oldu.
+                // Buraya dusulduyse yukleme basarisiz oldu.
             }
             _ => {}
         }

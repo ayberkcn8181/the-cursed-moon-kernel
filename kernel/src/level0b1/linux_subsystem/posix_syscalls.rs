@@ -1197,7 +1197,7 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
         //
         // `clone`un `CLONE_CHILD_CLEARTID` bayragiyla ayni sozun sonradan
         // verilen bicimi. glibc her akis icin bunu cagirir; tanimayan bir
-        // cekirdek `ENOSYS` dondururdu ve iş parcaciği kutuphanesi
+        // cekirdek `ENOSYS` dondururdu ve is parcacigi kutuphanesi
         // kurulamadan patlardi. Doner: cagiranin kendi kimligi.
         SYS_SET_TID_ADDRESS => {
             let task = crate::level0a::core::scheduler::current_id();

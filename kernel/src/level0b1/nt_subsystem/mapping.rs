@@ -13,7 +13,7 @@
 //! ```
 //!
 //! Aradaki tanitici bosuna degil. Windows'ta esleme nesnesi **adlandirilabilir**
-//! ve baska surecler ayni adla acip ayni belleği paylasabilir; POSIX'te
+//! ve baska surecler ayni adla acip ayni bellegi paylasabilir; POSIX'te
 //! ayni is `shm_open` ile ayri bir yoldan yapilir. TCMK adlandirmayi
 //! desteklemiyor (paylasimli bellek yok), ama iki adimli yapiyi
 //! **koruyor**: tek cagriya indirmek, gercek bir Windows programinin
