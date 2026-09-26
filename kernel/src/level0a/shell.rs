@@ -464,6 +464,7 @@ fn state_name(state: scheduler::TaskState) -> &'static str {
         scheduler::TaskState::IoWait => "disk",
         scheduler::TaskState::SigWait => "sinyal",
         scheduler::TaskState::AddrWait => "kilit",
+        scheduler::TaskState::Stopped => "durdu",
         scheduler::TaskState::Terminated => "bitti",
     }
 }
@@ -501,11 +502,12 @@ fn execute(line: &str) {
             write_line("  mkdir <yol>  rmdir <yol>  cd [dizin]  pwd");
             write_line("uygulama / pencere:");
             write_line("  apps  run <ad>  win  focus <id>  mouse");
+            write_line("  stop <id>  cont <id>   (is denetimi)");
             write_line("diger:");
             write_line("  echo <metin>  pipes  clear  help");
         }
         "ps" => {
-            write_line("  id durum      ad          nice hak   cpu  cagri  adres-uzayi");
+            write_line("  id pgid durum      ad          nice hak   cpu  cagri  adres-uzayi");
             for i in 0..scheduler::task_count() {
                 let state = scheduler::state_of(i);
                 write_str(if i == scheduler::current_id() {
@@ -514,6 +516,11 @@ fn execute(line: &str) {
                     "   "
                 });
                 write_num_right(i, 2);
+                // Surec grubu: `kill -pgid` ve `waitpid(-pgid)` bunu
+                // hedefliyor. Kendi grubunun lideri olanlarda id ile
+                // ayni cikar; boru hattindaki uc surecte ayni sayi
+                // gorunur.
+                write_num_right(scheduler::pgid_of(i), 5);
                 put(b' ');
                 write_padded(state_name(state), 10);
                 put(b' ');
@@ -764,6 +771,45 @@ fn execute(line: &str) {
             write_line("katmanlar: Level-0b2 / Level-0b1 / Level-0a / Level-1");
             write_line("ikili formatlar: ELF32 + PE32 (ayni cekirdek, iki dunya)");
         }
+        // Is denetimi: bir gorevi durdur ve devam ettir.
+        //
+        // Kabukta olmasi bilincli -- `SIGSTOP` yakalanamadigi icin
+        // hicbir uygulama kendini "durdurulamaz" yapamaz, yani bu
+        // komut her zaman calisir.
+        "stop" | "cont" => {
+            let id = arg.bytes().fold(None::<usize>, |acc, b| {
+                if b.is_ascii_digit() {
+                    Some(acc.unwrap_or(0) * 10 + (b - b'0') as usize)
+                } else {
+                    acc
+                }
+            });
+            let signo = if cmd == "stop" {
+                signal::SIGSTOP
+            } else {
+                signal::SIGCONT
+            };
+            match id {
+                Some(i) => match signal::raise(i, signo) {
+                    Ok(()) => {
+                        write_str(signal::name_of(signo));
+                        write_str(" gonderildi: gorev #");
+                        write_num(i);
+                        write_str(" -> ");
+                        if scheduler::is_stopped(i) {
+                            write_str("durdu (");
+                            write_str(signal::name_of(scheduler::stop_signal_of(i)));
+                            write_line(")");
+                        } else {
+                            write_line(state_name(scheduler::state_of(i)));
+                        }
+                    }
+                    Err(_) => write_line("boyle bir gorev yok ('ps' ile listeleyin)"),
+                },
+                None => write_line("kullanim: stop <id> | cont <id>"),
+            }
+        }
+
         "kill" => {
             let id = arg.bytes().fold(None::<usize>, |acc, b| {
                 if b.is_ascii_digit() {
@@ -921,7 +967,10 @@ fn execute(line: &str) {
             // Takas: yalnizca gercekten varsa yazilir. Sifir gostermek
             // "var ama bos" ile "hic yok"u karistirirdi.
             if swap::total_slots() > 0 {
-                write_str("takas: ");
+                write_str("takas hatasi: ");
+            write_num(swap::failures());
+            newline();
+            write_str("takas: ");
                 write_num(swap::used_slots() as usize * 4);
                 write_str(" / ");
                 write_num(swap::total_slots() as usize * 4);

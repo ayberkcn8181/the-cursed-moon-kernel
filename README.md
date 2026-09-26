@@ -49,10 +49,11 @@ Bir surecin **nasil oldugu** da iki ABI'de bambaska paketleniyor
 okumak da artik bekliyor: `read(0, ...)` POSIX'in varsayilanina uyuyor,
 beklemek istemeyen `poll` ya da `O_NONBLOCK` kullaniyor. Cerceve havuzu
 tukendiginde de cevap artik "reddet" degil: sayfa **diske gidiyor** ve
-hatada geri okunuyor.
+hatada geri okunuyor. Bir surec artik olmenin disinda **durabiliyor**
+da (`SIGSTOP`/`SIGCONT`, surec gruplari) -- is denetiminin temeli.
 
 Her yetenek QEMU'da **olculerek** dogrulanmistir: `probe` (16 sinav),
-`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (5), `bigfile` (6), `heap` (5), `swapx` (6), `bequest`
+`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (5), `bigfile` (6), `heap` (5), `swapx` (6), `jobs` (6), `bequest`
 (6), `nested` (4), `winenv` (4) gibi programlar sonucu hem ekrana hem
 seri gunluge yaziyor. Olcumler yol boyunca gercek hatalar buldu -- dolan
 VFS tablosu, `CreateFileA`'nin cevrilmeyen Windows yollari, `GDT`
@@ -64,9 +65,10 @@ birakmayan bitmis is parcaciklari, yuvasi geri verilmis bir gorevi
 bekleyenin bir daha uyanmamasi -- ve her biri README'de kendi
 bolumunde yazili. Olcum bir de sunu gosterdi: bir tavani kaldirmak,
 altinda duran daha sikisik bir tavani (VFS dugum tablosu) gormeden
-anlamsiz. Ve iki kez, hata cekirdekte degil **sinavin kendisinde**
-cikti -- ikisi de sinyalle olen bir cocugu "basariyla bitti" sayan
-aceleci bir durum denetimiydi.
+anlamsiz. Ve birkac kez, hata cekirdekte degil **sinavin kendisinde** cikti --
+sinyalle olen bir cocugu "basariyla bitti" sayan aceleci bir durum
+denetimi, sinadigi seye bagli bir temizlik, ve yeni bir hal eklenince
+sessizce yanlislasan eski bir `WIFSIGNALED` denetimi.
 
 **Tamamlanan fazlar:**
 
@@ -6096,6 +6098,178 @@ kaldi" diyor -- yani zincirin nerede koptugu tek bakista gorunuyor.
 * **Onden okuma (read-ahead) yok.** Her sayfa hatasi tek bir yuva
   okuyor.
 
+## Olum degil: bir surec **durabilir** de
+
+POSIX'te bir surecin bitmesi tek yol degil. Durabilir, sonra kaldigi
+yerden devam edebilir -- ve bunun uzerine butun **is denetimi** (job
+control) kurulu: Ctrl-Z, `fg`, `bg`, `jobs`. TCMK'de bu kavram yoktu.
+`waitpid` yalnizca olumu bekliyordu, `SIGSTOP` diye bir sinyal
+bulunmuyordu. Bir kabuk yazilamazdi.
+
+```
+[jobs] A durdu:            gecti (SIGSTOP sonrasi cocuk ilerlemedi)
+[jobs] B waitpid bildirir: gecti (WIFSTOPPED dogru, WSTOPSIG 19)
+[jobs] C devam etti:       gecti (SIGCONT sonrasi cocuk yeniden ilerledi)
+[jobs] D yakalanamaz:      gecti (SIGSTOP reddedildi, SIGTSTP kabul edildi)
+[jobs] E grup:             gecti (tek cagri gruptaki iki cocugu da durdurdu)
+[jobs] F ayrim:            gecti (durmus cocuk WIFSIGNALED degil)
+[jobs] durum kelimesi: 0x137f  kendi pgid: 5
+```
+
+![jobs](docs/screenshot-jobs.png)
+
+### `Stopped`: butun bekleme durumlarindan ayri
+
+Zamanlayicinin zaten bes bekleme durumu vardi (`Blocked`, `Waiting`,
+`SigWait`, `IoWait`, `AddrWait`) ve yenisi onlarin hicbirine
+benzemiyor. Fark tek cumlede: **hepsinin bir uyandirma kaynagi var.**
+Zaman, donanim, baska bir gorev, bir adres. Durmus bir gorevin yok --
+yalnizca `SIGCONT` onu kaldirabilir.
+
+Ayni listeye konsaydi bir disk kesmesi ya da bir `futex` uyandirmasi
+durmus sureci calistirir ve "durduruldu" sozu tutulmazdi.
+
+Sonlanmaktan da ayri: gorev yasiyor, bellegi ve tanimlayicilari duruyor,
+`waitpid` onu ayri bir kodlamayla bildiriyor.
+
+### Durum kelimesinin dorduncu hali
+
+```text
+  normal cikis  -> (kod & 0xFF) << 8      WIFEXITED
+  sinyalle olum ->  signo & 0x7F          WIFSIGNALED
+  durduruldu    -> (signo << 8) | 0x7F    WIFSTOPPED
+  devam etti    ->  0xFFFF                WIFCONTINUED
+```
+
+`0x7F` alt bayti "olumle gitmedi, durdu" demenin yolu: sinyalle olumde
+orasi sinyal numarasidir ve `0x7F` gecerli bir sinyal degil. Ayni 16
+bitin dort hali de birbirinden ayirt edilebiliyor -- tasarim
+1970'lerden kalma ve hala calisiyor.
+
+Olculen deger `0x137f`: `19 << 8 | 0x7F`, yani "SIGSTOP ile durdu".
+
+### Olcumun buldugu hata: `WIFSIGNALED` artik yanlisti
+
+Bu kodlama, **var olan** bir denetimi sessizce yanlis kildi:
+
+```rust
+pub fn signalled(status: u32) -> bool {
+    status & 0x7F != 0      // dogruydu -- durma kavrami gelene kadar
+}
+```
+
+Durmus bir cocukta alt bayt `0x7F`tir, yani bu denetim "sinyalle oldu"
+der. Bir kabuk cocugunu Ctrl-Z ile durdurur ve "oldu" sanardi.
+
+Gercek POSIX de tam bu yuzden `0x7F`i disliyor: alt yedi bit ya sifir
+(normal cikis), ya gecerli bir sinyal, ya da `0x7F` (durma isareti).
+`jobs` F bu yuzden ayri bir sinav -- ve bilerek bozulmus surumde dogru
+teshisi veriyor:
+
+```
+[jobs] F ayrim: KALDI (durma SINYALLE OLUM gibi gorundu)
+```
+
+Ders su: yeni bir hal eklemek, eski hallerin **denetimlerini** de
+degistirir. Eklemeyi yapip eski denetimlere bakmamak, calisan bir
+seyi bozmanin en sessiz yolu.
+
+### Iki grup, surekli karistirilan
+
+```text
+  group  is parcacigi grubu (TGID)  ayni surecin akislari -- bellek/fd
+  pgid   surec grubu       (PGID)  kabugun ayni IS olarak gordugu surecler
+```
+
+`Task.group` zaten vardi ve **TGID**'dir: `getpid` onu dondurur,
+`clone` ile yaratilan akislar onu paylasir. Yeni alan `Task.pgid` ise
+**PGID**: bir boru hatti (`a | b | c`) uc ayri surec ve uc ayri TGID
+demektir, ama tek bir PGID -- Ctrl-C ucunu birden bitirebilsin diye.
+
+Ikisini ayni alanda tutmak cazipti ve yanlis olurdu: bir surec kendi
+akislarini degistirmeden grubunu degistirebilmeli (`setpgid`), ve bir
+grup uyesi olen liderden sonra da yasamaya devam etmeli.
+
+`fork` cocugu grubu **devralir**; `setpgid(0, 0)` ile yeni bir grup
+kurulur. Kabuk her yeni is icin tam olarak bunu yapar.
+
+### Isaret biti: tek argumanda uc bicim
+
+`kill` ve `waitpid` ayni kalibi kullaniyor ve ikisi de `pid`i
+**isaretli** okumak zorunda:
+
+```text
+  pid  > 0   tek bir surec
+  pid == 0   cagiranin KENDI surec grubu
+  pid  < 0   -pid numarali surec grubu     (waitpid'de < -1)
+  pid == -1  herhangi bir cocuk            (yalnizca waitpid)
+```
+
+TCMK'de argumanlar isaretsiz kelime olarak geliyor, yani donusum
+acikca yapiliyor. Yapilmasaydi `kill(-5, SIGSTOP)` "4294967291
+numarali surece gonder" diye okunurdu.
+
+### `waitpid` neden yoklamali bekliyor
+
+Bloke etme bicimi bilerek sade: bir tiklik uykuyla yoklama.
+
+Sebebi cekirdegin uyandirma mekanizmasi. `wait_for` **tek** bir cocugu
+gosteriyor, oysa yeni hedefler bir grup ya da "herhangi biri" olabiliyor
+-- yani bir gorev birden cok cocugun durumunu beklemek zorunda. Cok
+hedefli bir bekleme kuyrugu kurmak mumkun, ama bu asamada yanlis yapma
+ihtimali cok daha yuksek bir sey; 10 ms'lik gecikme `waitpid` icin
+gorunmez.
+
+Durma ve devam etme birer **bayrak** ve okunurken tuketiliyorlar.
+Tuketilmeseydi ayni durma sonsuza kadar bildirilir ve `WUNTRACED` ile
+bekleyen bir kabuk donguye girerdi.
+
+### Olcumun buldugu ikinci hata: sinavin temizligi
+
+Negatif sinamada sinav **asili kaldi**, kalmadi. Iki ayri sebepten ve
+ikisi de sinavin kendisindeydi:
+
+1. E, grup bildirimini bloke eden bir `waitpid` ile bekliyordu. Yayin
+   bozuk oldugunda ikinci cocuk hic durmuyor ve bekleme donmuyordu.
+   Zaman asimli yoklamaya cevrildi.
+2. Temizlik `kill_group` kullaniyordu -- yani **sinanan seyin kendisi**.
+   Yayin bozukken ikinci cocuk oldurulemiyor ve son `waitpid` sonsuza
+   kadar bekliyordu. Temizlik artik tek tek `kill` cagiriyor.
+
+Ikincisi genel bir kural: bir sinavin temizligi, sinadigi seye bagli
+olmamali.
+
+### Kabukta
+
+```
+tcmk> ps
+  id pgid durum      ad
+   5    5 calisiyor  jobs
+   6    5 durdu      jobs
+tcmk> cont 6
+SIGCONT gonderildi: gorev #6 -> hazir
+```
+
+`stop <id>` ve `cont <id>` komutlari eklendi. `ps` artik `pgid`
+sutunu gosteriyor: kendi grubunun lideri olanlarda `id` ile ayni cikar,
+bir boru hattinda ucunde de ayni sayi gorunur.
+
+### Bilerek yapilmayanlar
+
+* **Terminal surec grubu yok.** `tcsetpgrp`/`tcgetpgrp`, on plan/arka
+  plan ayrimi ve `SIGTTIN`/`SIGTTOU` yok. Durdurma acikca gonderiliyor,
+  terminalden degil.
+* **Oturum (session) yok.** `setsid` ve oturum lideri kavrami yok;
+  `SIGHUP` yayini da yok.
+* **`SIGCHLD` yok.** Ebeveyn cocugunun durum degistirdigini yalnizca
+  `waitpid` ile ogreniyor.
+* **Durmus gorevin beklemesi kayboluyor.** `SIGSTOP` bir gorevi uyku ya
+  da bekleme icindeyken de durduruyor; `SIGCONT` onu `Ready` yapiyor,
+  yani eski bekleme sartina donmuyor. Cagiranlarin hepsi dongu icinde
+  yeniden sinadigi icin bu guvenli, ama `sleep` kisa kesilebiliyor.
+* **Grup uyeligi tabloda taraniyor.** Ayri bir grup listesi yok; on iki
+  gorevlik bir tabloda tarama zaten ucuz.
+
 ## Alfa'nin bilinen sinirlari
 
 Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
@@ -6137,12 +6311,15 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
   `siginfo`/`sigaction` bayraklari ve
   gercek-zamanli sinyaller yok. Maskeleme (`sigprocmask`), `alarm` ve
   `sigsuspend` var; `SA_RESTART` bu batiyla geldi (yukari bkz.).
-  `SA_SIGINFO` ve `sigwait` yok.
-- **Surec gruplari yok.** `waitpid` belirli bir cocugu ve `-1`
-  ("herhangi bir cocuk") bicimlerini destekler, ama `pid < -1` (surec
-  grubu) ve `WUNTRACED`/`WCONTINUED` yok. Is-parcacigi grubu (`tgid`)
-  ayri bir kavram ve o **var** (yukari bkz.); eksik olan **surec**
-  grubu.
+  `SA_SIGINFO` ve `sigwait` yok. `SIGSTOP` ve `SIGKILL` yakalanamaz ve
+  maskelenemez (yukari bkz.).
+- ~~**Surec gruplari yok**~~ -- var (yukari bkz.): `setpgid`/`getpgid`,
+  `kill(-pgid)`, `waitpid(-pgid)`, `WUNTRACED`/`WCONTINUED` ve
+  `SIGSTOP`/`SIGCONT`/`SIGTSTP` calisiyor. Eksik olan **terminal**
+  tarafi: `tcsetpgrp`/`tcgetpgrp`, on plan/arka plan ayrimi,
+  `SIGTTIN`/`SIGTTOU` ve oturum (`setsid`) yok. `SIGCHLD` de yok --
+  ebeveyn cocugunun durum degistirdigini yalnizca `waitpid` ile
+  ogreniyor.
 - **Is-parcacigi yigini sabit 8 KiB**: `dwStackSize` yok sayiliyor.
   Beklemenin iki yolu da artik var (`futex` / `WaitOnAddress`, yukari
   bkz.), ama uzerlerine kurulacak `CRITICAL_SECTION`/`SRWLOCK` katmani

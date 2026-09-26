@@ -48,6 +48,18 @@ pub enum TaskState {
     /// bekleyen sureci de yanlislikla kaldirirdi. Sinyal beklemesi tek
     /// hedeflidir -- yalnizca sinyalin gonderildigi gorev uyanir.
     SigWait,
+    /// **Durduruldu** (`SIGSTOP` / `SIGTSTP`).
+    ///
+    /// Diger butun bekleme durumlarindan ayri ve bu bilincli: onlarin
+    /// hepsinin bir **uyandirma kaynagi** var (zaman, donanim, baska
+    /// bir gorev, bir adres). Durmus bir gorevin yok -- yalnizca
+    /// `SIGCONT` onu kaldirabilir. Ayni listeye konsaydi bir disk
+    /// kesmesi ya da bir `futex` uyandirmasi durmus sureci calistirir
+    /// ve "durduruldu" sozu tutulmazdi.
+    ///
+    /// Sonlanmaktan da ayri: gorev yasiyor, bellegi ve tanimlayicilari
+    /// duruyor, `waitpid` onu `WIFSTOPPED` ile bildiriyor.
+    Stopped,
     /// Bir aygit kesmesi bekliyor (`TaskState::IoWait`).
     ///
     /// `Blocked`'tan farki uyanma kaynagidir: zaman degil, **donanim**.
@@ -155,6 +167,38 @@ pub struct Task {
     /// Is parcacigi tabanlari (TLS/TEB) **grup basina degil gorev
     /// basina**dir; her akisin kendi TEB'i olmak zorunda.
     pub group: usize,
+    /// **Surec grubu** (POSIX pgid) -- `group` ile ayni sey DEGIL.
+    ///
+    /// Ayrim surekli karistirilir, o yuzden aciktan yazili:
+    ///
+    /// ```text
+    ///   group  is parcacigi grubu (TGID)  -> `getpid`, bellek/fd paylasimi
+    ///   pgid   surec grubu       (PGID)  -> `kill(-pgid)`, `waitpid(-pgid)`
+    /// ```
+    ///
+    /// Ilki "ayni surecin akislari", ikincisi "kabugun ayni is olarak
+    /// gordugu surecler". Bir boru hatti (`a | b | c`) uc ayri surec ve
+    /// uc ayri `group` demektir, ama tek bir `pgid`: Ctrl-C hepsini
+    /// birden durdurabilsin diye.
+    ///
+    /// Varsayilan olarak gorev kendi grubunun lideridir; `fork` cocugu
+    /// ebeveynin grubunu **devralir** ve `setpgid` onu degistirebilir.
+    pub pgid: usize,
+    /// Durmus gorevin durma sebebi olan sinyal (`WSTOPSIG`).
+    ///
+    /// Cikis sinyalinden ayri tutuluyor: bir gorev once durup sonra
+    /// baska bir sinyalle olebilir, ve `waitpid` ikisini ayri ayri
+    /// bildirmek zorunda.
+    pub stop_signal: u32,
+    /// Durdurulup **henuz bildirilmemis** bir durum var mi.
+    ///
+    /// `waitpid` durmayi bir kez bildirir; bayrak olmasaydi ayni durma
+    /// sonsuza kadar rapor edilir ve `WUNTRACED` ile bekleyen bir kabuk
+    /// donguye girerdi.
+    pub stop_pending: bool,
+    /// `SIGCONT` ile devam etmis ve henuz bildirilmemis mi
+    /// (`WIFCONTINUED`).
+    pub cont_pending: bool,
     /// `AddrWait` iken: beklenen **kullanici** adresi (0 = beklemiyor).
     ///
     /// Adres uzayiyla birlikte anlamli: iki farkli surecin ayni sanal
@@ -207,6 +251,10 @@ impl Task {
             exit_code: 0,
             exit_signal: 0,
             group: 0,
+            pgid: 0,
+            stop_signal: 0,
+            stop_pending: false,
+            cont_pending: false,
             wait_addr: 0,
             wait_kernel: false,
             wait_timed: false,
@@ -380,6 +428,12 @@ fn spawn_inner(
         // Siradan bir gorev kendi grubunun lideridir. Is parcaciklari
         // bunu `spawn_thread` icinde yaratanin grubuyla degistirir.
         (*tasks.add(index)).group = index;
+        // Surec grubu: `fork` cocugu bunu ebeveynden devralir
+        // (bkz. `inherit_pgid`), yeni bir imaj ise kendi grubunu kurar.
+        (*tasks.add(index)).pgid = index;
+        (*tasks.add(index)).stop_signal = 0;
+        (*tasks.add(index)).stop_pending = false;
+        (*tasks.add(index)).cont_pending = false;
         // Yuva yeniden kullaniliyor olabilir: onceki sahibinin bekleme
         // izleri temizlenmezse yeni gorev hic beklemedigi bir adres
         // uzerinde uyandirilirdi.
@@ -435,6 +489,10 @@ fn release_slot(index: usize) {
         (*tasks.add(index)).wait_kernel = false;
         (*tasks.add(index)).wait_timed = false;
         (*tasks.add(index)).clear_child_tid = 0;
+        (*tasks.add(index)).pgid = index;
+        (*tasks.add(index)).stop_signal = 0;
+        (*tasks.add(index)).stop_pending = false;
+        (*tasks.add(index)).cont_pending = false;
     }
 }
 
@@ -813,6 +871,202 @@ pub fn terminate_current() -> ! {
         // bosuna dondurmemek icin bir sonraki kesmeye kadar bekle.
         crate::arch::cpu::halt();
     }
+}
+
+// --- Is denetimi: durdurma, devam ettirme, surec gruplari ---
+
+/// Bir gorevi **durdurur**.
+///
+/// Calisan gorevin kendisi de durdurulabilir ve o durumda cagri
+/// donmez-gibi davranir: durum `Stopped` yazildiktan sonra `yield_now`
+/// cagrilir ve gorev ancak `continue_task` onu `Ready` yapinca geri
+/// doner. Cagiranin bunu bilmesi gerekmiyor -- `SIGSTOP` zaten "burada
+/// bekle" demek.
+///
+/// Zaten durmus bir gorev icin `false` doner: ikinci bir durma
+/// bildirilecek yeni bir olay degil.
+pub fn stop_task(index: usize, signo: u32) -> bool {
+    if index >= MAX_TASKS || index == IDLE_TASK {
+        return false;
+    }
+    let stopped = crate::arch::cpu::without_interrupts(|| unsafe {
+        let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+        match (*tasks.add(index)).state {
+            TaskState::Unused | TaskState::Terminated | TaskState::Stopped => false,
+            _ => {
+                (*tasks.add(index)).state = TaskState::Stopped;
+                (*tasks.add(index)).stop_signal = signo;
+                (*tasks.add(index)).stop_pending = true;
+                (*tasks.add(index)).cont_pending = false;
+                // Durma da bir "cocuk durumu degisikligi": `waitpid` ile
+                // bekleyen ebeveyn kaldirilmali, yoksa `WUNTRACED`
+                // isteyen bir kabuk cocugu durdugu halde uyumaya devam
+                // ederdi.
+                wake_child_watchers(index);
+                true
+            }
+        }
+    });
+    // Kendini durduran gorev burada birakir; `continue_task` geri getirir.
+    if stopped && index == CURRENT.load(Ordering::Relaxed) {
+        yield_now();
+    }
+    stopped
+}
+
+/// Durmus bir gorevi devam ettirir.
+pub fn continue_task(index: usize) -> bool {
+    if index >= MAX_TASKS {
+        return false;
+    }
+    crate::arch::cpu::without_interrupts(|| unsafe {
+        let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+        if (*tasks.add(index)).state != TaskState::Stopped {
+            return false;
+        }
+        (*tasks.add(index)).state = TaskState::Ready;
+        (*tasks.add(index)).stop_signal = 0;
+        (*tasks.add(index)).stop_pending = false;
+        (*tasks.add(index)).cont_pending = true;
+        wake_child_watchers(index);
+        true
+    })
+}
+
+/// `waitpid` ile bu gorevi bekleyenleri uyandirir.
+///
+/// `wake_expired` yalnizca hedefin `Terminated`/`Unused` olmasina
+/// bakiyor; durma ve devam etme de birer durum degisikligi ve bekleyen
+/// ebeveynin onlari gormesi gerekiyor.
+///
+/// # Safety
+/// Kesmeler kapaliyken cagrilmali.
+unsafe fn wake_child_watchers(child: usize) {
+    let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+    let count = TASK_COUNT.load(Ordering::Relaxed);
+    for i in 0..count {
+        let task = &mut *tasks.add(i);
+        if task.state == TaskState::Waiting && task.wait_for == child + 1 {
+            task.state = TaskState::Ready;
+            task.wait_for = 0;
+        }
+    }
+}
+
+/// Sonlanmis bir cocugun yuvasini geri verir (`waitpid` toplama).
+///
+/// `release_slot` ozel; bu, disaridan cagrilabilen yuzu.
+pub fn reap(index: usize) {
+    if index >= MAX_TASKS {
+        return;
+    }
+    crate::arch::cpu::without_interrupts(|| release_slot(index));
+}
+
+pub fn is_stopped(index: usize) -> bool {
+    state_of(index) == TaskState::Stopped
+}
+
+/// Durmus gorevin durma sebebi (`WSTOPSIG`).
+pub fn stop_signal_of(index: usize) -> u32 {
+    if index >= MAX_TASKS {
+        return 0;
+    }
+    unsafe {
+        let tasks = core::ptr::addr_of!(TASKS) as *const Task;
+        (*tasks.add(index)).stop_signal
+    }
+}
+
+/// Bildirilmemis bir durma var mi; varsa bayragi **tuketir**.
+pub fn take_stop_report(index: usize) -> Option<u32> {
+    if index >= MAX_TASKS {
+        return None;
+    }
+    crate::arch::cpu::without_interrupts(|| unsafe {
+        let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+        if !(*tasks.add(index)).stop_pending {
+            return None;
+        }
+        (*tasks.add(index)).stop_pending = false;
+        Some((*tasks.add(index)).stop_signal)
+    })
+}
+
+/// Bildirilmemis bir "devam etti" var mi; varsa bayragi tuketir.
+pub fn take_cont_report(index: usize) -> bool {
+    if index >= MAX_TASKS {
+        return false;
+    }
+    crate::arch::cpu::without_interrupts(|| unsafe {
+        let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+        if !(*tasks.add(index)).cont_pending {
+            return false;
+        }
+        (*tasks.add(index)).cont_pending = false;
+        true
+    })
+}
+
+/// Gorevin surec grubu (pgid).
+pub fn pgid_of(index: usize) -> usize {
+    if index >= MAX_TASKS {
+        return 0;
+    }
+    unsafe {
+        let tasks = core::ptr::addr_of!(TASKS) as *const Task;
+        (*tasks.add(index)).pgid
+    }
+}
+
+/// Gorevi bir surec grubuna alir.
+///
+/// Grup kimligi var olan bir gorevin numarasi olmak zorunda degil:
+/// POSIX'te grup lideri olen bir grup **bos kalmadan** yasamaya devam
+/// eder. Tek denetim aralik.
+pub fn set_pgid(index: usize, pgid: usize) -> bool {
+    if index >= MAX_TASKS || pgid >= MAX_TASKS {
+        return false;
+    }
+    match state_of(index) {
+        TaskState::Unused | TaskState::Terminated => false,
+        _ => {
+            crate::arch::cpu::without_interrupts(|| unsafe {
+                let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+                (*tasks.add(index)).pgid = pgid;
+            });
+            true
+        }
+    }
+}
+
+/// `fork` cocugu ebeveynin surec grubunu devralir.
+pub fn inherit_pgid(child: usize, parent: usize) {
+    let pgid = pgid_of(parent);
+    set_pgid(child, pgid);
+}
+
+/// Bir surec grubundaki canli gorevleri `out`a yazar; sayiyi doner.
+///
+/// Diziyle donmesi bilincli: cagiran (sinyal yayini) gezerken hedefler
+/// durum degistirebilir, o yuzden once anlik bir kopya alinir.
+pub fn group_tasks(pgid: usize, out: &mut [usize; MAX_TASKS]) -> usize {
+    let count = TASK_COUNT.load(Ordering::Relaxed);
+    let mut found = 0usize;
+    for i in 0..count {
+        if i == IDLE_TASK {
+            continue;
+        }
+        match state_of(i) {
+            TaskState::Unused | TaskState::Terminated => continue,
+            _ => {}
+        }
+        if pgid_of(i) == pgid {
+            out[found] = i;
+            found += 1;
+        }
+    }
+    found
 }
 
 fn pick_next(current: usize) -> usize {
@@ -1765,84 +2019,8 @@ pub fn wait_for_task(child: usize) -> Option<(u32, u32)> {
     Some(last)
 }
 
-/// `waitpid(-1)`: cagiranin **herhangi bir** cocugunu bekler.
-///
-/// Once sonlanmis bir cocuk aranir (varsa hemen toplanir); yoksa canli
-/// bir cocuk bulunup onun bitmesi beklenir. Hic cocuk yoksa `None`
-/// doner -- POSIX'te bu `ECHILD`'dir.
-pub fn wait_for_any() -> Option<(usize, u32, u32)> {
-    let current = CURRENT.load(Ordering::Relaxed);
-    let count = TASK_COUNT.load(Ordering::Relaxed);
 
-    // 1. Zaten bitmis bir cocuk var mi?
-    for i in 0..count {
-        if i == current {
-            continue;
-        }
-        unsafe {
-            let tasks = core::ptr::addr_of!(TASKS) as *const Task;
-            if (*tasks.add(i)).parent == current
-                && (*tasks.add(i)).state == TaskState::Terminated
-            {
-                let code = exit_code_of(i);
-                let signal = exit_signal_of(i);
-                crate::arch::cpu::without_interrupts(|| release_slot(i));
-                return Some((i, code, signal));
-            }
-        }
-    }
 
-    // 2. Canli bir cocuk bul ve onu bekle.
-    for i in 0..count {
-        if i == current {
-            continue;
-        }
-        let is_child = unsafe {
-            let tasks = core::ptr::addr_of!(TASKS) as *const Task;
-            (*tasks.add(i)).parent == current
-                && (*tasks.add(i)).state != TaskState::Unused
-        };
-        if is_child {
-            return wait_for_task(i).map(|(code, signal)| (i, code, signal));
-        }
-    }
-
-    None
-}
-
-/// Bitmis bir cocugu bekleMEDEN toplar (`waitpid` + `WNOHANG`).
-pub fn reap_finished_child(parent: usize) -> Option<(usize, u32, u32)> {
-    let count = TASK_COUNT.load(Ordering::Relaxed);
-    for i in 0..count {
-        if i == parent {
-            continue;
-        }
-        let finished = unsafe {
-            let tasks = core::ptr::addr_of!(TASKS) as *const Task;
-            (*tasks.add(i)).parent == parent && (*tasks.add(i)).state == TaskState::Terminated
-        };
-        if finished {
-            let code = exit_code_of(i);
-            let signal = exit_signal_of(i);
-            crate::arch::cpu::without_interrupts(|| release_slot(i));
-            return Some((i, code, signal));
-        }
-    }
-    None
-}
-
-/// Cagiranin toplanmamis cocugu var mi (`waitpid` icin ECHILD ayrimi)?
-pub fn has_children(index: usize) -> bool {
-    let count = TASK_COUNT.load(Ordering::Relaxed);
-    unsafe {
-        let tasks = core::ptr::addr_of!(TASKS) as *const Task;
-        (0..count).any(|i| {
-            i != index
-                && (*tasks.add(i)).parent == index
-                && (*tasks.add(i)).state != TaskState::Unused
-        })
-    }
-}
 
 /// Baska bir gorevin adres uzayini kaydeder.
 ///

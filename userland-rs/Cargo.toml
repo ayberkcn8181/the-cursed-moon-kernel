@@ -57,6 +57,10 @@ name = "death"
 path = "src/bin/death.rs"
 
 [[bin]]
+name = "jobs"
+path = "src/bin/jobs.rs"
+
+[[bin]]
 name = "swapx"
 path = "src/bin/swapx.rs"
 

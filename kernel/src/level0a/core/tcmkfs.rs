@@ -299,10 +299,6 @@ fn capacity_blocks_with_swap(partition_sectors: u32, swap_sectors: u32) -> u32 {
     usable.min(MAX_BLOCKS as u32)
 }
 
-fn capacity_blocks(partition_sectors: u32) -> u32 {
-    capacity_blocks_with_swap(partition_sectors, 0)
-}
-
 // --- Ham sektor G/C ---
 
 fn read_super() -> Result<SuperBlock, FsError> {

@@ -64,6 +64,8 @@ mod i386_numbers {
     pub const SYS_BRK: usize = 45;
     pub const SYS_GETPID: usize = 20;
     pub const SYS_KILL: usize = 37;
+    pub const SYS_SETPGID: usize = 57;
+    pub const SYS_GETPGID: usize = 132;
     pub const SYS_SIGNAL: usize = 48;
     /// i386'da `rt_sigaction`.
     pub const SYS_SIGACTION: usize = 174;
@@ -119,6 +121,8 @@ mod x86_64_numbers {
     pub const SYS_WAITPID: usize = 61;
     pub const SYS_GETPID: usize = 39;
     pub const SYS_KILL: usize = 62;
+    pub const SYS_SETPGID: usize = 109;
+    pub const SYS_GETPGID: usize = 121;
     /// x86_64'te 13 gercekten `rt_sigaction`dir; sadelestirilmis
     /// `signal` yuzu TCMK araligina alindi (kullanilmiyor -- `install`
     /// artik libc gibi `sigaction` uzerine kuruluyor).
@@ -1589,6 +1593,13 @@ pub fn fork() -> isize {
 
 /// `waitpid` secenegi: cocuk bitmemisse bekleme, 0 don.
 pub const WNOHANG: usize = 1;
+/// `waitpid` secenegi: **durmus** cocuklar da bildirilsin.
+///
+/// Olmadan durma gorunmez: `waitpid` yalnizca olumu bekler ve bir kabuk
+/// Ctrl-Z'den sonra sonsuza kadar uyur.
+pub const WUNTRACED: usize = 2;
+/// `waitpid` secenegi: `SIGCONT` ile devam etmis cocuklar bildirilsin.
+pub const WCONTINUED: usize = 8;
 
 /// `waitpid(WAIT_ANY, ...)`: hangi cocuk once biterse onu topla.
 ///
@@ -1630,8 +1641,36 @@ pub fn exited(status: u32) -> bool {
 /// Cokme de buraya girer: cekirdek sayfa hatasini `SIGSEGV`e ceviriyor
 /// (bkz. `exceptions::signal_of_vector`). Yani "cocuk coktu mu" sorusu
 /// POSIX'te ayri bir kavram degil -- sinyalle olumun bir turu.
+///
+/// Denetim uzun sure `status & 0x7F != 0` idi ve is denetimi gelene
+/// kadar dogruydu. **Durmus** bir cocugun durum kelimesinde alt bayt
+/// `0x7F`tir, yani o da "sinyalle oldu" gorunurdu. Gercek POSIX de
+/// tam bu yuzden `0x7F`i disliyor: alt yedi bit ya sifir (normal
+/// cikis), ya gecerli bir sinyal, ya da `0x7F` (durma isareti).
 pub fn signalled(status: u32) -> bool {
-    status & 0x7F != 0
+    let low = status & 0x7F;
+    low != 0 && low != 0x7F
+}
+
+/// `WIFSTOPPED`: cocuk **durduruldu** mu?
+///
+/// Durum kelimesinin dorduncu hali. Alt bayt `0x7F` -- gecerli bir
+/// sinyal numarasi olmadigi icin normal cikis ve sinyalle olumden
+/// ayirt edilebiliyor.
+pub fn stopped(status: u32) -> bool {
+    status & 0xFF == 0x7F
+}
+
+/// `WSTOPSIG`: cocugu durduran sinyal.
+///
+/// Yalnizca `stopped` dogruyken anlamlidir.
+pub fn stop_signal(status: u32) -> u32 {
+    (status >> 8) & 0xFF
+}
+
+/// `WIFCONTINUED`: cocuk `SIGCONT` ile **devam etti** mi?
+pub fn continued(status: u32) -> bool {
+    status == 0xFFFF
 }
 
 /// `WTERMSIG`: cocugu olduren sinyal.

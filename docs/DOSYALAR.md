@@ -285,6 +285,7 @@ gunluge yazarlar ve olcum bunlardan okunur.
 | `mapped.rs` (4 sinav) | Dosya destekli `mmap`: icerik, hizasiz ofset reddi, dosya sonu sifirlamasi. |
 | `death.rs` (6 sinav) | Cocugun **nasil** oldugu: `WIFEXITED`/`WIFSIGNALED`/`WTERMSIG`, cokmenin `SIGSEGV`e ve sifira bolmenin `SIGFPE`ye eslenmesi, `exit(9)` ile `SIGKILL(9)`un ayirt edilmesi. |
 | `intr.rs` (6 sinav) | `EINTR` ve `SA_RESTART`: bekleyen okuma/yazmanin sinyalle bolunmesi, bolunen cagrinin veriyi tuketmemesi, cerceve geri sarilarak yeniden baslatma, ve yok sayilan sinyalin **bolmemesi**. |
+| `jobs.rs` (6 sinav) | Is denetimi: `SIGSTOP` durduruyor mu (boru uzerinden olculen ilerlemeyle), `waitpid` `WUNTRACED` ile bildiriyor mu, `SIGCONT` kaldiriyor mu, `SIGSTOP` yakalanamiyor mu, `kill(-pgid)` gruptaki iki cocugu da etkiliyor mu, ve durmus cocuk `WIFSIGNALED` gorunmuyor mu. |
 | `swapx.rs` (6 sinav) | Takas: sayfa diske gidiyor mu, icerik bozulmadan geri geliyor mu, yuva geri veriliyor mu, ve `fork` diskteki sayfayi gorebiliyor mu. Disk yoksa hepsi **atlandi**. |
 | `heap.rs` (5 sinav) | Cekirdek heap'i: pencere tamponu ve surec cekirdek yigini geri veriliyor mu, bloklar birlesiyor mu, ve turlardan sonra 512 KiB'lik tek parca hala ayrilabiliyor mu. |
 | `bigfile.rs` (6 sinav) | TCMKFS tavanlari: dolayli blokla 200 KiB yazma, sinirin iki yaninin dogrulugu, dolayli blogun geri verilmesi (blok sizintisi), 80 dosya, ve tavanin hala durmasi. Disk yoksa hepsi **atlandi**. |

@@ -73,6 +73,36 @@ pub const SIGPIPE: u32 = 13;
 pub const SIGALRM: u32 = 14;
 pub const SIGTERM: u32 = 15;
 
+// --- Is denetimi (job control) sinyalleri ---
+//
+// Numaralar Linux'un i386 ve x86_64'teki degerleriyle ayni; ikisinde de
+// farklilasmiyorlar (farklilasan seyler `SIGCHLD` oncesi eski
+// numaralandirmadan kalma).
+
+/// Durmus bir sureci **devam ettirir**.
+///
+/// Iki ozelligi var ve ikisi de diger sinyallerden ayri:
+///
+/// * Durmus bir surec sinyal **teslim alamaz** (kosmuyor), o yuzden
+///   `SIGCONT` kuyruga girmeden once hedefi kaldirir.
+/// * Varsayilani "oldur" degil "devam et", yani yakalanmadiginda da
+///   zararsiz.
+pub const SIGCONT: u32 = 18;
+
+/// Sureci **durdurur** ve yakalanamaz.
+///
+/// `SIGKILL` ile ayni ayricalikta: isleyici kurulamaz, yok sayilamaz,
+/// maskelenemez. Gerekce de ayni -- bir sureci durdurabilmek isletim
+/// sisteminin son sozu olmali. Yakalanabilseydi kacan bir surec
+/// durdurulamazdi.
+pub const SIGSTOP: u32 = 19;
+
+/// Terminalden gelen durdurma istegi (Ctrl-Z).
+///
+/// `SIGSTOP`tan farki tek cumlede: **yakalanabilir**. Bir duzenleyici
+/// Ctrl-Z'yi yakalayip once dosyasini kaydedebilsin diye.
+pub const SIGTSTP: u32 = 20;
+
 /// Desteklenen en buyuk sinyal numarasi (1..=31, gercek-zamanli sinyaller
 /// yok).
 pub const MAX_SIGNAL: u32 = 31;
@@ -215,8 +245,12 @@ pub const SIG_UNBLOCK: usize = 1;
 pub const SIG_SETMASK: usize = 2;
 
 /// Engellenemeyen sinyaller. POSIX `SIGKILL` ve `SIGSTOP`'u maskeye
-/// almaz; alsaydi bir surec kendini oldurulemez yapabilirdi.
-const UNBLOCKABLE: u32 = 1 << SIGKILL;
+/// almaz; alsaydi bir surec kendini oldurulemez ya da
+/// durdurulamaz yapabilirdi.
+///
+/// Yorum uzun sure `SIGSTOP`tan soz ediyordu ama maskede yalnizca
+/// `SIGKILL` vardi -- cunku `SIGSTOP` henuz yoktu. Artik ikisi de var.
+const UNBLOCKABLE: u32 = (1 << SIGKILL) | (1 << SIGSTOP);
 
 /// PIT tik'i basina saniye (100 Hz).
 const TICKS_PER_SECOND: u32 = 100;
@@ -237,11 +271,36 @@ fn valid(signo: u32) -> bool {
 
 /// Sinyalin varsayilan davranisi surec sonlandirmak mi?
 ///
-/// TCMK'de yok sayilan (ignore) varsayilani olan bir sinyal yok --
-/// `SIGCHLD`/`SIGURG` gibi sinyaller uygulanmadi. Yani varsayilan her
-/// zaman "oldur"dur.
-fn default_terminates(_signo: u32) -> bool {
-    true
+/// Isleyici kurulmamis bir sinyalin varsayilan davranisi.
+///
+/// Uzun sure bu tek bir satirdi -- "varsayilan her zaman oldur" -- ve o
+/// zaman icin dogruydu: yok sayilan ya da durduran hicbir sinyal
+/// yoktu. Is denetimi geldiginde varsayim cokuyor, cunku `SIGSTOP`
+/// oldurmuyor ve `SIGCONT` hicbir sey yapmiyor.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum DefaultAction {
+    /// Sureci sonlandirir (POSIX'te cogu sinyalin varsayilani).
+    Terminate,
+    /// Sureci durdurur.
+    Stop,
+    /// Durmussa devam ettirir; degilse hicbir sey yapmaz.
+    Continue,
+}
+
+pub fn default_action(signo: u32) -> DefaultAction {
+    match signo {
+        SIGSTOP | SIGTSTP => DefaultAction::Stop,
+        SIGCONT => DefaultAction::Continue,
+        _ => DefaultAction::Terminate,
+    }
+}
+
+/// Bu sinyal yakalanabilir/maskelenebilir mi?
+///
+/// Ikisi de "isletim sisteminin son sozu": biri sureci oldurur, oteki
+/// durdurur, ve ikisi de surecin isbirligini beklemez.
+pub fn uncatchable(signo: u32) -> bool {
+    signo == SIGKILL || signo == SIGSTOP
 }
 
 /// Bir goreve sinyal gonderir.
@@ -278,6 +337,22 @@ pub fn raise(target: usize, signo: u32) -> Result<(), SignalError> {
             .map_err(|_| SignalError::NoSuchTask);
     }
 
+    if signo == SIGSTOP {
+        // `SIGKILL` gibi yakalanamaz ve kuyruga girmez: hedef **hemen**
+        // durur. Kuyruga girseydi hic kosmayan bir gorev (ornegin uzun
+        // bir `waitpid` icinde) onu teslim alamaz ve asla durmazdi --
+        // oysa durdurmak tam da kosmayan bir sureci hedef alabilmeli.
+        scheduler::stop_task(target, SIGSTOP);
+        return Ok(());
+    }
+
+    if signo == SIGCONT {
+        // Durmus bir surec sinyal teslim alamaz, cunku kosmuyor.
+        // O yuzden once kaldirilir; kuyruga girmesi yine de sart,
+        // isleyici kurulmussa calismali.
+        scheduler::continue_task(target);
+    }
+
     PENDING[target].fetch_or(1 << signo, Ordering::SeqCst);
 
     // `pause`/`sigsuspend` ile uyuyan bir gorev varsa kaldirilir. Tek
@@ -286,6 +361,36 @@ pub fn raise(target: usize, signo: u32) -> Result<(), SignalError> {
     // sahte uyanma dongude ele aliniyor.
     scheduler::wake_signal_waiter(target);
     Ok(())
+}
+
+/// Bir **surec grubuna** sinyal gonderir; ulasilan gorev sayisini doner.
+///
+/// POSIX'te `kill(-pgid, sig)` budur ve kabugun Ctrl-C'si tam olarak
+/// bunu yapar: bir boru hatti uc ayri surectir, ama tek bir istir.
+///
+/// Hedefler once bir kopyaya aliniyor: yayin sirasinda sinyal bir
+/// gorevi oldurebilir ya da durdurabilir, yani tablo gezilirken
+/// degisir. Kopya olmasaydi ayni sinyal bazi uyelere hic gitmeyebilirdi.
+pub fn raise_group(pgid: usize, signo: u32) -> Result<usize, SignalError> {
+    if !valid(signo) {
+        return Err(SignalError::InvalidSignal);
+    }
+    let mut targets = [0usize; scheduler::MAX_TASKS];
+    let found = scheduler::group_tasks(pgid, &mut targets);
+    if found == 0 {
+        return Err(SignalError::NoSuchTask);
+    }
+    let mut sent = 0usize;
+    for &target in targets.iter().take(found) {
+        if raise(target, signo).is_ok() {
+            sent += 1;
+        }
+    }
+    if sent == 0 {
+        Err(SignalError::NoSuchTask)
+    } else {
+        Ok(sent)
+    }
 }
 
 /// Bir sinyal icin isleyici kaydeder; onceki isleyiciyi doner.
@@ -304,7 +409,11 @@ pub fn set_handler(
     if !valid(signo) {
         return Err(SignalError::InvalidSignal);
     }
-    if signo == SIGKILL {
+    // `SIGKILL` ve `SIGSTOP` yakalanamaz. Ikisinin de gerekcesi ayni:
+    // biri sureci oldurur, oteki durdurur, ve ikisi de surecin
+    // isbirligini beklemez. Yakalanabilselerdi kacan bir surec ne
+    // oldurulebilir ne durdurulabilirdi.
+    if uncatchable(signo) {
         return Err(SignalError::Uncatchable);
     }
     if task >= scheduler::MAX_TASKS {
@@ -699,6 +808,9 @@ pub fn name_of(signo: u32) -> &'static str {
         SIGPIPE => "SIGPIPE",
         SIGALRM => "SIGALRM",
         SIGTERM => "SIGTERM",
+        SIGCONT => "SIGCONT",
+        SIGSTOP => "SIGSTOP",
+        SIGTSTP => "SIGTSTP",
         _ => "SIG?",
     }
 }
@@ -762,8 +874,8 @@ pub unsafe fn deliver_pending(frame: &mut SyscallFrame, from_interrupt: bool) {
 
         match d.handler {
             SIG_IGN => continue,
-            SIG_DFL => {
-                if default_terminates(signo) {
+            SIG_DFL => match default_action(signo) {
+                DefaultAction::Terminate => {
                     crate::println!(
                         "[LEVEL-0b1] sinyal: gorev #{} {} ile sonlandiriliyor (varsayilan davranis).",
                         task,
@@ -775,10 +887,27 @@ pub unsafe fn deliver_pending(frame: &mut SyscallFrame, from_interrupt: bool) {
                     // ayri tutmak zorunda, yoksa `WIFSIGNALED` soran bir
                     // program yanilir.
                     scheduler::set_current_exit_signal(signo);
+                    // Donmez.
                     crate::level0a::kernel_api::exit_current_task(0);
                 }
-                continue;
-            }
+                DefaultAction::Stop => {
+                    // `SIGTSTP` yakalanmadi: varsayilan durdurmak.
+                    // `stop_task` calisan gorev icin donmez-gibi
+                    // davranir -- `SIGCONT` gelene kadar burada beklenir.
+                    crate::println!(
+                        "[LEVEL-0b1] sinyal: gorev #{} {} ile durduruldu.",
+                        task,
+                        name_of(signo)
+                    );
+                    DELIVERED.fetch_add(1, Ordering::Relaxed);
+                    scheduler::stop_task(task, signo);
+                    continue;
+                }
+                // `SIGCONT` hedefi zaten `raise` aninda kaldirdi;
+                // burada yapacak is yok. Yine de kuyruga girmesi
+                // gerekiyordu: isleyici kurulmussa o calismali.
+                DefaultAction::Continue => continue,
+            },
             handler => {
                 let depth = DEPTH[task].load(Ordering::SeqCst);
                 let mut context = frame.user_context_via(from_interrupt);

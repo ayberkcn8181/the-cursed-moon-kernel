@@ -140,6 +140,9 @@ mod i386_numbers {
     pub const SYS_BRK: u32 = 45;
     pub const SYS_GETPID: u32 = 20;
     pub const SYS_KILL: u32 = 37;
+    /// Surec grubunu degistirir / okur -- numaralar mimariye gore ayri.
+    pub const SYS_SETPGID: u32 = 57;
+    pub const SYS_GETPGID: u32 = 132;
     /// i386 Linux'ta klasik `signal(2)`. TCMK ucuncu bir arguman ister
     /// (tramplen); gercek Linux'ta o deger `sigaction.sa_restorer`
     /// alanindan gelir -- yani fikir ayni, tasima yolu farkli.
@@ -213,6 +216,8 @@ mod x86_64_numbers {
     pub const SYS_WAITPID: u32 = 61;
     pub const SYS_GETPID: u32 = 39;
     pub const SYS_KILL: u32 = 62;
+    pub const SYS_SETPGID: u32 = 109;
+    pub const SYS_GETPGID: u32 = 121;
     /// x86_64'te 13 **gercekten** `rt_sigaction`dir. Sadelestirilmis
     /// `signal` yuzu icin ayri bir numara ayrildi: kullanici tarafi
     /// zaten libc gibi `signal`i `sigaction` uzerine kuruyor.
@@ -278,56 +283,165 @@ const PRIO_PROCESS: usize = 0;
 /// `waitpid` secenegi: cocuk bitmemisse bloke olma, 0 don.
 const WNOHANG: usize = 1;
 
-/// `waitpid(-1, ...)`: herhangi bir cocuk. Arguman isaretsiz geldigi icin
-/// -1, tum bitleri bir olan degerdir.
-const WAIT_ANY: usize = usize::MAX;
+
+/// `waitpid` secenegi: **durmus** cocuklar da bildirilsin.
+///
+/// Olmadan durma gorunmez: bir kabuk cocugunu Ctrl-Z ile durdurur ve
+/// `waitpid` beklemeye devam eder. Is denetiminin calismasi icin sart.
+const WUNTRACED: usize = 2;
+/// `waitpid` secenegi: `SIGCONT` ile **devam etmis** cocuklar bildirilsin.
+const WCONTINUED: usize = 8;
+
+/// `waitpid`in hedef secimi.
+///
+/// POSIX uc bicimi tek bir argumana sigdirmis ve isaret bitini ayirici
+/// olarak kullaniyor -- bu yuzden `pid` isaretli okunmak zorunda:
+///
+/// ```text
+///   pid  > 0   belirli bir cocuk
+///   pid == -1  herhangi bir cocuk
+///   pid == 0   cagiranin KENDI surec grubu
+///   pid  < -1  -pid numarali surec grubu
+/// ```
+#[derive(Clone, Copy)]
+enum WaitTarget {
+    Any,
+    Pid(usize),
+    Group(usize),
+}
+
+fn wait_target(arg: usize, me: usize) -> WaitTarget {
+    let signed = arg as isize;
+    if signed == -1 {
+        WaitTarget::Any
+    } else if signed == 0 {
+        WaitTarget::Group(crate::level0a::core::scheduler::pgid_of(me))
+    } else if signed < -1 {
+        WaitTarget::Group((-signed) as usize)
+    } else {
+        WaitTarget::Pid(arg)
+    }
+}
+
+/// Bu cocuk secilen hedefe uyuyor mu.
+fn wait_matches(parent: usize, child: usize, target: WaitTarget) -> bool {
+    use crate::level0a::core::scheduler as sched;
+    if child == parent || child >= sched::task_count() {
+        return false;
+    }
+    if sched::state_of(child) == sched::TaskState::Unused {
+        return false;
+    }
+    if sched::parent_of(child) != parent {
+        return false;
+    }
+    match target {
+        WaitTarget::Any => true,
+        WaitTarget::Pid(pid) => child == pid,
+        WaitTarget::Group(pgid) => sched::pgid_of(child) == pgid,
+    }
+}
+
+/// Hedefe uyan canli bir cocuk var mi.
+fn has_matching_child(parent: usize, target: WaitTarget) -> bool {
+    use crate::level0a::core::scheduler as sched;
+    (0..sched::task_count()).any(|i| wait_matches(parent, i, target))
+}
+
+/// Bildirilecek bir cocuk olayi arar.
+///
+/// Sira POSIX'in sirasi: once **bitmis** cocuklar (yuva geri verilecegi
+/// icin en aceleci olan bu), sonra durmus, sonra devam etmis olanlar.
+/// Durma ve devam etme birer **bayrak** ve okunurken tuketiliyorlar --
+/// aksi halde ayni durma sonsuza kadar bildirilir ve `WUNTRACED` ile
+/// bekleyen bir kabuk donguye girerdi.
+fn scan_child_event(parent: usize, target: WaitTarget, options: usize) -> Option<(usize, u32)> {
+    use crate::level0a::core::scheduler as sched;
+    let count = sched::task_count();
+
+    for i in 0..count {
+        if !wait_matches(parent, i, target) {
+            continue;
+        }
+        if sched::state_of(i) == sched::TaskState::Terminated {
+            let code = sched::exit_code_of(i);
+            let signal = sched::exit_signal_of(i);
+            sched::reap(i);
+            let status = if signal != 0 {
+                signal & 0x7F
+            } else {
+                (code & 0xFF) << 8
+            };
+            return Some((i, status));
+        }
+    }
+
+    if options & WUNTRACED != 0 {
+        for i in 0..count {
+            if !wait_matches(parent, i, target) {
+                continue;
+            }
+            if let Some(signo) = sched::take_stop_report(i) {
+                return Some((i, stopped_status(signo)));
+            }
+        }
+    }
+
+    if options & WCONTINUED != 0 {
+        for i in 0..count {
+            if !wait_matches(parent, i, target) {
+                continue;
+            }
+            if sched::take_cont_report(i) {
+                return Some((i, CONTINUED_STATUS));
+            }
+        }
+    }
+
+    None
+}
 
 /// Negatif errno'yu cerceveye yazar (isaretli genisletme ile).
 fn return_errno(frame: &mut SyscallFrame, errno: i32) {
     frame.set_return(errno as isize as usize);
 }
 
-/// `waitpid`'in durum kelimesini kullaniciya yazar.
-///
-/// Linux kodlamasi: normal cikista `status = (kod & 0xFF) << 8`, boylece
-/// `WEXITSTATUS(status)` = `(status >> 8) & 0xFF` calisir. Isaretci NULL
-/// olabilir (POSIX'te de oyle); o zaman yazilmaz ve cagri basarilidir.
-fn store_status(ptr: usize, code: u32) -> bool {
-    store_status_of(ptr, code, 0)
-}
 
-/// `waitpid`in durum kelimesini POSIX'in kodlamasiyla yazar.
-///
-/// Durum ham bir sayi degil, **paketlenmis** bir kelimedir ve iki ayri
-/// soruyu ayni yerde cevaplar:
-///
-/// ```text
-///   normal cikis  -> (kod & 0xFF) << 8      WIFEXITED,  WEXITSTATUS
-///   sinyalle olum ->  signo & 0x7F          WIFSIGNALED, WTERMSIG
-/// ```
-///
-/// Ayrimi yapmak sart. Uzun sure yapilmiyordu: sinyalle olen bir surec
-/// icin `128 + signo` cikis koduna yaziliyordu. O sayi **kabuklarin**
-/// gosterim gelenegi, cekirdegin kodlamasi degil -- ve `WIFSIGNALED`
-/// soran bir program "normal cikti, kodu 141" cevabini alirdi.
-///
-/// Cekirdek artik ikisini ayri tutuyor (bkz. `Task.exit_signal`) ve
-/// paketleme burada yapiliyor.
-fn store_status_of(ptr: usize, code: u32, signo: u32) -> bool {
+
+/// Hazir paketlenmis bir durum kelimesini yazar.
+fn write_status(ptr: usize, status: u32) -> bool {
     if ptr == 0 {
         return true;
     }
     if !mmu::is_user_accessible(ptr) || !mmu::is_user_accessible(ptr + 3) {
         return false;
     }
-    let status = if signo != 0 {
-        signo & 0x7F
-    } else {
-        (code & 0xFF) << 8
-    };
     unsafe { (ptr as *mut u32).write_unaligned(status) };
     true
 }
+
+/// Durmus bir cocugun durum kelimesi.
+///
+/// Kodlama, olum ve cikisin yanina **ucuncu** bir hal ekliyor ve yine
+/// ayni kelimeye sigiyor:
+///
+/// ```text
+///   normal cikis  -> (kod & 0xFF) << 8      WIFEXITED
+///   sinyalle olum ->  signo & 0x7F          WIFSIGNALED
+///   durduruldu    -> (signo << 8) | 0x7F    WIFSTOPPED
+///   devam etti    ->  0xFFFF                WIFCONTINUED
+/// ```
+///
+/// `0x7F` alt bayti "olumle gitmedi, durdu" demenin yolu: sinyalle
+/// olumde orasi sinyal numarasidir ve 0x7F gecerli bir sinyal degil.
+/// Ayni kelimenin dort hali de birbirinden ayirt edilebiliyor --
+/// tasarim 1970'lerden kalma ve hala calisiyor.
+fn stopped_status(signo: u32) -> u32 {
+    ((signo & 0xFF) << 8) | 0x7F
+}
+
+/// Devam etmis bir cocugun durum kelimesi (`WIFCONTINUED`).
+const CONTINUED_STATUS: u32 = 0xFFFF;
 
 /// Kullanici alanindan gelen yol adinin en fazla uzunlugu.
 const PATH_MAX: usize = 128;
@@ -724,77 +838,54 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
         SYS_WAITPID => {
             // waitpid(pid, *status, options)
             //
-            // TCMK'de "pid" gorev indeksidir. Beklerken gorev `Waiting`
-            // durumundadir ve zamanlayici tarafindan atlanir -- yani
-            // bekleyen bir surec CPU harcamaz.
-            let child = arg1;
+            // TCMK'de "pid" gorev indeksidir. Hedef secimi POSIX'in
+            // isaretli kodlamasini taniyor (bkz. `WaitTarget`): belirli
+            // bir cocuk, herhangi biri, ya da bir **surec grubu**.
+            let me = crate::level0a::core::scheduler::current_id();
+            let target = wait_target(arg1, me);
             let status_ptr = arg2;
-            let nohang = arg3 & WNOHANG != 0;
+            let options = arg3;
+            let nohang = options & WNOHANG != 0;
 
-            // pid = -1: "herhangi bir cocuk". POSIX'in en cok kullanilan
-            // bicimi budur; bir kabuk cocuklarinin hangisinin once
-            // bitecegini bilmez.
-            if child == WAIT_ANY {
-                let me = crate::level0a::core::scheduler::current_id();
-                if !crate::level0a::core::scheduler::has_children(me) {
-                    return_errno(frame, -ECHILD);
-                    return;
-                }
-                if nohang {
-                    // Bitmis cocuk varsa topla, yoksa 0.
-                    match crate::level0a::core::scheduler::reap_finished_child(me) {
-                        Some((pid, code, signal)) => {
-                            if !store_status_of(status_ptr, code, signal) {
-                                return_errno(frame, -EFAULT);
-                            } else {
-                                frame.set_return(pid);
-                            }
-                        }
-                        None => frame.set_return(0),
-                    }
-                    return;
-                }
-                match crate::level0a::core::scheduler::wait_for_any() {
-                    Some((pid, code, signal)) => {
-                        if !store_status_of(status_ptr, code, signal) {
-                            return_errno(frame, -EFAULT);
-                        } else {
-                            frame.set_return(pid);
-                        }
-                    }
-                    None => return_errno(frame, -ECHILD),
-                }
+            if !has_matching_child(me, target) {
+                return_errno(frame, -ECHILD);
                 return;
             }
 
-            if child >= crate::level0a::core::scheduler::task_count() {
-                -ECHILD
-            } else if nohang {
-                // Bitmediyse hemen 0 don (POSIX WNOHANG davranisi).
-                if crate::level0a::core::scheduler::state_of(child)
-                    != crate::level0a::core::scheduler::TaskState::Terminated
-                {
-                    0
-                } else {
-                    let code = crate::level0a::core::scheduler::exit_code_of(child);
-                    let signal = crate::level0a::core::scheduler::exit_signal_of(child);
-                    if !store_status_of(status_ptr, code, signal) {
-                        -EFAULT
+            // Dongu, bildirilecek bir olay bulana kadar doner.
+            //
+            // Bloke etme biciminde bir sadelik var ve bilerek: uyanma
+            // **yoklamali**. Cekirdegin uyandirmasi tek hedefli
+            // (`wait_for` tek bir cocugu gosteriyor), oysa burada hedef
+            // bir grup ya da "herhangi biri" olabiliyor. Bir tiklik
+            // uykuyla yoklamak, cok hedefli bir bekleme kuyrugu kurmaya
+            // gore cok daha az yanlis yapilabilir bir sey -- ve 10 ms
+            // `waitpid` icin gorunmez.
+            loop {
+                if let Some((pid, status)) = scan_child_event(me, target, options) {
+                    if !write_status(status_ptr, status) {
+                        return_errno(frame, -EFAULT);
                     } else {
-                        child as i32
+                        frame.set_return(pid);
                     }
+                    return;
                 }
-            } else {
-                match crate::level0a::core::scheduler::wait_for_task(child) {
-                    Some((code, signal)) => {
-                        if !store_status_of(status_ptr, code, signal) {
-                            -EFAULT
-                        } else {
-                            child as i32
-                        }
-                    }
-                    None => -ECHILD,
+                if nohang {
+                    frame.set_return(0);
+                    return;
                 }
+                if !has_matching_child(me, target) {
+                    // Son cocuk da gitti ve olayini zaten bildirdik.
+                    return_errno(frame, -ECHILD);
+                    return;
+                }
+                if !crate::level0a::core::scheduler::current_can_block() {
+                    // Uyutulamayan baglam (masaustu/kabuk gorevi):
+                    // beklemek butun ekrani dondururdu.
+                    frame.set_return(0);
+                    return;
+                }
+                crate::level0a::core::scheduler::sleep_ticks(1);
             }
         }
 
@@ -2121,14 +2212,68 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
         }
 
         SYS_KILL => {
-            // arg1 = hedef gorev, arg2 = sinyal.
+            // arg1 = hedef, arg2 = sinyal.
             //
             // POSIX'te `kill` "oldur" demek degildir; "sinyal gonder"
             // demektir. Oldurme, sinyalin **varsayilan** davranisidir.
-            match signal::raise(arg1, arg2 as u32) {
-                Ok(()) => 0,
-                Err(signal::SignalError::NoSuchTask) => -ESRCH,
-                Err(_) => -EINVAL,
+            //
+            // Hedef isaretli okunuyor, cunku isaret biti bicimi
+            // belirliyor -- `waitpid` ile ayni kalip:
+            //
+            //   pid  > 0   tek bir surec
+            //   pid == 0   cagiranin KENDI surec grubu
+            //   pid  < 0   -pid numarali surec grubu
+            //
+            // Kabugun Ctrl-C'si ucuncusudur: bir boru hatti uc ayri
+            // surectir ama tek bir istir, ve hepsi birden durmalidir.
+            let signed = arg1 as isize;
+            let signo = arg2 as u32;
+            if signed > 0 {
+                match signal::raise(arg1, signo) {
+                    Ok(()) => 0,
+                    Err(signal::SignalError::NoSuchTask) => -ESRCH,
+                    Err(_) => -EINVAL,
+                }
+            } else {
+                let pgid = if signed == 0 {
+                    crate::level0a::core::scheduler::pgid_of(
+                        crate::level0a::core::scheduler::current_id(),
+                    )
+                } else {
+                    (-signed) as usize
+                };
+                match signal::raise_group(pgid, signo) {
+                    Ok(_) => 0,
+                    Err(signal::SignalError::NoSuchTask) => -ESRCH,
+                    Err(_) => -EINVAL,
+                }
+            }
+        }
+
+        // setpgid(pid, pgid) -- surec grubunu degistirir.
+        //
+        // Ikisi de sifir olabiliyor ve anlamlari ayri: `pid = 0`
+        // "kendim", `pgid = 0` "kendi numaramla yeni bir grup kur".
+        // Kabuk her yeni is icin tam olarak bunu yapar.
+        SYS_SETPGID => {
+            let me = crate::level0a::core::scheduler::current_id();
+            let pid = if arg1 == 0 { me } else { arg1 };
+            let pgid = if arg2 == 0 { pid } else { arg2 };
+            if crate::level0a::core::scheduler::set_pgid(pid, pgid) {
+                0
+            } else {
+                -ESRCH
+            }
+        }
+
+        SYS_GETPGID => {
+            let me = crate::level0a::core::scheduler::current_id();
+            let pid = if arg1 == 0 { me } else { arg1 };
+            if pid >= crate::level0a::core::scheduler::task_count() {
+                -ESRCH
+            } else {
+                frame.set_return(crate::level0a::core::scheduler::pgid_of(pid));
+                return;
             }
         }
 

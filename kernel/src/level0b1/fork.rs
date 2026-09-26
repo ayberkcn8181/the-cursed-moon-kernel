@@ -109,6 +109,10 @@ pub unsafe fn fork(frame: &SyscallFrame, from_interrupt: bool) -> Result<usize, 
     // Is-parcacigi tabanlari da: adres uzayi kopyalandigi icin ayni
     // sanal adres cocukta da gecerli.
     crate::level0a::core::tls::clone_into(child, parent);
+    // Surec grubu **devralinir**. POSIX kurali budur ve bir kabugun
+    // boru hattini tek is olarak yonetebilmesinin temeli: `a | b | c`
+    // uc `fork` demek, ama uc cocuk da ayni gruba dogar.
+    scheduler::inherit_pgid(child, parent);
 
     scheduler::set_address_space(child, child_space);
 

@@ -145,6 +145,7 @@ static KNOWN_APPS: &[(&str, &str, &str)] = &[
     ("bigfile", "/bin/bigfile", "bigfile"),
     ("heap", "/bin/heap", "heap"),
     ("swapx", "/bin/swapx", "swapx"),
+    ("jobs", "/bin/jobs", "jobs"),
     // Windows ikilisi: yol .exe ile biter, cekirdek bicimi magic'ten
     // anlar (bkz. vfs::format) ve PE yukleyicisine yonlendirir. Yol iki
     // mimaride de aynidir; VFS'te duran ikilinin PE32 mi PE32+ mi oldugu

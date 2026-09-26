@@ -156,6 +156,9 @@ static HEAP_ELF: &[u8] = include_bytes!("../../userland/heap.elf");
 /// Takas: sayfa diske gidiyor ve geri geliyor mu.
 #[cfg(target_arch = "x86")]
 static SWAPX_ELF: &[u8] = include_bytes!("../../userland/swapx.elf");
+/// Is denetimi: durdurma, devam ettirme, surec gruplari.
+#[cfg(target_arch = "x86")]
+static JOBS_ELF: &[u8] = include_bytes!("../../userland/jobs.elf");
 /// FindFirstFileA gosterimi -- ayni dizinler, Win32 yuzu.
 #[cfg(target_arch = "x86")]
 static WINFILES_EXE: &[u8] = include_bytes!("../../userland/winfiles.exe");
@@ -266,6 +269,8 @@ static BIGFILE64: &[u8] = include_bytes!("../../userland/bigfile.elf64");
 static HEAP64: &[u8] = include_bytes!("../../userland/heap.elf64");
 #[cfg(target_arch = "x86_64")]
 static SWAPX64: &[u8] = include_bytes!("../../userland/swapx.elf64");
+#[cfg(target_arch = "x86_64")]
+static JOBS64: &[u8] = include_bytes!("../../userland/jobs.elf64");
 
 /// **Windows (PE32+) uygulamalari** -- i386'dakilerle ayni kaynak, ayni
 /// ithal kutuphaneleri; degisen yalnizca hedef. Taban 0x140000000
@@ -341,6 +346,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/bigfile", BIGFILE_ELF),
     ("/bin/heap", HEAP_ELF),
     ("/bin/swapx", SWAPX_ELF),
+    ("/bin/jobs", JOBS_ELF),
     ("/bin/winclock.exe", WINCLOCK_EXE),
     ("/bin/winpad.exe", WINPAD_EXE),
     ("/bin/winfiles.exe", WINFILES_EXE),
@@ -394,6 +400,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/bigfile", BIGFILE64),
     ("/bin/heap", HEAP64),
     ("/bin/swapx", SWAPX64),
+    ("/bin/jobs", JOBS64),
     ("/bin/winclock.exe", WINCLOCK_EXE64),
     ("/bin/winpad.exe", WINPAD_EXE64),
     ("/bin/winfiles.exe", WINFILES_EXE64),

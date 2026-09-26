@@ -50,6 +50,19 @@ pub const SIGPIPE: u32 = 13;
 pub const SIGALRM: u32 = 14;
 pub const SIGTERM: u32 = 15;
 
+// --- Is denetimi ---
+
+/// Durmus bir sureci devam ettirir.
+///
+/// Iki ozelligi diger sinyallerden ayri: durmus bir surec teslim
+/// alamadigi icin cekirdek onu **once kaldiriyor**, ve varsayilani
+/// "oldur" degil "devam et".
+pub const SIGCONT: u32 = 18;
+/// Sureci durdurur -- `SIGKILL` gibi yakalanamaz ve maskelenemez.
+pub const SIGSTOP: u32 = 19;
+/// Terminalden gelen durdurma istegi (Ctrl-Z) -- **yakalanabilir**.
+pub const SIGTSTP: u32 = 20;
+
 /// Varsayilan davranis (TCMK'de: sureci sonlandir).
 pub const SIG_DFL: usize = 0;
 /// Sinyali yok say.
@@ -216,6 +229,29 @@ pub fn default(signo: u32) -> isize {
 /// gonder" demektir; oldurme, sinyalin varsayilan davranisidir.
 pub fn kill(pid: usize, signo: u32) -> isize {
     unsafe { sys::syscall2(sys::SYS_KILL, pid, signo as usize) as isize }
+}
+
+/// Bir **surec grubuna** sinyal gonderir (POSIX `kill(-pgid, sig)`).
+///
+/// Kabugun Ctrl-C'si budur: bir boru hatti uc ayri surectir ama tek bir
+/// istir, ve hepsi birden bitmelidir.
+pub fn kill_group(pgid: usize, signo: u32) -> isize {
+    // Cekirdek isaret bitine bakiyor; negatif deger grup demek.
+    let target = -(pgid as isize);
+    unsafe { sys::syscall2(sys::SYS_KILL, target as usize, signo as usize) as isize }
+}
+
+/// Surecin grubunu degistirir (POSIX `setpgid`).
+///
+/// Ikisi de sifir olabiliyor ve anlamlari ayri: `pid = 0` "kendim",
+/// `pgid = 0` "kendi numaramla yeni bir grup kur".
+pub fn setpgid(pid: usize, pgid: usize) -> isize {
+    unsafe { sys::syscall2(sys::SYS_SETPGID, pid, pgid) as isize }
+}
+
+/// Surecin grubunu okur (POSIX `getpgid`); `pid = 0` "kendim".
+pub fn getpgid(pid: usize) -> isize {
+    unsafe { sys::syscall1(sys::SYS_GETPGID, pid) as isize }
 }
 
 /// Calisan surecin kimligi.
