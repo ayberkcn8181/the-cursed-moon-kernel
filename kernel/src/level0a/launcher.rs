@@ -143,6 +143,7 @@ static KNOWN_APPS: &[(&str, &str, &str)] = &[
     ("death", "/bin/death", "death"),
     ("stdin", "/bin/stdin", "stdin"),
     ("bigfile", "/bin/bigfile", "bigfile"),
+    ("heap", "/bin/heap", "heap"),
     // Windows ikilisi: yol .exe ile biter, cekirdek bicimi magic'ten
     // anlar (bkz. vfs::format) ve PE yukleyicisine yonlendirir. Yol iki
     // mimaride de aynidir; VFS'te duran ikilinin PE32 mi PE32+ mi oldugu

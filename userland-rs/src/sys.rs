@@ -1431,6 +1431,12 @@ pub mod kstat {
     pub const FS_BLOCK_SIZE: usize = 8;
     /// Azami dosya boyu (bayt).
     pub const FS_MAX_FILE: usize = 9;
+    /// Cekirdek heap'inde kullanilan bayt.
+    pub const HEAP_USED: usize = 10;
+    /// Tek parca halindeki en buyuk bos blok (bayt).
+    pub const HEAP_LARGEST: usize = 11;
+    /// Heap'teki blok sayisi (dolu + bos).
+    pub const HEAP_BLOCKS: usize = 12;
 }
 
 /// Bir cekirdek sayacini okur.
@@ -1487,6 +1493,27 @@ pub fn fs_block_size() -> usize {
 /// Azami dosya boyu (bayt) -- tavanin sinanabilmesi icin.
 pub fn fs_max_file_size() -> usize {
     kstat(kstat::FS_MAX_FILE)
+}
+
+/// Cekirdek heap'inde kullanilan bayt.
+///
+/// Bir islemden once ve sonra okunup karsilastirilir: fark sifir
+/// degilse o islem heap sizdirmistir.
+pub fn heap_used() -> usize {
+    kstat(kstat::HEAP_USED)
+}
+
+/// Tek parca halindeki en buyuk bos blok.
+///
+/// `heap_used` ile birlikte parcalanmayi olcuyor: kullanilan bayt geri
+/// gelmis olsa bile en buyuk blok kuculmusse heap bolunmus demektir.
+pub fn heap_largest_free() -> usize {
+    kstat(kstat::HEAP_LARGEST)
+}
+
+/// Heap'teki blok sayisi (dolu + bos).
+pub fn heap_blocks() -> usize {
+    kstat(kstat::HEAP_BLOCKS)
 }
 
 /// `set_tid_address`: olurken sifirlanacak yeri sonradan bildirir.

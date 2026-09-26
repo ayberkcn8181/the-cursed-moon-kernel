@@ -9,7 +9,7 @@
 //! ikisi de ayni Ring 3 ortamina, ayni kullanici bellek tabanina yuklenir.
 
 use crate::arch::cpu::usermode;
-use crate::level0a::core::{env, kmalloc, mmu, scheduler, vfs};
+use crate::level0a::core::{env, mmu, scheduler, vfs};
 use crate::level0a::gdt;
 use crate::level0a::kernel_api;
 #[cfg(target_arch = "x86")]
@@ -26,8 +26,6 @@ use crate::level0b1::binary_loader::{elf64, pe64};
 /// yiginin ucte birini yiyordu; bu, programa kalan yeri sessizce
 /// daraltmak demekti.
 const USER_STACK_SIZE: usize = 16 * 1024;
-/// Ring 3'ten kesme geldiginde CPU'nun gececegi cekirdek yigini.
-const KERNEL_STACK_SIZE: usize = 16 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryFormat {
@@ -639,9 +637,23 @@ unsafe fn enter_ring3(
     // beklemeyen bir stdin ile baslar ve sebebini hic ogrenemez.
     crate::level0a::core::fd::reset_std_flags(scheduler::current_group());
 
-    // Ring 3 -> Ring 0 gecisleri icin ayri bir cekirdek yigini.
-    let kstack = kmalloc::kmalloc_aligned(KERNEL_STACK_SIZE, 16).ok_or(SpawnError::OutOfMemory)?;
-    let kstack_top = kstack.add(KERNEL_STACK_SIZE) as usize;
+    // Ring 3 -> Ring 0 gecisleri icin **gorev yuvasinin kendi** cekirdek
+    // yigini kullaniliyor.
+    //
+    // Burasi uzun sure her baslatmada `kmalloc` ile yeni bir yigin
+    // ayiriyordu ve iki sey birden yanlisti. Birincisi sizinti: 16 KiB,
+    // her Ring 3 baslatmada, geri verilmeden. Ikincisi daha ince --
+    // ayrilan yigin zamanlayiciya hic bildirilmiyordu, oysa
+    // `context_switch` her gecuste TSS'i **yuvanin** yiginiyla yeniden
+    // programliyor. Yani ilk sistem cagrisi bir yigina, ilk baglam
+    // degisiminden sonrakiler baskasina duserdi. Ayni gorev icin iki
+    // cekirdek yigini tutmanin hicbir gerekcesi yok.
+    //
+    // Yuvanin yigini su an bostur: gorev kendi cekirdek isini ayri bir
+    // yiginda (`stack_top`) yapiyor, bu ise yalnizca Ring 3'ten
+    // donuslerde kullaniliyor.
+    let kstack_top = scheduler::kernel_stack_top_of(scheduler::current_id())
+        .ok_or(SpawnError::OutOfMemory)?;
     gdt::set_kernel_stack(kstack_top);
     // x86_64'te `syscall` komutu TSS kullanmaz; yigini ayrica bildirmeliyiz.
     #[cfg(target_arch = "x86_64")]

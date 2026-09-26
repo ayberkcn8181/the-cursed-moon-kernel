@@ -93,8 +93,15 @@ fn free_slot(count: usize) -> Option<usize> {
 /// Bir gorevin tum pencerelerini kapatir.
 ///
 /// Surec oldugunde (normal cikis ya da `kill`) penceresi ekranda kalirsa
-/// artik kimsenin cizmedigi olu bir dikdortgen olur; tamponu da bosuna
-/// tutulur. Yuva serbest birakilir, `create` onu yeniden kullanir.
+/// artik kimsenin cizmedigi olu bir dikdortgen olur. Yuva serbest
+/// birakilir, `create` onu yeniden kullanir.
+///
+/// **Tampon da geri veriliyor.** Uzun sure verilmiyordu ve verilemiyordu
+/// da: `kmalloc` bir bump ayiriciydi. Yuva yeniden kullanilsa bile her
+/// `create` yeni bir tampon ayirdigi icin bir pencere acip kapatmak
+/// `width * height * 4` bayti kalici olarak yiyordu -- 640x480 bir
+/// pencere icin 1,2 MiB. Hicbir belirti yoktu; heap dolana kadar her
+/// sey calisiyordu.
 pub fn close_owned_by(owner: usize) -> usize {
     crate::arch::cpu::without_interrupts(|| unsafe {
         let count = WINDOW_COUNT.load(Ordering::Relaxed);
@@ -107,6 +114,10 @@ pub fn close_owned_by(owner: usize) -> usize {
             }
             w.used = false;
             w.user_addr = 0;
+            if w.buffer != 0 {
+                crate::level0a::core::kmalloc::kfree(w.buffer as *mut u8);
+                w.buffer = 0;
+            }
             closed += 1;
             if FOCUSED.load(Ordering::Relaxed) == i {
                 // Odagi kabuga geri ver; aksi halde tuslar bosluga gider.

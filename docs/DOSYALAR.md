@@ -200,7 +200,7 @@ cevirisi** yapip Level-0a'nin ortak API'sine devreder.
 | `mmu_i386.rs` | Iki seviyeli sayfalama, surec basina adres uzayi, copy-on-write, talep uzerine sayfalama, `mmap` penceresi. |
 | `mmu_x86_64.rs` | Dort seviyeli karsiligi. |
 | `frames.rs` | Fiziksel cerceve havuzu + **basvuru sayaci** (COW icin sart). |
-| `kmalloc.rs` | Cekirdek yigini. Bump degil: serbest liste tutar, cunku pencere tamponlari acilip kapaniyor. |
+| `kmalloc.rs` | Cekirdek heap'i. Sinir etiketli (boundary tag) ortulu liste: `kfree` var ve komsular birlestiriliyor. Bump surumunde pencere tamponlari ve surec cekirdek yiginlari siziyordu. |
 | `vfs.rs` | Dugum tablosu ve iki arka uc: salt okunur RAMFS (gomulu dosyalar) ve yazilabilir TCMKFS (disk). Tablo 256 girdilik: 64'te acilista 46'si gomulu dosyalarla doluyordu. |
 | `tcmkfs.rs` | Kalici dosya sistemi: superblok, inode, dogrudan blok isaretcileri, dizin agaci, `truncate`. |
 | `fd.rs` | Tanimlayici tablosu. `dup`/`dup2`, `fork`'ta kopyalama, boru tanimlayicilari. |
@@ -284,6 +284,7 @@ gunluge yazarlar ve olcum bunlardan okunur.
 | `mapped.rs` (4 sinav) | Dosya destekli `mmap`: icerik, hizasiz ofset reddi, dosya sonu sifirlamasi. |
 | `death.rs` (6 sinav) | Cocugun **nasil** oldugu: `WIFEXITED`/`WIFSIGNALED`/`WTERMSIG`, cokmenin `SIGSEGV`e ve sifira bolmenin `SIGFPE`ye eslenmesi, `exit(9)` ile `SIGKILL(9)`un ayirt edilmesi. |
 | `intr.rs` (6 sinav) | `EINTR` ve `SA_RESTART`: bekleyen okuma/yazmanin sinyalle bolunmesi, bolunen cagrinin veriyi tuketmemesi, cerceve geri sarilarak yeniden baslatma, ve yok sayilan sinyalin **bolmemesi**. |
+| `heap.rs` (5 sinav) | Cekirdek heap'i: pencere tamponu ve surec cekirdek yigini geri veriliyor mu, bloklar birlesiyor mu, ve turlardan sonra 512 KiB'lik tek parca hala ayrilabiliyor mu. |
 | `bigfile.rs` (6 sinav) | TCMKFS tavanlari: dolayli blokla 200 KiB yazma, sinirin iki yaninin dogrulugu, dolayli blogun geri verilmesi (blok sizintisi), 80 dosya, ve tavanin hala durmasi. Disk yoksa hepsi **atlandi**. |
 | `stdin.rs` (5 sinav) | Bloke eden standart girdi: `O_NONBLOCK` ile `-EAGAIN`, `poll`un "hazir degil" demesi, bekleyen okumanin sinyalle bolunmesi (gecen sure olculerek), penceresiz surecte dosya sonu, ve fd 0 bayrak tablosu. |
 | `blocking.rs` (9 sinav) | Bloke eden boru okumasi **ve yazmasi**: bekleme, dosya sonu, `O_NONBLOCK` ile `-EAGAIN`, uc durumun ayriligi, `pipe2`, ve `SIGPIPE` -- yakalamayan bir `fork` cocugunun 141 ile oldugu `waitpid` ile olculuyor. |

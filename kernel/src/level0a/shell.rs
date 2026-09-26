@@ -911,6 +911,13 @@ fn execute(line: &str) {
             write_str("heap bos: ");
             write_num(kmalloc::free_bytes() / 1024);
             write_line(" KiB");
+            // Parcalanma: toplam bos alan buyuk olabilir ama tek parca
+            // halinde ayrilabilen bundan kucuktur.
+            write_str("en buyuk bos blok: ");
+            write_num(kmalloc::largest_free_block() / 1024);
+            write_str(" KiB   blok sayisi: ");
+            write_num(kmalloc::block_count());
+            newline();
             write_str("kullanici bolgesi: ");
             write_hex(mmu::USER_MEM_START, 8);
             write_str(" + ");

@@ -50,7 +50,7 @@ okumak da artik bekliyor: `read(0, ...)` POSIX'in varsayilanina uyuyor,
 beklemek istemeyen `poll` ya da `O_NONBLOCK` kullaniyor.
 
 Her yetenek QEMU'da **olculerek** dogrulanmistir: `probe` (16 sinav),
-`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (5), `bigfile` (6), `bequest`
+`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (5), `bigfile` (6), `heap` (5), `bequest`
 (6), `nested` (4), `winenv` (4) gibi programlar sonucu hem ekrana hem
 seri gunluge yaziyor. Olcumler yol boyunca gercek hatalar buldu -- dolan
 VFS tablosu, `CreateFileA`'nin cevrilmeyen Windows yollari, `GDT`
@@ -442,7 +442,8 @@ QEMU'da (`make run`, veya headless `qemu-system-i386 -cdrom build/tcmk.iso
 1. ✅ **Sayfalama:** `paging=acik identity=4 MiB` -- 0-4 MiB identity map,
    CR0.PG acik (kernel@1M, heap@2M, VGA@0xB8000 hepsi bu araliktadir).
 2. ✅ **kmalloc:** 1 MiB bump heap (0x00200000-0x002FFFFF); worker gorevinin
-   16 KiB yigini buradan tahsis edilir.
+   16 KiB yigini buradan tahsis edilir. (Faz 2'deki hali; ayirici sonradan
+   sinir etiketli ve `kfree`li bir surume gecti -- asagi bkz.)
 3. ✅ **Scheduler:** idle + worker arasinda round-robin gecis
    (`gecis=` sayaci artar); `sys_exit` sonrasi worker `Terminated` olur ve
    bir daha secilmez.
@@ -3515,9 +3516,10 @@ baslatabiliyor, sonra hicbir uygulama acilamiyordu -- kalici bir sinir
 degil, sizan bir kaynak.
 
 Artik yuva geri veriliyor. Yigin bellegi **birakilmiyor**, yuvada
-saklaniyor ve bir sonraki `spawn` onu yeniden kullaniyor: `kmalloc` bir
-bump ayiricidir ve `free` sunmaz, yani her geri kazanimda yeniden
-ayirmak gorev basina 32 KiB'lik sessiz bir sizinti olurdu.
+saklaniyor ve bir sonraki `spawn` onu yeniden kullaniyor. Bu, `kmalloc`
+bump ayiriciyken bir zorunluluktu; `kfree` geldikten sonra (asagi bkz.)
+bile dogru secim olarak kaldi -- ayni boyda bir yigin icin her seferinde
+ayirip birakmanin hicbir kazanci yok.
 
 Ne zaman geri verilecegi, gorevi kimin bekledigine bagli:
 
@@ -3982,9 +3984,10 @@ Uc deger de `false`: kullanici bolgesi yalnizca bir surecin adres
 uzayinda **vardir**. Onceki modelde ilk deger `true` idi -- bolge tum
 sistemde acikti.
 
-**Cerceveler geri veriliyor.** `kmalloc` bir bump ayiricidir (serbest
-birakma yok) ve cekirdek yapilari icin dogru secim. Surecler ise gelip
-gidiyor; bu yuzden ayri bir cerceve ayiricisi eklendi. `mem` sayaci
+**Cerceveler geri veriliyor.** Cerceveler `kmalloc`tan gelmiyor: fiziksel
+sayfa cerceveleri sabit boyda ve sayfa tablolarina dogrudan giriyor, o
+yuzden ayri bir cerceve ayiricisi var (bit haritasi). `kmalloc` degisken
+boylu cekirdek nesneleri icin; ikisi ayri kalmaya devam ediyor. `mem` sayaci
 tutuyor: dort surec = 520 cerceve (surec basina 128 veri + 1 sayfa dizini
 + 1 sayfa tablosu).
 
@@ -5812,6 +5815,133 @@ sayisini, `kstat(5)` tavani veriyor. Dolu yuvayi saymak gerekiyordu,
 cunku cekirdegin `TASK_COUNT`u bir su seviyesi isareti -- tablonun ne
 kadarinin bir kez kullanildigini tutuyor, yuva geri verilince
 kucumuyor.
+
+## Cekirdek heap'i geri aliniyor: `kfree` ve birlestirme
+
+`kmalloc` uzun sure bir **bump** ayiriciydi -- isaretci ilerler, geri
+donus yoktu. Gerekcesi de dosyanin basinda yaziliydi:
+
+> Faz 2 kapsaminda kasten en basit haliyle: tahsis edilen bellek geri
+> verilmez (`kfree` yok). [...] su an tek tuketici scheduler'in gorev
+> yiginlaridir.
+
+Cumle yazildiginda dogruydu. Gorev yiginlari yuvayla birlikte yeniden
+kullaniliyor, yani gercekten hicbir sey sizmiyordu. Sonra iki tuketici
+daha geldi ve ikisi de **her cagride yeniden** tahsis etti:
+
+```text
+  pencere tamponu       width * height * 4 bayt, her pencere acilista
+  surec cekirdek yigini 16 KiB, her Ring 3 baslatmada
+```
+
+```
+[heap] A tampon geri geliyor: gecti (alti tur sonrasi heap ayni)
+[heap] B bloklar birlesiyor: gecti (en buyuk bos blok da ayni)
+[heap] C blok sayisi ayni:   gecti (heap parcalara bolunmedi)
+[heap] D surec sizdirmiyor:  gecti (alti execve sonrasi heap ayni)
+[heap] E buyuk tahsis olur:  gecti (512 KiB'lik pencere aciliyor)
+[heap] kullanilan: 2150720 -> 2150720 bayt, en buyuk bos: 2033168 -> 2033168, blok: 21 -> 21
+```
+
+![heap](docs/screenshot-heap.png)
+
+### Belirtisi olmayan hata
+
+Sizinti hicbir sey bozmuyordu. Bir pencere acip kapatmak 250 KiB'i
+kalici olarak yiyordu ve heap dolana kadar her sey calisiyordu --
+dolunca da hata "pencere acilamadi" diye gorunuyordu, "bellek bitti"
+diye degil. Yani belirti, sebebin bulundugu yerden **uzakta** cikti.
+
+Bilerek eski davranisa donulmus cekirdekte, alti tur:
+
+```
+[heap] A tampon geri geliyor: KALDI (her tur bir tampon SIZDIRDI)
+[heap] B bloklar birlesiyor: KALDI (en buyuk blok KUCULDU (birlesme yok))
+[heap] C blok sayisi ayni:   KALDI (heap parcalandi)
+[heap] D surec sizdirmiyor:  KALDI (her baslatma cekirdek yigini SIZDIRDI)
+[heap] E buyuk tahsis olur:  KALDI (buyuk tampon AYRILAMADI)
+[heap] kullanilan: 2232800 -> 3768992, en buyuk bos: 1951216 -> 403408, blok: 26 -> 38
+```
+
+Ucu ayni anda gorunuyor: 1,5 MiB kayboldu (tam olarak 6 x 250 KiB), en
+buyuk bos blok 1,95 MiB'dan 0,4 MiB'a dustu, ve **alti pencere turundan
+sonra 512 KiB'lik bir pencere artik acilamiyor**. E budur: sayilarla
+degil, sonucla olcuyor.
+
+### Sinir etiketli ayirici
+
+Klasik **boundary tag** duzeni. Her blogun basinda ve sonunda boyu
+yaziyor; bu, komsuya iki yonde de yurumeyi ve birlestirmeyi sabit
+zamanda yapmayi saglar:
+
+```text
+  +0    size   (usize)   blogun TOPLAM boyu (basliklar dahil)
+  +W    used   (usize)   0 bos, 1 dolu
+  ...   (16 bayta dolgu -- yuk boylece 16 hizali baslar)
+  +16   yuk ...
+  son-16  footer: size   (geri yurumek icin)
+```
+
+Bos bloklarin ayri bir listesi **yok**: bloklar bastan sona zaten
+bitisik duruyor, yani "sonraki blok" `blok + size`. Ortulu liste
+(implicit list) ayri isaretci tutmadigi icin bozulacak daha az sey var;
+bedeli, tahsisin bloklar uzerinde yurumesi. Birkac yuz bloklu bir
+cekirdekte bu bedel olculemez -- ve olculebilir hale gelirse `kstat`
+zaten blok sayisini veriyor.
+
+Hizalama ayri bir is: pencere tamponlari **sayfa hizali** isteniyor,
+cunku Ring 3'e eslenecekler. Uygun blok bulununca yuk ileri kaydiriliyor
+ve onde kalan parca ayri bir bos blok olarak birakiliyor. Parca kendi
+basina blok olamayacak kadar kucukse bir sonraki hizali noktaya
+atlaniyor -- yoksa geri kazanilamayan bir bosluk kalirdi.
+
+### Birlestirme neden ayri bir sinav
+
+`kfree` yazip birlestirmeyi atlamak mumkun ve cazip: kullanilan bayt
+sayaci geri gelir, sinav gecer. Ama heap zamanla ayni toplam bos alanla
+ama hicbiri yeterince buyuk olmayan parcalara bolunur. Sizintinin agir
+cekimi.
+
+`heap` B ve C bu yuzden ayri: B **tek parca** halindeki en buyuk bos
+blogu, C blok sayisini karsilastiriyor. Ikisi de birlestirme olmadan
+geri gelmez.
+
+Uc sayacin (`heap_used`, `heap_largest_free`, `heap_blocks`) `kstat`e
+eklenmesi bu sinavin on kosuluydu: Ring 3'ten sorulamayan bir seyi
+sinamak mumkun degil.
+
+### Ikinci sizinti: ayni gorev icin iki cekirdek yigini
+
+`process.rs` her Ring 3 baslatmasinda 16 KiB'lik yeni bir cekirdek
+yigini ayiriyordu. Sizintidan da otesi vardi: ayrilan yigin
+**zamanlayiciya hic bildirilmiyordu**, oysa `context_switch` her gecuste
+TSS'i yuvanin kendi yiginiyla yeniden programliyor.
+
+```text
+  baslatma aninda     TSS -> yeni ayrilan yigin
+  ilk baglam degisimi TSS -> yuvanin yigini
+```
+
+Yani ilk sistem cagrisi bir yigina, ilk baglam degisiminden sonrakiler
+baskasina dusuyordu. Calisiyordu -- iki yigin da gecerliydi ve syscall'lar
+Ring 3'e donmeden bitiyor -- ama ayni gorev icin iki cekirdek yigini
+tutmanin hicbir gerekcesi yok.
+
+Duzeltme bir **silme**: yuvanin zaten ayrilmis yigini kullaniliyor. O
+yigin bu anda bostur, cunku gorev kendi cekirdek isini ayri bir yiginda
+(`stack_top`) yapiyor ve bu yalnizca Ring 3'ten donuslerde kullaniliyor.
+
+### Bilerek yapilmayanlar
+
+* **Slab yok.** Ayni boyda cok sayida kucuk nesne ayiran bir tuketici
+  yok; geldiginde ortulu listenin ustune slab kurulabilir.
+* **Bos blok listesi yok.** Tahsis butun bloklar uzerinde yuruyor
+  (first-fit). Blok sayisi `kstat`ten gorulebiliyor, yani bedeli
+  gorunmez degil.
+* **Heap buyumuyor.** 4 MiB sabit; tukenirse `kmalloc` `None` doner ve
+  cagiran acikca basarisiz olur.
+* **`krealloc` yok.** Buyutmek isteyen yeniden ayirip kopyalar; su an
+  boyle bir tuketici yok.
 
 ## Alfa'nin bilinen sinirlari
 

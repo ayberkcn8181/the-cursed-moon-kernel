@@ -1124,6 +1124,9 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
             const KSTAT_FS_TOTAL_BLOCKS: usize = 7;
             const KSTAT_FS_BLOCK_SIZE: usize = 8;
             const KSTAT_FS_MAX_FILE: usize = 9;
+            const KSTAT_HEAP_USED: usize = 10;
+            const KSTAT_HEAP_LARGEST: usize = 11;
+            const KSTAT_HEAP_BLOCKS: usize = 12;
 
             let value = match arg1 {
                 KSTAT_ADDRESS_WAITS => crate::level0a::core::scheduler::address_waits(),
@@ -1139,6 +1142,11 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
                 KSTAT_FS_TOTAL_BLOCKS => crate::level0a::core::tcmkfs::total_blocks() as usize,
                 KSTAT_FS_BLOCK_SIZE => crate::level0a::core::tcmkfs::BLOCK_SIZE,
                 KSTAT_FS_MAX_FILE => crate::level0a::core::tcmkfs::MAX_FILE_SIZE,
+                // Cekirdek heap'i: sizintinin ve parcalanmanin Ring
+                // 3'ten olculebilmesi icin.
+                KSTAT_HEAP_USED => crate::level0a::core::kmalloc::used_bytes(),
+                KSTAT_HEAP_LARGEST => crate::level0a::core::kmalloc::largest_free_block(),
+                KSTAT_HEAP_BLOCKS => crate::level0a::core::kmalloc::block_count(),
                 _ => {
                     frame.set_return((-EINVAL) as usize);
                     return;

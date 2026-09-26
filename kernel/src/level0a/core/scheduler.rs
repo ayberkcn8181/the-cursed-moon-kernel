@@ -1567,6 +1567,25 @@ pub fn task_count() -> usize {
     TASK_COUNT.load(Ordering::Relaxed)
 }
 
+/// Gorev yuvasinin Ring 3 -> Ring 0 gecisleri icin ayrilmis cekirdek
+/// yigininin tepesi.
+///
+/// Yuvayla birlikte yeniden kullanilir; `spawn_inner` bir kez ayirir.
+pub fn kernel_stack_top_of(index: usize) -> Option<usize> {
+    if index >= MAX_TASKS {
+        return None;
+    }
+    let top = unsafe {
+        let tasks = core::ptr::addr_of!(TASKS) as *const Task;
+        (*tasks.add(index)).kernel_stack_top
+    };
+    if top == 0 {
+        None
+    } else {
+        Some(top)
+    }
+}
+
 /// **Dolu** yuva sayisi -- `task_count` ile ayni sey degil.
 ///
 /// `TASK_COUNT` tablonun ne kadarinin bir kez kullanildigini tutar, yani
