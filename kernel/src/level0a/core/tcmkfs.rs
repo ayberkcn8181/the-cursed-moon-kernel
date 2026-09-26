@@ -41,6 +41,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
+use crate::level0a::core::swap;
 use crate::level0a::drivers::block::{self, SECTOR_SIZE};
 use crate::level0a::drivers::partition;
 
@@ -171,6 +172,14 @@ struct SuperBlock {
     block_size: u32,
     data_start: u32,
     label: [u8; 16],
+    /// Takas alaninin bolum icindeki ilk sektoru (0 = takas yok).
+    ///
+    /// Alanlar `label`dan **sonra** duruyor ve bu bilincli: superblock
+    /// sektorunun geri kalani eskiden sifirdi, yani surum 3 imajlari
+    /// buradan sifir okur ve "takas yok" der. Bicim surumunu
+    /// buyutmeden eklenebilen tek yer burasi.
+    swap_start: u32,
+    swap_slots: u32,
 }
 
 #[repr(C)]
@@ -258,13 +267,40 @@ fn io(result: Result<(), block::BlockError>) -> Result<(), FsError> {
     result.map_err(|_| FsError::Io)
 }
 
+/// Takas alaninin bolum icinde nereden basladigi ve kac yuva tuttugu.
+///
+/// Alan **sondan** ayriliyor. Onde olsaydi veri bloklarinin basladigi
+/// sektor kayardi ve eski imajlar sessizce yanlis okunurdu; sondan
+/// ayirmak yalnizca kapasiteyi kuculttugu icin surum bozulmuyor.
+///
+/// Bolum takas alanini tasiyamayacak kadar kucukse `(0, 0)` doner --
+/// takas kapali, dosya sistemi aynen calisir.
+fn swap_region(partition_sectors: u32) -> (u32, u32) {
+    let want = swap::SLOTS * (BLOCK_SIZE / SECTOR_SIZE) as u32;
+    // Takastan sonra en az 1 MiB veri blogu kalmali; yoksa takas icin
+    // dosya sistemini feda etmis oluruz.
+    let floor = DATA_START_SECTOR + 2048;
+    if partition_sectors < floor + want {
+        return (0, 0);
+    }
+    (partition_sectors - want, swap::SLOTS)
+}
+
 /// Bolumun kapasitesine gore kac veri blogu sigdigini hesaplar.
-fn capacity_blocks(partition_sectors: u32) -> u32 {
-    if partition_sectors <= DATA_START_SECTOR {
+///
+/// `swap_sectors`, bolumun sonundan takasa ayrilan sektor sayisidir;
+/// eski (takassiz) imajlarda sifirdir.
+fn capacity_blocks_with_swap(partition_sectors: u32, swap_sectors: u32) -> u32 {
+    let end = partition_sectors.saturating_sub(swap_sectors);
+    if end <= DATA_START_SECTOR {
         return 0;
     }
-    let usable = (partition_sectors - DATA_START_SECTOR) / SECTORS_PER_BLOCK;
+    let usable = (end - DATA_START_SECTOR) / SECTORS_PER_BLOCK;
     usable.min(MAX_BLOCKS as u32)
+}
+
+fn capacity_blocks(partition_sectors: u32) -> u32 {
+    capacity_blocks_with_swap(partition_sectors, 0)
 }
 
 // --- Ham sektor G/C ---
@@ -599,9 +635,12 @@ pub fn format(label: &str) -> Result<(), FsError> {
     }
     PART_LBA.store(lba, Ordering::Relaxed);
 
-    let total = capacity_blocks(sectors);
+    let (swap_start, swap_slots) = swap_region(sectors);
+    let swap_sectors = swap_slots * (BLOCK_SIZE / SECTOR_SIZE) as u32;
+    let total = capacity_blocks_with_swap(sectors, swap_sectors);
     TOTAL_BLOCKS.store(total, Ordering::Relaxed);
     FREE_BLOCKS.store(total, Ordering::Relaxed);
+    swap::init(lba, swap_start, swap_slots);
     // Onceki dosya sisteminden kalan dolayli blok tamponu bu diskte
     // bambaska bir seyi gosterir; yazilmadan atiliyor.
     INDIRECT_CACHED.store(NO_BLOCK, Ordering::Relaxed);
@@ -628,6 +667,8 @@ pub fn format(label: &str) -> Result<(), FsError> {
         block_size: BLOCK_SIZE as u32,
         data_start: DATA_START_SECTOR,
         label: [0; 16],
+        swap_start,
+        swap_slots,
     };
     for (i, b) in label.bytes().take(15).enumerate() {
         sb.label[i] = b;
@@ -676,9 +717,17 @@ pub fn mount() -> Result<(), FsError> {
     if sb.version != VERSION {
         return Err(FsError::BadVersion);
     }
+    // Takas alani superblock'tan geliyor. Surum 3 imajlarinda bu
+    // alanlar sifir okunur (label'dan sonraki bolge eskiden sifirdi),
+    // yani takas kapali kalir ve dosya sistemi aynen baglanir.
+    let swap_sectors = sb.swap_slots.min(swap::SLOTS) * (BLOCK_SIZE / SECTOR_SIZE) as u32;
+    swap::init(lba, sb.swap_start, sb.swap_slots.min(swap::SLOTS));
+
     // Bolum buyudugunde superblock'taki eski kapasiteye takilmamak icin
     // gercek kapasiteyle sinirlanir.
-    let total = sb.total_blocks.min(capacity_blocks(sectors));
+    let total = sb
+        .total_blocks
+        .min(capacity_blocks_with_swap(sectors, swap_sectors));
     TOTAL_BLOCKS.store(total, Ordering::Relaxed);
 
     INDIRECT_CACHED.store(NO_BLOCK, Ordering::Relaxed);

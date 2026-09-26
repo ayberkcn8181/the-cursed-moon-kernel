@@ -60,6 +60,17 @@ pub const SYS_SETENV: u32 = 0x50B;
 /// sistem cagrisi da kisa surer.
 pub const SYS_KSTAT: u32 = 0x50C;
 
+/// Cagiranin `mmap` sayfalarini **diske attirir** (`SYS_SWAPOUT`).
+///
+/// POSIX'te karsiligi yok ve olmamasi dogal: gercek bir cekirdekte
+/// takas bellek baskisiyla kendiliginden olur, istenerek degil.
+/// Burada var olma sebebi yine olcum. Baskiyi olculebilir bicimde
+/// uretmek icin surec basina 512 KiB'lik pencereyi doldurmak yetmiyor
+/// -- havuz 16 MiB. Tetigi disari acmak, takasin **mekanizmasini**
+/// (diske yaz, cerceveyi birak, hatada geri oku) belirlenimci bir
+/// sinavla dogrulamayi mumkun kiliyor.
+pub const SYS_SWAPOUT: u32 = 0x50D;
+
 // Linux syscall numaralari MIMARIYE GORE DEGISIR -- ayni isim, farkli sayi.
 // Bunu tek bir kumeyle gecistirmek Faz 4'te gercek bir hataya yol acti:
 // x86_64 userland `write`(=1) cagirdi, cekirdek 1'i i386'nin `exit`'i sandi
@@ -1113,6 +1124,20 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
         // sorusunu cevaplayabilmesi icin var. Kabuktaki `stats` komutu
         // ayni sayaclari gosteriyor; buradaki tek fark, Ring 3'ten de
         // okunabilmesi.
+        // Cagiranin `mmap` sayfalarini diske attirir; atilan sayiyi doner.
+        SYS_SWAPOUT => {
+            let space = crate::level0a::core::scheduler::address_space_of(
+                crate::level0a::core::scheduler::current_id(),
+            );
+            let done = if space == 0 {
+                0
+            } else {
+                unsafe { crate::level0a::core::mmu::swap_out_range(space, arg1) }
+            };
+            frame.set_return(done);
+            return;
+        }
+
         SYS_KSTAT => {
             const KSTAT_ADDRESS_WAITS: usize = 0;
             const KSTAT_ADDRESS_WAKES: usize = 1;
@@ -1127,6 +1152,10 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
             const KSTAT_HEAP_USED: usize = 10;
             const KSTAT_HEAP_LARGEST: usize = 11;
             const KSTAT_HEAP_BLOCKS: usize = 12;
+            const KSTAT_SWAP_SLOTS: usize = 13;
+            const KSTAT_SWAP_USED: usize = 14;
+            const KSTAT_SWAP_OUT: usize = 15;
+            const KSTAT_SWAP_IN: usize = 16;
 
             let value = match arg1 {
                 KSTAT_ADDRESS_WAITS => crate::level0a::core::scheduler::address_waits(),
@@ -1147,6 +1176,12 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
                 KSTAT_HEAP_USED => crate::level0a::core::kmalloc::used_bytes(),
                 KSTAT_HEAP_LARGEST => crate::level0a::core::kmalloc::largest_free_block(),
                 KSTAT_HEAP_BLOCKS => crate::level0a::core::kmalloc::block_count(),
+                // Takas: mekanizmanin gercekten calistigini Ring 3'ten
+                // gorebilmek icin. Disk yoksa dordu de sifir.
+                KSTAT_SWAP_SLOTS => crate::level0a::core::swap::total_slots() as usize,
+                KSTAT_SWAP_USED => crate::level0a::core::swap::used_slots() as usize,
+                KSTAT_SWAP_OUT => crate::level0a::core::swap::pages_out(),
+                KSTAT_SWAP_IN => crate::level0a::core::swap::pages_in(),
                 _ => {
                     frame.set_return((-EINVAL) as usize);
                     return;

@@ -16,6 +16,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::arch::cpu::{read_cr0, read_cr3, write_cr0, write_cr3};
 use crate::level0a::core::frames;
+use crate::level0a::core::swap;
 
 const PAGE_SIZE: usize = 4096;
 const LARGE_PAGE_SIZE: usize = 2 * 1024 * 1024;
@@ -36,6 +37,23 @@ const PTE_SHARED: u64 = 1 << 10;
 /// Ayrilmis ama henuz cerceve verilmemis sayfa (talep uzerine
 /// sayfalama). Girdi `PRESENT` olmadigi icin donanim bu biti yok sayar.
 const PTE_DEMAND: u64 = 1 << 11;
+/// Bu sayfa **diskte**: cercevesi havuza geri verildi, icerik bir takas
+/// yuvasinda duruyor. `PRESENT` olmadigi icin donanim geri kalan butun
+/// bitleri yok sayar; 12. bitten yukarisi yuva numarasini tasir.
+///
+/// Bit 8, i386'daki ile ayni gerekceyle secildi: 9, 10 ve 11 dolu ve
+/// ucunun de anlami "var olan" ya da "hic olmamis" bir sayfaya bagli.
+/// Takas ucuncu bir hal ve kendi bitini istiyor.
+const PTE_SWAP: u64 = 1 << 8;
+
+/// Bu girdi diskte mi? Diskteyse yuva numarasi.
+fn swap_slot_of(entry: u64) -> Option<u32> {
+    if entry & PTE_PRESENT == 0 && entry & PTE_SWAP != 0 {
+        Some((entry >> 12) as u32)
+    } else {
+        None
+    }
+}
 
 const CR0_PG: u64 = 1 << 31;
 /// Write Protect -- bkz. i386 karsiligi. Acik olmadan cekirdek yazmalari
@@ -345,6 +363,9 @@ pub unsafe fn destroy_user_space(cr3: usize) {
                     let page = table_entry(pt as u64, i).read();
                     if page & PTE_PRESENT != 0 {
                         frames::free((page & ADDR_MASK) as usize);
+                    } else if let Some(slot) = swap_slot_of(page) {
+                        // Diskteki sayfalarin yuvalari da geri verilmeli.
+                        swap::free_slot(slot);
                     }
                 }
                 frames::free(pt);
@@ -480,6 +501,8 @@ pub unsafe fn munmap_user(cr3: usize, addr: usize, len: usize) -> bool {
         let entry = entry_ptr.read();
         if entry & PTE_PRESENT != 0 {
             frames::free((entry & ADDR_MASK) as usize);
+        } else if let Some(slot) = swap_slot_of(entry) {
+            swap::free_slot(slot);
         }
         entry_ptr.write(0);
     }
@@ -506,6 +529,81 @@ pub fn mmap_pages(cr3: usize) -> usize {
 ///
 /// # Safety
 /// Yalnizca sayfa hatasi isleyicisinden cagrilmalidir.
+/// Diskteki bir sayfayi geri okur ve girdiyi tazeler (bkz. i386).
+unsafe fn swap_in_entry(entry_ptr: *mut u64) -> bool {
+    let entry = entry_ptr.read();
+    let slot = match swap_slot_of(entry) {
+        Some(s) => s,
+        None => return true,
+    };
+    let frame = match frames::alloc() {
+        Some(f) => f,
+        None => return false,
+    };
+    if !swap::read_frame(slot, frame) {
+        frames::free(frame);
+        return false;
+    }
+    entry_ptr.write(frame as u64 | PTE_PRESENT | PTE_WRITABLE | PTE_USER);
+    swap::free_slot(slot);
+    true
+}
+
+/// Bir sayfayi diske atar; cerceve havuza doner.
+///
+/// Kurallar i386 ile ayni: paylasilan (`PTE_SHARED`), COW ve referans
+/// sayisi birden buyuk sayfalar atilmaz.
+///
+/// # Safety
+/// `cr3` bu modulun urettigi bir adres uzayi olmali.
+pub unsafe fn swap_out_page(cr3: usize, vaddr: usize) -> bool {
+    if !swap::available() {
+        return false;
+    }
+    let entry_ptr = match user_pte(cr3, vaddr) {
+        Some(e) => e,
+        None => return false,
+    };
+    let entry = entry_ptr.read();
+    if entry & PTE_PRESENT == 0 || entry & PTE_SHARED != 0 || entry & PTE_COW != 0 {
+        return false;
+    }
+    let frame = (entry & ADDR_MASK) as usize;
+    if frames::refcount(frame) != 1 {
+        return false;
+    }
+    let slot = match swap::alloc_slot() {
+        Some(s) => s,
+        None => return false,
+    };
+    if !swap::write_frame(slot, frame) {
+        swap::free_slot(slot);
+        return false;
+    }
+    entry_ptr.write(((slot as u64) << 12) | PTE_SWAP);
+    frames::free(frame);
+    flush_tlb();
+    true
+}
+
+/// Bu adres uzayindan en fazla `want` sayfayi diske atar.
+///
+/// # Safety
+/// `cr3` bu modulun urettigi bir adres uzayi olmali.
+pub unsafe fn swap_out_range(cr3: usize, want: usize) -> usize {
+    let mut done = 0usize;
+    let pages = USER_MMAP_SIZE / PAGE_SIZE;
+    for i in 0..pages {
+        if done >= want {
+            break;
+        }
+        if swap_out_page(cr3, USER_MMAP_START + i * PAGE_SIZE) {
+            done += 1;
+        }
+    }
+    done
+}
+
 pub unsafe fn handle_demand_fault(vaddr: usize) -> bool {
     let cr3 = (read_cr3() & ADDR_MASK) as usize;
     if cr3 == 0 || cr3 == kernel_cr3() {
@@ -516,13 +614,36 @@ pub unsafe fn handle_demand_fault(vaddr: usize) -> bool {
         None => return false,
     };
     let entry = entry_ptr.read();
-    if entry & PTE_PRESENT != 0 || entry & PTE_DEMAND == 0 {
+    if entry & PTE_PRESENT != 0 {
+        return false;
+    }
+
+    // Diskteki sayfa: once geri okunur (bkz. i386).
+    if swap_slot_of(entry).is_some() {
+        if !swap_in_entry(entry_ptr) {
+            return false;
+        }
+        flush_tlb();
+        return true;
+    }
+
+    if entry & PTE_DEMAND == 0 {
         return false;
     }
 
     let frame = match frames::alloc() {
         Some(f) => f,
-        None => return false,
+        None => {
+            // Havuz doldu: takas varsa bu adres uzayindan bir sayfa
+            // diske atilip yer acilir (bkz. i386).
+            if swap_out_range(cr3, 1) == 0 {
+                return false;
+            }
+            match frames::alloc() {
+                Some(f) => f,
+                None => return false,
+            }
+        }
     };
     entry_ptr.write(frame as u64 | PTE_PRESENT | PTE_WRITABLE | PTE_USER);
     flush_tlb();
@@ -666,6 +787,12 @@ pub unsafe fn clone_user_space(src_cr3: usize) -> Option<usize> {
 
         for i in 0..ENTRIES {
             let page_ptr = table_entry(src_pt, i);
+            // Diskteki sayfa once geri okunuyor, sonra normal COW
+            // yoluna giriyor (bkz. i386).
+            if swap_slot_of(page_ptr.read()).is_some() && !swap_in_entry(page_ptr) {
+                destroy_user_space(dst_cr3);
+                return None;
+            }
             let page = page_ptr.read();
             if page & PTE_SHARED != 0 {
                 continue;

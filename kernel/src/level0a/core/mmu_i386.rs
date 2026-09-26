@@ -33,6 +33,7 @@
 
 use crate::arch::cpu::{read_cr0, read_cr3, write_cr0, write_cr3};
 use crate::level0a::core::frames;
+use crate::level0a::core::swap;
 
 const PAGE_SIZE: usize = 4096;
 const ENTRIES: usize = 1024;
@@ -63,6 +64,27 @@ const PTE_SHARED: u32 = 1 << 10;
 /// bayrak yalnizca yok olan bir sayfada anlamlidir ve `PTE_COW` ile
 /// karisamaz.
 const PTE_DEMAND: u32 = 1 << 11;
+/// Bu sayfa **diskte**: cercevesi havuza geri verildi, icerik bir takas
+/// yuvasinda duruyor. `PRESENT` olmadigi icin donanim geri kalan butun
+/// bitleri yok sayar; ust 20 bit yuva numarasini tasir.
+///
+/// Bit 8 secildi ve bu bir tercih degil, zorunluluk: 9, 10 ve 11 dolu
+/// (`COW`, `SHARED`, `DEMAND`) ve ucunun de anlami "var olan" ya da
+/// "hic olmamis" bir sayfaya bagli. Takas **ucuncu** bir hal, kendi
+/// bitini istiyor. Var olan bir bayragi ikinci anlamla yuklemek
+/// `clone_user_space`teki `PTE_SHARED` denetimini sessizce yanlis
+/// kilardi: diskteki bir sayfa "pencere tamponu" sanilip cocuga hic
+/// aktarilmazdi.
+const PTE_SWAP: u32 = 1 << 8;
+
+/// Bu girdi diskte mi? Diskteyse yuva numarasi.
+fn swap_slot_of(entry: u32) -> Option<u32> {
+    if entry & PTE_PRESENT == 0 && entry & PTE_SWAP != 0 {
+        Some(entry >> 12)
+    } else {
+        None
+    }
+}
 
 const CR0_PG: u32 = 1 << 31;
 /// Write Protect. Acik olmadiginda **cekirdek** salt okunur sayfalara
@@ -285,6 +307,10 @@ pub unsafe fn destroy_user_space(cr3: usize) {
             let entry = pt.add(i).read();
             if entry & PTE_PRESENT != 0 {
                 frames::free((entry & !0xFFF) as usize);
+            } else if let Some(slot) = swap_slot_of(entry) {
+                // Diskteki sayfalarin yuvalari da geri verilmeli; yoksa
+                // her olen surec takas alanindan bir parca gotururdu.
+                swap::free_slot(slot);
             }
         }
         frames::free((pde & !0xFFF) as usize);
@@ -423,6 +449,8 @@ pub unsafe fn munmap_user(cr3: usize, addr: usize, len: usize) -> bool {
         let entry = entry_ptr.read();
         if entry & PTE_PRESENT != 0 {
             frames::free((entry & !0xFFF) as usize);
+        } else if let Some(slot) = swap_slot_of(entry) {
+            swap::free_slot(slot);
         }
         entry_ptr.write(0);
     }
@@ -447,6 +475,106 @@ pub fn mmap_pages(cr3: usize) -> usize {
 
 /// Talep uzerine sayfalama hatasini cozer; cozduyse `true` doner.
 ///
+/// Diskteki bir sayfayi geri okur ve girdiyi tazeler.
+///
+/// Girdi zaten diskte degilse `true` doner (yapacak is yok). Cerceve
+/// bulunamaz ya da okuma basarisiz olursa `false`: cagiran o zaman
+/// hatayi normal yoluna birakmali.
+///
+/// TLB temizlemesi cagirana ait: `clone_user_space` baska bir adres
+/// uzayinda calisiyor ve orayi temizlemesi gereksiz.
+unsafe fn swap_in_entry(entry_ptr: *mut u32) -> bool {
+    let entry = entry_ptr.read();
+    let slot = match swap_slot_of(entry) {
+        Some(s) => s,
+        None => return true,
+    };
+    let frame = match frames::alloc() {
+        Some(f) => f,
+        None => return false,
+    };
+    if !swap::read_frame(slot, frame) {
+        frames::free(frame);
+        return false;
+    }
+    entry_ptr.write(frame as u32 | PTE_PRESENT | PTE_WRITABLE | PTE_USER);
+    swap::free_slot(slot);
+    true
+}
+
+/// Bir sayfayi diske atar; cerceve havuza doner.
+///
+/// Uc sayfa turu **atilamaz** ve ucu de ayni sebepten: sahibi tek
+/// degil.
+///
+/// * `PTE_SHARED` -- pencere piksel tamponu. Cekirdek de ayni bellege
+///   identity adresinden bakiyor; altindan cekmek kompozitoru bozardi.
+/// * `PTE_COW` -- baska bir adres uzayiyla paylasiliyor.
+/// * `refcount != 1` -- ayni gerekce, bayraktan bagimsiz olarak.
+///
+/// Paylasilan bir sayfayi atmak, yuvanin da referans sayilmasini
+/// gerektirirdi. Bu asamada o karmasiklik yerine "paylasilani atma"
+/// kurali secildi: kaybi az, yanlis yapma ihtimali cok daha dusuk.
+///
+/// # Safety
+/// `cr3` bu modulun urettigi bir adres uzayi olmali.
+pub unsafe fn swap_out_page(cr3: usize, vaddr: usize) -> bool {
+    if !swap::available() {
+        return false;
+    }
+    let entry_ptr = match user_pte(cr3, vaddr) {
+        Some(e) => e,
+        None => return false,
+    };
+    let entry = entry_ptr.read();
+    if entry & PTE_PRESENT == 0 || entry & PTE_SHARED != 0 || entry & PTE_COW != 0 {
+        return false;
+    }
+    let frame = (entry & !0xFFF) as usize;
+    if frames::refcount(frame) != 1 {
+        return false;
+    }
+    let slot = match swap::alloc_slot() {
+        Some(s) => s,
+        None => return false,
+    };
+    if !swap::write_frame(slot, frame) {
+        swap::free_slot(slot);
+        return false;
+    }
+    // Sira onemli: once girdi degistirilir, sonra cerceve birakilir.
+    // Tersi olsaydi, arada gelen bir kesme bu cerceveyi baska bir surece
+    // verebilir ve girdi hala ona bakiyor olurdu.
+    entry_ptr.write((slot << 12) | PTE_SWAP);
+    frames::free(frame);
+    flush_tlb();
+    true
+}
+
+/// Bu adres uzayindan en fazla `want` sayfayi diske atar; atilan sayiyi
+/// doner.
+///
+/// Yalnizca `mmap` penceresine bakiyor. Imaj ve yigin sayfalari bilerek
+/// disarida: surecin kodunu ya da altindaki yigini atmak, geri okuma
+/// yolunun **kendisi** o sayfalara dokunuyorken kilitlenme riski
+/// demektir.
+///
+/// # Safety
+/// `cr3` bu modulun urettigi bir adres uzayi olmali.
+pub unsafe fn swap_out_range(cr3: usize, want: usize) -> usize {
+    let mut done = 0usize;
+    let pages = USER_MMAP_SIZE / PAGE_SIZE;
+    for i in 0..pages {
+        if done >= want {
+            break;
+        }
+        if swap_out_page(cr3, USER_MMAP_START + i * PAGE_SIZE) {
+            done += 1;
+        }
+    }
+    done
+}
+
 /// Sayfa hatasi isleyicisinden, sayfanin **yok** oldugu (bit 0 = 0)
 /// hatalar icin cagrilir.
 ///
@@ -462,7 +590,22 @@ pub unsafe fn handle_demand_fault(vaddr: usize) -> bool {
         None => return false,
     };
     let entry = entry_ptr.read();
-    if entry & PTE_PRESENT != 0 || entry & PTE_DEMAND == 0 {
+    if entry & PTE_PRESENT != 0 {
+        return false;
+    }
+
+    // Diskteki sayfa: once geri okunur. Talep uzerine sayfalamadan
+    // ayri bir hal ve once bakilmasi sart -- `PTE_DEMAND` kapali
+    // oldugu icin asagidaki denetim onu "gecersiz adres" sayardi.
+    if swap_slot_of(entry).is_some() {
+        if !swap_in_entry(entry_ptr) {
+            return false;
+        }
+        flush_tlb();
+        return true;
+    }
+
+    if entry & PTE_DEMAND == 0 {
         return false;
     }
 
@@ -470,7 +613,23 @@ pub unsafe fn handle_demand_fault(vaddr: usize) -> bool {
     // halde onceki surecin verisi yeni surece gorunurdu.
     let frame = match frames::alloc() {
         Some(f) => f,
-        None => return false, // havuz doldu: hata normal yoluna gitsin
+        None => {
+            // Havuz doldu. Takas varsa **bu** adres uzayindan bir sayfa
+            // diske atilip yer acilir; yoksa hata normal yoluna gider.
+            //
+            // Kurban ayni uzaydan seciliyor ve bu bilincli: baska bir
+            // surecin sayfasini atmak onun CR3'unu ve TLB'sini
+            // ilgilendirir, oysa burasi hata isleyicisinin ortasi.
+            // Baski altindaki surec once kendi sogumus sayfalarini
+            // versin.
+            if swap_out_range(cr3, 1) == 0 {
+                return false;
+            }
+            match frames::alloc() {
+                Some(f) => f,
+                None => return false,
+            }
+        }
     };
     entry_ptr.write(frame as u32 | PTE_PRESENT | PTE_WRITABLE | PTE_USER);
     flush_tlb();
@@ -581,6 +740,18 @@ pub unsafe fn clone_user_space(src_cr3: usize) -> Option<usize> {
     let src_pt = (src_pde & !0xFFF) as *mut u32;
 
     for i in 0..ENTRIES {
+        // Diskteki sayfa once **geri okunuyor**, sonra normal COW
+        // yoluna giriyor.
+        //
+        // Alternatifi, yuvayi iki uzayin paylasmasi ve takas yuvalarinin
+        // da referans sayilmasiydi. Geri okumak bir disk erisimi
+        // pahasina o muhasebenin tamamini gereksiz kiliyor -- ve `fork`
+        // zaten sayfayi COW ile paylastiracagi icin sonuc ayni:
+        // bellekte tek kopya.
+        if swap_slot_of(src_pt.add(i).read()).is_some() && !swap_in_entry(src_pt.add(i)) {
+            destroy_user_space(dst_cr3);
+            return None;
+        }
         let entry = src_pt.add(i).read();
         if entry & PTE_SHARED != 0 {
             continue;

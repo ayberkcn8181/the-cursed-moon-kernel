@@ -180,6 +180,8 @@ pub const SYS_SET_TID_ADDRESS: usize = 218;
 /// Cekirdek sayaclarini okur -- "bu is gercekten cekirdekte mi oldu"
 /// sorusunun durust cevabi. Gecen sureye bakmak bunu olcmezdi.
 pub const SYS_KSTAT: usize = 0x50C;
+/// Cagiranin sayfalarini diske attirir (TCMK'ye ozgu).
+pub const SYS_SWAPOUT: usize = 0x50D;
 
 /// `setenv`/`unsetenv`. Linux'ta boyle bir sistem cagrisi yoktur --
 /// orada ortam surecin kendi belleginde ve libc'nin isidir. TCMK'de
@@ -1437,6 +1439,14 @@ pub mod kstat {
     pub const HEAP_LARGEST: usize = 11;
     /// Heap'teki blok sayisi (dolu + bos).
     pub const HEAP_BLOCKS: usize = 12;
+    /// Takas alanindaki toplam yuva (0 = takas yok).
+    pub const SWAP_SLOTS: usize = 13;
+    /// Dolu takas yuvasi.
+    pub const SWAP_USED: usize = 14;
+    /// Diske atilan sayfa sayisi.
+    pub const SWAP_OUT: usize = 15;
+    /// Diskten geri okunan sayfa sayisi.
+    pub const SWAP_IN: usize = 16;
 }
 
 /// Bir cekirdek sayacini okur.
@@ -1514,6 +1524,37 @@ pub fn heap_largest_free() -> usize {
 /// Heap'teki blok sayisi (dolu + bos).
 pub fn heap_blocks() -> usize {
     kstat(kstat::HEAP_BLOCKS)
+}
+
+/// Takas alanindaki toplam yuva; 0 ise takas yok.
+pub fn swap_slots() -> usize {
+    kstat(kstat::SWAP_SLOTS)
+}
+
+/// Dolu takas yuvasi sayisi.
+pub fn swap_used() -> usize {
+    kstat(kstat::SWAP_USED)
+}
+
+/// Diske atilan sayfa sayisi (cekirdek sayaci).
+pub fn swap_pages_out() -> usize {
+    kstat(kstat::SWAP_OUT)
+}
+
+/// Diskten geri okunan sayfa sayisi (cekirdek sayaci).
+pub fn swap_pages_in() -> usize {
+    kstat(kstat::SWAP_IN)
+}
+
+/// Cagiranin `mmap` sayfalarindan en fazla `pages` tanesini **diske
+/// attirir**; atilan sayiyi doner.
+///
+/// POSIX'te karsiligi yok ve olmamasi dogal: gercek bir cekirdekte
+/// takas bellek baskisiyla kendiliginden olur. Burada var olma sebebi
+/// olcum -- takasin mekanizmasini belirlenimci bicimde sinamanin baska
+/// yolu yok (havuz 16 MiB, surec penceresi 512 KiB).
+pub fn swap_out(pages: usize) -> usize {
+    unsafe { syscall1(SYS_SWAPOUT, pages) }
 }
 
 /// `set_tid_address`: olurken sifirlanacak yeri sonradan bildirir.

@@ -9,7 +9,7 @@
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::level0a::core::{
-    cwd, dir, env, fd, frames, init, kmalloc, mmu, pipe, scheduler, tcmkfs, vfs,
+    cwd, dir, env, fd, frames, init, kmalloc, mmu, pipe, scheduler, swap, tcmkfs, vfs,
 };
 use crate::level0a::drivers::{ata, block, gfx, partition, rtc};
 use crate::level0a::{exceptions, input, kernel_api, launcher, pit, wm};
@@ -918,6 +918,21 @@ fn execute(line: &str) {
             write_str(" KiB   blok sayisi: ");
             write_num(kmalloc::block_count());
             newline();
+            // Takas: yalnizca gercekten varsa yazilir. Sifir gostermek
+            // "var ama bos" ile "hic yok"u karistirirdi.
+            if swap::total_slots() > 0 {
+                write_str("takas: ");
+                write_num(swap::used_slots() as usize * 4);
+                write_str(" / ");
+                write_num(swap::total_slots() as usize * 4);
+                write_str(" KiB kullanimda   disari: ");
+                write_num(swap::pages_out());
+                write_str("  iceri: ");
+                write_num(swap::pages_in());
+                newline();
+            } else {
+                write_line("takas: yok (disk bagli degil ya da bolum kucuk)");
+            }
             write_str("kullanici bolgesi: ");
             write_hex(mmu::USER_MEM_START, 8);
             write_str(" + ");

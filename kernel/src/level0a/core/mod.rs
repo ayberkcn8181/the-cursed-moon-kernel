@@ -7,6 +7,7 @@ pub mod fd;
 pub mod frames;
 pub mod init;
 pub mod kmalloc;
+pub mod swap;
 pub mod pipe;
 pub mod scheduler;
 pub mod tcmkfs;

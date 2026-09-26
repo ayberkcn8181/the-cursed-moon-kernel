@@ -229,7 +229,12 @@ fn main() {
         }
         id if id > 0 => {
             let mut status = 0u32;
-            sys::waitpid(id as usize, &mut status, 0) >= 0 && sys::exit_status(status) == 0
+            // `exited` olmadan: sinyalle olen bir cocuk da "kod 0" gibi
+            // gorunur, cunku cikis kodu durum kelimesinin ust baytinda
+            // duruyor ve sinyalle olumde orasi sifirdir.
+            sys::waitpid(id as usize, &mut status, 0) >= 0
+                && sys::exited(status)
+                && sys::exit_status(status) == 0
         }
         _ => false,
     };

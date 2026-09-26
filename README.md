@@ -47,10 +47,12 @@ POSIX tarafinda var -- Win32'de karsiligi yok ve bu ayrim olculuyor.
 Bir surecin **nasil oldugu** da iki ABI'de bambaska paketleniyor
 (`WIFSIGNALED` -- `GetExitCodeProcess` + NTSTATUS). Standart girdiden
 okumak da artik bekliyor: `read(0, ...)` POSIX'in varsayilanina uyuyor,
-beklemek istemeyen `poll` ya da `O_NONBLOCK` kullaniyor.
+beklemek istemeyen `poll` ya da `O_NONBLOCK` kullaniyor. Cerceve havuzu
+tukendiginde de cevap artik "reddet" degil: sayfa **diske gidiyor** ve
+hatada geri okunuyor.
 
 Her yetenek QEMU'da **olculerek** dogrulanmistir: `probe` (16 sinav),
-`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (5), `bigfile` (6), `heap` (5), `bequest`
+`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (5), `bigfile` (6), `heap` (5), `swapx` (6), `bequest`
 (6), `nested` (4), `winenv` (4) gibi programlar sonucu hem ekrana hem
 seri gunluge yaziyor. Olcumler yol boyunca gercek hatalar buldu -- dolan
 VFS tablosu, `CreateFileA`'nin cevrilmeyen Windows yollari, `GDT`
@@ -62,7 +64,9 @@ birakmayan bitmis is parcaciklari, yuvasi geri verilmis bir gorevi
 bekleyenin bir daha uyanmamasi -- ve her biri README'de kendi
 bolumunde yazili. Olcum bir de sunu gosterdi: bir tavani kaldirmak,
 altinda duran daha sikisik bir tavani (VFS dugum tablosu) gormeden
-anlamsiz.
+anlamsiz. Ve iki kez, hata cekirdekte degil **sinavin kendisinde**
+cikti -- ikisi de sinyalle olen bir cocugu "basariyla bitti" sayan
+aceleci bir durum denetimiydi.
 
 **Tamamlanan fazlar:**
 
@@ -5943,6 +5947,155 @@ yigin bu anda bostur, cunku gorev kendi cekirdek isini ayri bir yiginda
 * **`krealloc` yok.** Buyutmek isteyen yeniden ayirip kopyalar; su an
   boyle bir tuketici yok.
 
+## Diske takas: cerceve bitince sayfa diske gider
+
+Cerceve havuzu 16 MiB ve uzun sure tukenmesinin tek cevabi
+**reddetmekti**: `frames::alloc` `None` doner, `fork`/`execve` basarisiz
+olur, talep uzerine sayfalama hatayi normal yoluna birakirdi. Yani
+sistem, aylardir dokunulmamis sayfalar yuzunden yeni bir surec
+acamayabilirdi.
+
+```
+[swapx] A yuva var:          gecti (bicimlendirme takas alani ayirdi)
+[swapx] B sayfa atildi:      gecti (sekiz sayfa diske gitti)
+[swapx] C icerik ayni:       gecti (geri okunan sayfalarda desen ayni)
+[swapx] D gercekten disk:    gecti (sekiz sayfa diskten geldi)
+[swapx] E yuva geri verildi: gecti (geri okunan sayfanin yuvasi serbest kaldi)
+[swapx] F fork da gorur:     gecti (diskteki sayfa cocukta dogru geldi)
+[swapx] yuva: 1024 (4096 KiB), atilan: 8, disari: 16, iceri: 16
+```
+
+![swapx](docs/screenshot-swapx.png)
+
+### PTE'nin ucuncu hali
+
+Bir kullanici PTE'sinin uc hali vardi; simdi dort:
+
+| PTE | anlam |
+|---|---|
+| 0 | bos -- `mmap` buradan verebilir |
+| `PTE_DEMAND` | ayrildi, henuz dokunulmadi |
+| `PTE_SWAP` | **diskte**: ust bitler yuva numarasi |
+| `PRESENT` | ayrildi ve cerceve verildi |
+
+Takas biti icin 8. bit secildi ve bu bir tercih degil, zorunluluk: 9,
+10 ve 11 dolu (`COW`, `SHARED`, `DEMAND`) ve ucunun de anlami "var
+olan" ya da "hic olmamis" bir sayfaya bagli. Var olan bir bayragi
+ikinci anlamla yuklemek `clone_user_space`teki `PTE_SHARED` denetimini
+sessizce yanlis kilardi: diskteki bir sayfa "pencere tamponu" sanilip
+cocuga hic aktarilmazdi.
+
+Defter yine PTE'nin kendisi -- ikinci bir veri yapisi yok. Bu, dort
+halin de ayni yerde ve ayni anda gorunmesi demek; `fork`, `munmap`,
+surec olumu ve sayfa hatasi hepsi ayni girdiyi okuyor.
+
+### Alan bolumun sonunda
+
+```text
+  ... veri bloklari ...  |  takas yuvalari (1024 x 4 KiB = 4 MiB)
+                         ^
+                         superblock'ta `swap_start`
+```
+
+Sondan ayirmak bilincli. Onde olsaydi veri bloklarinin basladigi sektor
+kayardi ve **eski imajlar sessizce yanlis okunurdu**. Sondan ayirmak
+yalnizca kapasiteyi kuculttugu icin takas alani olmayan bir imaj aynen
+baglanmaya devam ediyor: superblock'taki yuva sayisi sifir okunur
+(`label`dan sonraki bolge eskiden sifirdi) ve takas kapali kalir. Bicim
+surumu bu yuzden **artmadi**.
+
+Yuvalar dosya sisteminin **altinda** duruyor: sayfa atmak dosya
+sistemi meta verisini degistirmemeli. Bir inode kullanmak, takas
+yazmasinin inode tablosunu da diske yazmasi demekti -- ve bellek
+sikisikken en son istenecek sey budur.
+
+### Paylasilan sayfa atilmaz
+
+Uc sayfa turu diske gitmiyor ve ucu de ayni sebepten: sahibi tek degil.
+
+```text
+  PTE_SHARED      pencere piksel tamponu -- cekirdek de ayni bellege
+                  identity adresinden bakiyor
+  PTE_COW         baska bir adres uzayiyla paylasiliyor
+  refcount != 1   ayni gerekce, bayraktan bagimsiz
+```
+
+Paylasilan bir sayfayi atmak, takas **yuvasinin** da referans
+sayilmasini gerektirirdi. Bu asamada o muhasebe yerine "paylasilani
+atma" kurali secildi: kaybi az, yanlis yapma ihtimali cok daha dusuk.
+
+Ayni tercih `fork`ta da gorunuyor. Diskteki bir sayfayla karsilasinca
+`clone_user_space` onu **once geri okuyor**, sonra normal COW yoluna
+sokuyor. Bir disk erisimi pahasina yuva paylasiminin tamami gereksiz
+kaliyor -- ve sonuc ayni: bellekte tek kopya.
+
+### Neden bir cagriyla tetikleniyor
+
+Gercek bir cekirdekte takas bellek baskisiyla kendiliginden olur.
+`swapx` ise `swap_out` (0x50D) diye bir cagri kullaniyor ve POSIX'te
+karsiligi yok -- olmamasi da dogal.
+
+Var olma sebebi olcum. Surec penceresi 512 KiB, havuz 16 MiB: bir
+sinav programinin baskiyi belirlenimci bicimde uretmesi mumkun degil.
+Tetigi disari acmak, mekanizmanin kendisini -- yaz, cerceveyi birak,
+hatada geri oku -- sinamayi mumkun kiliyor.
+
+Baski yolu ayrica var ve kodda duruyor: `handle_demand_fault` icinde
+`frames::alloc` basarisiz olunca **ayni adres uzayindan** bir sayfa
+diske atilip yeniden deneniyor. Kurbanin ayni uzaydan secilmesi de
+bilincli: baska bir surecin sayfasini atmak onun CR3'unu ve TLB'sini
+ilgilendirir, oysa burasi hata isleyicisinin ortasi.
+
+### Olcumun buldugu hata: sinavin kendisinde
+
+Uc kasitli hatayla sinandi. Ilk ikisi (yuva geri verilmiyor, `fork`
+geri okumuyor) tek bir bozuk cekirdege kondu ve sonuc su oldu:
+
+```
+[swapx] E yuva geri verildi: KALDI (yuva geri verilmedi (takas alani SIZIYOR))
+[swapx] F fork da gorur:     gecti
+```
+
+F **gecti** -- oysa seri gunlukte cocugun oldugu yaziyordu:
+
+```
+[LEVEL-0b2] ISTISNA #14 (page-fault) -- Ring 3 kaynakli
+[IPC] istisna #14 (page-fault) gorev #1 adres=0x00c80000
+```
+
+Hata cekirdekte degil, olcumde. F cocugun sonucunu `exit_status(status)
+== 0` ile okuyordu; oysa **sinyalle olen** bir surecin durum kelimesinde
+cikis kodu alani sifirdir -- kod `(x & 0xFF) << 8` ile ust bayta
+paketleniyor, olum sinyali ise alt bayta. Yani coken cocuk "basariyla
+bitti, kodu 0" gorunuyordu.
+
+Bu ayrimi `death` sinavi zaten anlatiyor (yukari bkz.) ve yine de ayni
+tuzaga dusuldu. Denetim `exited(status) && exit_status(status) == 0`
+olunca F dogru teshisi veriyor:
+
+```
+[swapx] F fork da gorur: KALDI (cocuk YANLIS icerik gordu)
+```
+
+Ucuncu kasitli hata yanlis yuvadan okumaydi; onu C yakaliyor
+("icerik BOZULDU"), ve ardindan D/E/F "once gecmesi gereken sinav
+kaldi" diyor -- yani zincirin nerede koptugu tek bakista gorunuyor.
+
+### Bilerek yapilmayanlar
+
+* **Kurban secimi yok.** `swap_out_range` `mmap` penceresini bastan
+  tarar; LRU ya da erisim biti (`PTE_ACCESSED`) kullanilmiyor. Dogru
+  sayfayi secmek ayri bir istir ve olculmeden yapilmamali.
+* **Imaj ve yigin sayfalari atilmiyor.** Yalnizca `mmap` penceresi.
+  Surecin kodunu atmak, geri okuma yolunun **kendisi** o sayfalara
+  dokunuyorken kilitlenme riski demek.
+* **Yuvalar paylasilmiyor.** Paylasilan sayfa atilmiyor (yukari bkz.).
+* **Takas kalici degil.** Bitmap her baglamada sifirlaniyor: bir sayfa
+  ancak onu bekleyen bir adres uzayi varken anlamli ve o uzaylar
+  yeniden baslatmayi gecmiyor.
+* **Onden okuma (read-ahead) yok.** Her sayfa hatasi tek bir yuva
+  okuyor.
+
 ## Alfa'nin bilinen sinirlari
 
 Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
@@ -5956,11 +6109,14 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
   kullanici bolgesinin basina koyar; `/fixed:no` ile linklenmemis, yani
   yeniden yerlesim tablosu tasimayan bir ikili yuklenemez. Windows'ta bu
   ikilinin tercih ettigi tabana bagli olarak calisabilirdi.
-- **Diske takas (swap) yok.** `munmap` cerceveleri geri veriyor (yukari
-  bkz.) ama kullanilan bir sayfayi diske atip yerini bosaltmak yok;
-  havuz dolarsa `fork`/`execve` reddedilir. `mmap` penceresi de surec
-  basina sabit 512 KiB. Dosya destekli esleme artik var (yukari bkz.)
-  ama **ozel** ve tembel degil: `MAP_SHARED`/`msync` yok, icerik esleme
+- ~~**Diske takas (swap) yok**~~ -- var (yukari bkz.): sayfa diske
+  gidiyor, cerceve havuza donuyor ve hatada geri okunuyor. Takas alani
+  4 MiB ve **disk gerektiriyor**; ISO'dan acilista takas yok. Kurban
+  secimi yok (`mmap` penceresi bastan taranir, LRU degil), yalnizca
+  `mmap` sayfalari atiliyor (imaj ve yigin degil), ve paylasilan
+  sayfalar (`PTE_SHARED`/COW) atilmiyor -- yuva paylasimi yok. `mmap`
+  penceresi hala surec basina sabit 512 KiB. Dosya destekli esleme
+  **ozel** ve tembel degil: `MAP_SHARED`/`msync` yok, icerik esleme
   aninda okunuyor.
 - ~~**Boru okumasi bloke etmez**~~ -- okuma da yazma da artik bloke
   ediyor ve `SIGPIPE` var (yukari bkz.). Boru sayisi dorttur ve
