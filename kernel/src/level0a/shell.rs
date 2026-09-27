@@ -1610,6 +1610,13 @@ fn execute(line: &str) {
             write_str("  sahipsiz: ");
             write_num(seh::unhandled());
             newline();
+            // Geri sarma ayri sayiliyor: dagitimdan bagimsiz da
+            // baslatilabiliyor ve olculen sey "kac __finally kostu".
+            write_str("SEH geri sarildi: ");
+            write_num(seh::unwinds());
+            write_str("  cozulen cerceve: ");
+            write_num(seh::finally_calls());
+            newline();
         }
         "win" => {
             write_line("  id  boyut     sahip     tampon (surecin adresi)");

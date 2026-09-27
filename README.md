@@ -27,8 +27,8 @@ masaustu sunuyor.
 | Mimariler | i386 (Multiboot1, `int 0x80`) · x86_64 (Multiboot2, `syscall`) |
 | Ikili bicimleri | ELF32/ELF64 · PE32/PE32+ (ithal tablosu cozulur) |
 | POSIX cagrilari | 71 (+ ELF yardimci vektoru, dosya destekli `mmap`, `clone`, `futex`, `SIGPIPE`, `EINTR`/`SA_RESTART`, is denetimi, `SA_SIGINFO`) |
-| NT/Win32 cagrilari | 85 (`KERNEL32.dll` 63 ihracat + `TCMKGUI.dll`) |
-| Ring 3 uygulamalari | 38 ELF + 15 PE |
+| NT/Win32 cagrilari | 86 (`KERNEL32.dll` 64 ihracat + `TCMKGUI.dll`) |
+| Ring 3 uygulamalari | 38 ELF + 16 PE |
 | Kalici depolama | ATA PIO + MBR + TCMKFS (yazilabilir, iki mimari) + takas |
 | Kod | ~30 bin satir cekirdek + ~17 bin satir userland |
 
@@ -60,7 +60,7 @@ artik POSIX yuzunde de **yakalanip duzeltilebiliyor**
 gucte cevap veriyor.
 
 Her yetenek QEMU'da **olculerek** dogrulanmistir: `probe` (16 sinav),
-`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (5), `bigfile` (6), `heap` (5), `swapx` (6), `jobs` (6), `winsusp` (6), `winctx` (7), `sigfault` (7), `bequest`
+`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (5), `bigfile` (6), `heap` (5), `swapx` (6), `jobs` (6), `winsusp` (6), `winctx` (7), `sigfault` (7), `winunwind` (7), `bequest`
 (6), `nested` (4), `winenv` (4) gibi programlar sonucu hem ekrana hem
 seri gunluge yaziyor. Olcumler yol boyunca gercek hatalar buldu -- dolan
 VFS tablosu, `CreateFileA`'nin cevrilmeyen Windows yollari, `GDT`
@@ -4690,9 +4690,11 @@ komutunu kullandigi icin hic gorunmemisti. Simdi ikisi de dogru.
 
 ### Bilerek yapilmayanlar
 
-* **Geri sarma (unwinding) yok.** Bir isleyici ya "devam et" der ya
-  "sirakine gec"; `__finally` bloklarini calistiran ve yigini geri saran
-  `RtlUnwind` yolu yok.
+* ~~**Geri sarma (unwinding) yok.**~~ Geldi (i386'da) -- bkz.
+  [Dagitimin ikinci yarisi](#dagitimin-ikinci-yarisi-__finally-nasil-kosar).
+  `RtlUnwind` zinciri hedefe kadar cozuyor ve yoldaki her isleyiciyi
+  `EXCEPTION_UNWINDING` ile cagiriyor, yani `__finally` bloklari
+  kosuyor.
 * **x86_64'te tablo tabanli SEH yok** (yukari bkz.). `.pdata`
   ayristirmak ve unwind kodlarini yorumlamak ayri bir is.
 * **Ic ice dagitim yok.** Bir isleyicinin kendisi cokerse Windows
@@ -6697,6 +6699,127 @@ pes edip cikiyor. Ikisi birlikte, bozuk bir cekirdekte sinavin
   ayni sinyal iki kez gonderilirse bir kez teslim edilir ve neden de
   tektir. Gercek Linux'un gercek-zamanli sinyalleri bu yuzden
   kuyrukludur; TCMK'de onlar da yok.
+
+## Dagitimin ikinci yarisi: `__finally` nasil kosar
+
+`winseh` istisna dagitiminin **birinci** yarisini olcuyordu: "bu
+istisnayi kim sahipleniyor?" Eksik olan, hemen ardindan gelen soruydu:
+**aradaki cerceveler ne olacak?**
+
+```text
+  __try { __try { patlar } __finally { A } } __except { B }
+
+  1. dagitim    ic isleyici  -> "sahiplenmiyorum"
+                dis isleyici -> "sahipleniyorum" -> RtlUnwind
+  2. GERI SARMA ic isleyici  -> EXCEPTION_UNWINDING ile CAGRILIR -> A kosar
+  3. hedef      fs:[0] dis kayda cekilir, yurutme B'ye gecer
+```
+
+Ikinci satir olmadan `A` **hic kosmaz**. Derleyicinin `__finally` icin
+urettigi kod tam olarak orada durur, ve o yapi kaynak temizliginden C++
+yikicilarina kadar her yerde -- yani bu satir olmadan cogu gercek
+Windows ikilisi cokmez ama **sessizce yanlis** calisir: acilan dosya
+kapanmaz, alinan kilit birakilmaz.
+
+```
+[winunwind] A __finally kostu: gecti (ic isleyici EXCEPTION_UNWINDING ile cagrildi)
+[winunwind] B sira:            gecti (yalnizca hedefin altindakiler cozuldu)
+[winunwind] C zincir kisaldi:  gecti (fs:[0] hedef kayda dustu)
+[winunwind] D cagiran devam:   gecti (hedefsiz cagri dondu ve EAX = verilen deger)
+[winunwind] E hedefe atlama:   gecti (saplamaya gidildi ve EAX = verilen deger)
+[winunwind] F GERCEK ISTISNA:  gecti (coz, temizle, duzelt, devam et -- ucu de)
+[winunwind] G olmayan hedef:   gecti (olmayan hedef reddedildi, zincire dokunulmadi)
+```
+
+![winunwind](docs/screenshot-winunwind.png)
+
+### Bir isleyici, iki is
+
+Windows'un burada yaptigi sey ilk bakista tuhaf: `__try`nin isleyicisi
+**tek** bir fonksiyondur ve iki ayri soruya cevap verir. Hangisinin
+soruldugunu yalnizca bir bayrak ayirir:
+
+```text
+  bayrak yok  ->  "sahipleniyor musun?"           (__except filtresi)
+  bayrak var  ->  "cerceven yikiliyor, temizle"   (__finally)
+```
+
+Tasarim tutumlu: zincirde tek bir isaretci tasinir ve ayni kod iki
+evrede de yurunur. Bedeli, isleyici yazan herkesin bayragi kontrol
+etmek zorunda olmasi -- unutulursa `__finally` hem temizlik yapar hem
+de "sahipleniyorum" der.
+
+### POSIX'te karsiligi yok
+
+Bir sinyal isleyicisi "aradaki cerceveleri coz" diye cagrilmaz.
+`longjmp` yigini geri sarar ama yol ustundeki **hicbir koda haber
+vermez**:
+
+```text
+  Win32  RtlUnwind  -> yoldaki her cerceveye haber verilir (__finally)
+  POSIX  longjmp    -> yoldaki cerceveler sessizce atlanir
+```
+
+Fark dilin nereye kadar uzandigiyla ilgili: Windows temizligi **dile**
+gomuyor, POSIX onu programciya birakiyor. Ikisi de tutarli, ama bir
+Windows ikilisini calistirmak isteyen bir cekirdek birincisini
+saglamak zorunda.
+
+### Cekirdek nereye kadar sorumlu
+
+TCMK'nin sagladigi sey geri sarmanin **kendisi**: zinciri yurumek,
+isleyicileri `EXCEPTION_UNWINDING` ile cagirmak, `fs:[0]`i hedefe
+cekmek ve yurutmeyi tasimak. Derleyicinin urettigi `_except_handler3`
+ve kapsam tablosu katmani **calisma zamanina** aittir, cekirdege degil
+-- gercek Windows'ta da oyle. `winunwind` o katmanin yerine gecen
+kayitlari elle kuruyor.
+
+Geri sarma dagitimdan **ayri** bir evre olarak duruyor ve bu ayrim
+zorunlu: geri sarma bir dagitimin *icinden* baslatiliyor
+(`__except`in yaptigi tam olarak bu) ve bittiginde dagitim kaldigi
+yerden surmeli. `ACTIVE` ile `UNWINDING` bu yuzden iki ayri bayrak.
+
+Bir incelik daha: geri sarma bitince dagitimin yurume durumu artik
+cozulmus kayitlari gosteriyor olurdu. O yuzden zincirin yeni basi
+dagiticiya da yaziliyor; yazilmasaydi, sahiplenen isleyici "devam et"
+yerine "sirakine gec" deseydi olu cercevelere dallanilirdi.
+
+### `RtlUnwind`in iki kipi
+
+```text
+  target_ip == 0  ->  yalnizca coz, cagri NORMAL donsun
+  target_ip != 0  ->  yurutme oraya gecsin, EAX = return_value
+```
+
+Ikisi de Windows'un sozlesmesi: ilki `__finally`nin tek basina
+kullanimi, ikincisi `__except`e atlama. Hedefli kipte yigin **oldugu
+gibi** kaliyor -- hedef kodun calisacagi cerceve zaten odur; degisen
+yalnizca komut isaretcisi.
+
+Sinavdaki inis saplamasi bu yuzden iki komut: `RtlUnwind` thunk'inin
+`int 0x2E` aninda birakip gittigi yigin, `ret 16`nin bekledigi
+yigindir.
+
+### Bilerek yapilmayanlar
+
+* **x86_64'te yok** ve bu TCMK'nin eksigi degil, Windows'un kendi
+  tercihi: 64-bit'te zincir yoktur, cozum tablo tabanlidir (`.pdata`).
+  Sessizce basarili donmek yanlis olurdu -- `__finally` bloklari
+  kosmadigi halde kosmus sayilirdi -- o yuzden cagri acikca
+  reddediliyor. Tablo tabanli cozum haritada ayri bir kalem.
+* **Ic ice geri sarma (`ExceptionCollidedUnwind`) yok.** Bir geri sarma
+  isleyicisi yeniden `RtlUnwind` cagirirsa reddediliyor. Windows o
+  durumu ayri bir donus degeriyle ele alir; burada once mekanizmanin
+  kendisi gerekiyordu.
+* **`ExceptionRecord` argumani yok sayiliyor.** Cekirdek geri sarmaya
+  **kendi** kaydini yaziyor, cunku bayraklarinda `EXCEPTION_UNWINDING`
+  kurulu olmasi sart ve cagiranin verdigi kaydi degistirmek onu okuyan
+  baska kodu bozardi.
+* **Geri sarma isleyicisinin donus degeri yok sayiliyor.** Windows'ta
+  yalnizca `ExceptionCollidedUnwind` anlamlidir ve o da yukaridaki
+  kalemle birlikte gelecek.
+* **`RtlUnwindEx` ve `RtlRestoreContext` yok.** Ikisi de 64-bit yuzun
+  parcasi.
 
 ## Alfa'nin bilinen sinirlari
 

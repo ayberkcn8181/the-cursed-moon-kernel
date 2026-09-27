@@ -308,6 +308,31 @@ extern "system" {
         arguments: *const usize,
     );
 
+    /// Istisna dagitiminin **ikinci yarisi**: zinciri `target_frame`e
+    /// kadar cozer.
+    ///
+    /// Yol boyunca her kayitin isleyicisi `EXCEPTION_UNWINDING` bayragiyla
+    /// yeniden cagrilir -- derleyicinin `__finally` icin urettigi kod
+    /// yalnizca o dalda calisir. Sonra `fs:[0]` hedefe cekilir.
+    ///
+    /// ```text
+    ///   target_ip == 0  ->  yalnizca coz, cagri NORMAL donsun
+    ///   target_ip != 0  ->  yurutme oraya gecsin, EAX = return_value
+    /// ```
+    ///
+    /// Windows'ta donus tipi `void`dur ve burada da oyle: cagri ya baska
+    /// bir yere doner ya da hicbir sey olmamis gibi. Reddedildiginde
+    /// (ornegin hedef zincirde yoksa) `GetLastError` sebebi soyler.
+    ///
+    /// Yalnizca i386: 64-bit Windows'ta cozum tablo tabanlidir
+    /// (`.pdata`) ve TCMK'de yoktur.
+    pub fn RtlUnwind(
+        target_frame: *mut c_void,
+        target_ip: *mut c_void,
+        exception_record: *mut crate::seh::ExceptionRecord,
+        return_value: usize,
+    );
+
     /// Yuklu bir modulun taniticisi. `NULL` verilirse surecin **kendi**
     /// imaj tabani doner.
     ///

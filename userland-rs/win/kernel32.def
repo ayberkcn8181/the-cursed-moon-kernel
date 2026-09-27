@@ -73,3 +73,4 @@ SetThreadPriority@8 @60
 GetThreadPriority@4 @61
 GetThreadContext@8 @62
 SetThreadContext@8 @63
+RtlUnwind@16 @64

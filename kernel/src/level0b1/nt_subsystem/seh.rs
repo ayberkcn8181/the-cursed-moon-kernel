@@ -72,6 +72,30 @@ pub const STATUS_DATATYPE_MISALIGNMENT: u32 = 0x8000_0002;
 /// `EXCEPTION_NONCONTINUABLE` -- isleyici "devam et" diyemez.
 pub const EXCEPTION_NONCONTINUABLE: u32 = 0x1;
 
+/// **Geri sarma** cagrisi: isleyici bu bayrakla ikinci kez cagriliyor.
+///
+/// Windows'ta bir isleyicinin iki isi vardir ve ayni fonksiyon ikisini
+/// de yapar; hangisinin istendigini yalnizca bu bayrak soyler:
+///
+/// ```text
+///   bayrak yok  ->  "bu istisnayi sahipleniyor musun?"   (__except filtresi)
+///   bayrak var  ->  "cerceven yikiliyor, temizligini yap" (__finally)
+/// ```
+///
+/// Derleyicinin `__finally` icin urettigi kod tam olarak bu dalda
+/// calisir. Bayrak olmadan `__try`/`__finally` diye bir sey olamaz --
+/// yikilan cercevelerin temizligi hic yapilmazdi.
+#[cfg(target_arch = "x86")]
+pub const EXCEPTION_UNWINDING: u32 = 0x2;
+
+/// Hedefsiz geri sarma: zincirin **tamami** cozuluyor.
+#[cfg(target_arch = "x86")]
+pub const EXCEPTION_EXIT_UNWIND: u32 = 0x4;
+
+/// Geri sarmanin kendi istisna kodu (`STATUS_UNWIND`).
+#[cfg(target_arch = "x86")]
+const STATUS_UNWIND: u32 = 0xC000_0027;
+
 // --- Isleyici donus degerleri -----------------------------------------
 //
 // Ikisi ayni anlami tasiyip farkli sayilar kullanir; bkz. modul basligi.
@@ -234,6 +258,47 @@ static VEH: [[AtomicUsize; MAX_VEH]; scheduler::MAX_TASKS] =
 static ACTIVE: [AtomicUsize; scheduler::MAX_TASKS] =
     [const { AtomicUsize::new(0) }; scheduler::MAX_TASKS];
 
+// --- Geri sarma (`RtlUnwind`) durumu ----------------------------------
+//
+// Dagitimdan **ayri** bir evre ve ayri tutulmasi sart: geri sarma bir
+// dagitimin *icinden* baslatilabiliyor (`__except`in yaptigi tam olarak
+// budur) ve bittiginde dagitim kaldigi yerden surmeli.
+
+/// Geri sarma suruyor mu (0 = hayir).
+static UNWINDING: [AtomicUsize; scheduler::MAX_TASKS] =
+    [const { AtomicUsize::new(0) }; scheduler::MAX_TASKS];
+/// Hedef kayit: yurume buraya gelince durur ve `fs:[0]` buna cekilir.
+static UNWIND_TARGET: [AtomicUsize; scheduler::MAX_TASKS] =
+    [const { AtomicUsize::new(0) }; scheduler::MAX_TASKS];
+/// Yurumede siradaki kayit.
+static UNWIND_NEXT: [AtomicUsize; scheduler::MAX_TASKS] =
+    [const { AtomicUsize::new(0) }; scheduler::MAX_TASKS];
+/// Geri sarma kayitlarinin kullanici yiginindaki tabani.
+#[cfg(target_arch = "x86")]
+static UNWIND_BASE: [AtomicUsize; scheduler::MAX_TASKS] =
+    [const { AtomicUsize::new(0) }; scheduler::MAX_TASKS];
+/// Geri sarmaya ozel `EXCEPTION_RECORD`in adresi.
+#[cfg(target_arch = "x86")]
+static UNWIND_RECORD_AT: [AtomicUsize; scheduler::MAX_TASKS] =
+    [const { AtomicUsize::new(0) }; scheduler::MAX_TASKS];
+/// Kac adim atildi (bozuk zincire karsi).
+static UNWIND_STEPS: [AtomicUsize; scheduler::MAX_TASKS] =
+    [const { AtomicUsize::new(0) }; scheduler::MAX_TASKS];
+
+/// Geri sarma bittiginde donulecek baglam.
+///
+/// `RtlUnwind`in sozlesmesi burada: yurutme **cagiranin** baglamiyla
+/// surer. Hedef adres verilmisse yalnizca `EIP` degisir, verilmemisse o
+/// bile degismez -- yani cagri siradan bir cagri gibi doner.
+#[cfg(target_arch = "x86")]
+static mut UNWIND_RESUME: [UserContext; scheduler::MAX_TASKS] =
+    [UserContext::ZERO; scheduler::MAX_TASKS];
+
+/// Kac geri sarma yapildi, kac isleyici `EXCEPTION_UNWINDING` ile
+/// cagrildi -- kabuktaki `faults` raporu.
+static UNWINDS: AtomicUsize = AtomicUsize::new(0);
+static FINALLY_CALLS: AtomicUsize = AtomicUsize::new(0);
+
 /// Ring 3'teki EXCEPTION_RECORD / CONTEXT adresleri.
 static RECORD_AT: [AtomicUsize; scheduler::MAX_TASKS] =
     [const { AtomicUsize::new(0) }; scheduler::MAX_TASKS];
@@ -290,6 +355,12 @@ pub fn reset(task: usize) {
     PHASE[task].store(PHASE_VECTORED, Ordering::Relaxed);
     FILTER[task].store(0, Ordering::Relaxed);
     FILTER_RAN[task].store(0, Ordering::Relaxed);
+    // Geri sarma durumu da yuvaya bagli: yarida kalmis bir yurume yeni
+    // imajin zincirine devam ediyormus gibi gorunurdu.
+    UNWINDING[task].store(0, Ordering::Relaxed);
+    UNWIND_TARGET[task].store(0, Ordering::Relaxed);
+    UNWIND_NEXT[task].store(0, Ordering::Relaxed);
+    UNWIND_STEPS[task].store(0, Ordering::Relaxed);
 }
 
 /// `SetUnhandledExceptionFilter`. Doner: **onceki** filtre (Windows'un
@@ -612,6 +683,253 @@ unsafe fn advance(task: usize, base: usize) -> Option<UserContext> {
     }
 }
 
+// --- Geri sarma: `RtlUnwind` ------------------------------------------
+
+/// `RtlUnwind(TargetFrame, TargetIp, ExceptionRecord, ReturnValue)`.
+///
+/// Dagitimin **ikinci yarisi** ve uzun sure eksik olan yari. Dagitim
+/// "bu istisnayi kim sahipleniyor" sorusunu cevapliyordu; geri sarma
+/// ondan sonra gelen soruyu cevapliyor: **aradaki cerceveler ne olacak?**
+///
+/// ```text
+///   __try  {  __try { patlar }  __finally { A }  }  __except { B }
+///
+///   1. dagitim   ic isleyici  -> "sahiplenmiyorum"
+///                dis isleyici -> "sahipleniyorum" -> RtlUnwind
+///   2. GERI SARMA ic isleyici  -> EXCEPTION_UNWINDING ile CAGRILIR -> A kosar
+///   3. hedef      fs:[0] dis kayda cekilir, yurutme B'ye gecer
+/// ```
+///
+/// Ikinci satir olmadan `A` hic kosmaz. Derleyicinin `__finally` icin
+/// urettigi kod tam olarak orada durur, yani TCMK bu satir olmadan
+/// `__try`/`__finally` iceren **hicbir** Windows ikilisini dogru
+/// calistiramazdi -- ve o yapi C++ yikicilarindan kaynak temizligine
+/// kadar her yerde.
+///
+/// Hedef adres (`TargetIp`) sifirsa yalnizca geri sarma yapilir ve cagri
+/// **normal doner**; sifirdan farkliysa yurutme oraya gecer. Ikisi de
+/// Windows'un sozlesmesi: ilki `__finally`nin tek basina kullanimi,
+/// ikincisi `__except`e atlama.
+///
+/// Doner: `true` ise cerceve guncellendi. `false` ise istek reddedildi
+/// ve cagirana **hicbir sey yapilmadan** donulur.
+///
+/// # Safety
+/// `frame` Ring 3'ten gelen gecerli bir syscall cercevesi olmalidir.
+#[cfg(target_arch = "x86")]
+pub unsafe fn unwind(
+    frame: &mut crate::arch::cpu::regs::SyscallFrame,
+    from_interrupt: bool,
+    target_frame: usize,
+    target_ip: usize,
+    return_value: usize,
+) -> bool {
+    let task = scheduler::current_id();
+    if task >= scheduler::MAX_TASKS {
+        return false;
+    }
+    let teb_at = teb::address(task);
+    if teb_at == 0 {
+        return false;
+    }
+    // Ic ice geri sarma (`ExceptionCollidedUnwind`) desteklenmiyor: bir
+    // geri sarma isleyicisi yeniden `RtlUnwind` cagirirsa reddediliyor.
+    if UNWINDING[task].load(Ordering::Relaxed) != 0 {
+        return false;
+    }
+
+    let head = chain_head(teb_at);
+
+    // Hedef gercekten zincirde mi? Olmayan bir kayda "cekmek", `fs:[0]`i
+    // rastgele bir adrese yazmak olurdu -- bir sonraki istisna cop veriye
+    // dallanirdi. Windows bu durumda `STATUS_BAD_STACK` atar; TCMK daha
+    // sade davranip istegi reddediyor.
+    if target_frame != 0 && !chain_contains(head, target_frame) {
+        crate::println!(
+            "[LEVEL-0b1] SEH: RtlUnwind hedefi zincirde yok (0x{:08x}) -- reddedildi.",
+            target_frame
+        );
+        return false;
+    }
+
+    let context = frame.user_context_via(from_interrupt);
+
+    // Geri sarma kayitlari **mevcut yiginin altina** kuruluyor. Dagitim
+    // sirasinda cagrildiginda bu, dagitimin kendi kayitlarinin da
+    // altidir -- yani ikisi birbirini ezmiyor.
+    let sp = context.stack_pointer();
+    if sp < sizes::FRAME {
+        return false;
+    }
+    let base = (sp - sizes::FRAME) & !0xF;
+    if !writable(base, sizes::FRAME) {
+        return false;
+    }
+
+    let record_at = base;
+    core::ptr::write_bytes(record_at as *mut u8, 0, sizes::RECORD);
+    let flags = if target_frame == 0 {
+        EXCEPTION_UNWINDING | EXCEPTION_EXIT_UNWIND
+    } else {
+        EXCEPTION_UNWINDING
+    };
+    ((record_at + rec::CODE) as *mut u32).write_unaligned(STATUS_UNWIND);
+    ((record_at + rec::FLAGS) as *mut u32).write_unaligned(flags);
+    ((record_at + rec::ADDRESS) as *mut usize).write_unaligned(context.instruction_pointer());
+    ((record_at + rec::PARAM_COUNT) as *mut u32).write_unaligned(0);
+
+    // Donus baglami: cagiranin baglami. Hedef verildiyse yalnizca komut
+    // isaretcisi degisiyor -- yigin oldugu gibi kaliyor, cunku hedef
+    // kodun calisacagi cerceve zaten odur.
+    let mut resume = context;
+    if target_ip != 0 {
+        resume.eip = target_ip as u32;
+    }
+    resume.eax = return_value as u32;
+
+    (core::ptr::addr_of_mut!(UNWIND_RESUME) as *mut UserContext)
+        .add(task)
+        .write(resume);
+
+    UNWIND_TARGET[task].store(target_frame, Ordering::Relaxed);
+    UNWIND_NEXT[task].store(head, Ordering::Relaxed);
+    UNWIND_BASE[task].store(base, Ordering::Relaxed);
+    UNWIND_RECORD_AT[task].store(record_at, Ordering::Relaxed);
+    UNWIND_STEPS[task].store(0, Ordering::Relaxed);
+    UNWINDING[task].store(1, Ordering::Relaxed);
+    UNWINDS.fetch_add(1, Ordering::Relaxed);
+
+    let next = match unwind_step(task) {
+        Some(handler_frame) => handler_frame,
+        None => unwind_finish(task),
+    };
+    frame.set_user_context_via(from_interrupt, &next);
+    true
+}
+
+/// x86_64'te zincir yok, dolayisiyla geri sarilacak bir sey de yok.
+///
+/// Sessizce basarili donmek yanlis olurdu: `__finally` bloklari
+/// kosmadigi halde kosmus sayilirdi. 64-bit Windows'un cozumu tablo
+/// tabanlidir (`.pdata`) ve TCMK'de yok -- bkz. README.
+#[cfg(target_arch = "x86_64")]
+pub unsafe fn unwind(
+    _frame: &mut crate::arch::cpu::regs::SyscallFrame,
+    _from_interrupt: bool,
+    _target_frame: usize,
+    _target_ip: usize,
+    _return_value: usize,
+) -> bool {
+    false
+}
+
+/// Hedef kayit zincirde duruyor mu?
+#[cfg(target_arch = "x86")]
+unsafe fn chain_contains(head: usize, target: usize) -> bool {
+    let word = core::mem::size_of::<usize>();
+    let mut record = head;
+    for _ in 0..MAX_CHAIN {
+        if record == target {
+            return true;
+        }
+        if record == usize::MAX || record == 0 || !writable(record, word * 2) {
+            return false;
+        }
+        record = (record as *const usize).read_unaligned();
+    }
+    false
+}
+
+/// Geri sarmada siradaki isleyiciyi secer.
+///
+/// Dagitimdaki `advance` ile ayni desen, iki farkla: kayitlar **hedefe
+/// kadar** yurunuyor ve isleyiciye verilen kayitta `EXCEPTION_UNWINDING`
+/// kurulu.
+#[cfg(target_arch = "x86")]
+unsafe fn unwind_step(task: usize) -> Option<UserContext> {
+    let base = UNWIND_BASE[task].load(Ordering::Relaxed);
+    let record_at = UNWIND_RECORD_AT[task].load(Ordering::Relaxed);
+    let target = UNWIND_TARGET[task].load(Ordering::Relaxed);
+    let word = core::mem::size_of::<usize>();
+
+    loop {
+        let record = UNWIND_NEXT[task].load(Ordering::Relaxed);
+        if record == target || record == usize::MAX || record == 0 {
+            return None;
+        }
+        let steps = UNWIND_STEPS[task].fetch_add(1, Ordering::Relaxed);
+        if steps >= MAX_CHAIN {
+            return None;
+        }
+        if !writable(record, word * 2) {
+            return None;
+        }
+        let next = (record as *const usize).read_unaligned();
+        let handler = ((record + word) as *const usize).read_unaligned();
+        UNWIND_NEXT[task].store(next, Ordering::Relaxed);
+        if handler == 0 {
+            continue;
+        }
+        FINALLY_CALLS.fetch_add(1, Ordering::Relaxed);
+        // Imza dagitimdakiyle ayni. `ContextRecord` geri sarmada
+        // anlamsiz oldugu icin sifir veriliyor: Windows da oraya
+        // guvenilecek bir kayit koymaz.
+        return build_frame(task, base, handler, &[record_at, record, 0, 0]);
+    }
+}
+
+/// Yurume bitti: zincir hedefe cekilir ve donus baglami hazirlanir.
+#[cfg(target_arch = "x86")]
+unsafe fn unwind_finish(task: usize) -> UserContext {
+    let target = UNWIND_TARGET[task].load(Ordering::Relaxed);
+    let teb_at = teb::address(task);
+
+    // `fs:[0]` hedefe cekiliyor. Hedefsiz geri sarmada zincir tumden
+    // bosaltilir -- ve sonu `0` degil `-1`dir: sifir "gecerli bir kayit"
+    // gibi gorunur ve zinciri yuruyen kod oraya dallanirdi.
+    if teb_at != 0 {
+        let head = if target == 0 { usize::MAX } else { target };
+        (teb_at as *mut usize).write_unaligned(head);
+        // Dagitim suruyorsa onun yurume durumu artik eski zinciri
+        // gosteriyor. Yeni basa cekilmezse, sahiplenen isleyici "devam
+        // et" demeyip "sirakine gec" derse cozulmus kayitlara
+        // dallanilirdi.
+        NEXT_RECORD[task].store(head, Ordering::Relaxed);
+    }
+
+    UNWINDING[task].store(0, Ordering::Relaxed);
+    (core::ptr::addr_of!(UNWIND_RESUME) as *const UserContext)
+        .add(task)
+        .read()
+}
+
+/// Bir geri sarma isleyicisi dondu: siradakine gec ya da bitir.
+///
+/// Donus degeri **yok sayiliyor**. Windows'ta yalnizca
+/// `ExceptionCollidedUnwind` anlamlidir ve o da ic ice geri sarmayla
+/// ilgilidir; TCMK onu zaten bastan reddediyor (bkz. `unwind`).
+#[cfg(target_arch = "x86")]
+unsafe fn unwind_continue(
+    frame: &mut crate::arch::cpu::regs::SyscallFrame,
+    from_interrupt: bool,
+    task: usize,
+) -> bool {
+    let next = match unwind_step(task) {
+        Some(handler_frame) => handler_frame,
+        None => unwind_finish(task),
+    };
+    frame.set_user_context_via(from_interrupt, &next);
+    true
+}
+
+pub fn unwinds() -> usize {
+    UNWINDS.load(Ordering::Relaxed)
+}
+
+pub fn finally_calls() -> usize {
+    FINALLY_CALLS.load(Ordering::Relaxed)
+}
+
 /// Zincir bitti, kimse sahiplenmedi: son savunma hatti.
 ///
 /// Windows'ta bu noktada `UnhandledExceptionFilter` calisir. Programlar
@@ -727,7 +1045,21 @@ pub unsafe fn continue_dispatch(
     disposition: usize,
 ) -> bool {
     let task = scheduler::current_id();
-    if task >= scheduler::MAX_TASKS || ACTIVE[task].load(Ordering::Relaxed) == 0 {
+    if task >= scheduler::MAX_TASKS {
+        return false;
+    }
+
+    // Geri sarma once bakilir ve `ACTIVE` denetiminden **once**: geri
+    // sarma bir dagitim olmadan da baslatilabiliyor (`RtlUnwind`
+    // siradan koddan da cagrilabilir), ve bir dagitimin icinden
+    // baslatildiginda da o dagitim hala acik duruyor.
+    #[cfg(target_arch = "x86")]
+    if UNWINDING[task].load(Ordering::Relaxed) != 0 {
+        let _ = disposition;
+        return unwind_continue(frame, from_interrupt, task);
+    }
+
+    if ACTIVE[task].load(Ordering::Relaxed) == 0 {
         return false;
     }
 

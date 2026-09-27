@@ -124,6 +124,10 @@ path = "src/win/death.rs"
 name = "winctx"
 path = "src/win/context.rs"
 
+[[bin]]
+name = "winunwind"
+path = "src/win/unwind.rs"
+
 [profile.dev]
 panic = "abort"
 opt-level = 1

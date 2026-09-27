@@ -446,6 +446,17 @@ static KERNEL32: &[Export] = &[
         service: nt::NT_SET_THREAD_CONTEXT,
         stack_bytes: 8,
     },
+    // Istisna dagitiminin ikinci yarisi. Gercek Windows'ta `NTDLL`
+    // ihrac eder ve `KERNEL32` onu yonlendirir; TCMK yonlendirme
+    // zinciri kurmadigi icin dogrudan burada duruyor (bkz. yukarida
+    // `WaitOnAddress` ucusu icin yazilan ayni not).
+    Export {
+        name: "RtlUnwind",
+        ordinal: 64,
+        service: nt::NT_RTL_UNWIND,
+        // TargetFrame, TargetIp, ExceptionRecord, ReturnValue
+        stack_bytes: 16,
+    },
     Export {
         name: "GetExitCodeThread",
         ordinal: 50,

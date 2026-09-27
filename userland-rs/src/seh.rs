@@ -50,6 +50,27 @@ pub const STATUS_PRIVILEGED_INSTRUCTION: u32 = 0xC000_0096;
 /// `EXCEPTION_NONCONTINUABLE`: isleyici "devam et" diyemez.
 pub const EXCEPTION_NONCONTINUABLE: u32 = 0x1;
 
+/// **Geri sarma** cagrisi: isleyici bu bayrakla ikinci kez cagriliyor.
+///
+/// Windows'ta bir isleyicinin iki isi vardir ve ayni fonksiyon ikisini
+/// de yapar; hangisinin istendigini yalnizca bu bayrak soyler:
+///
+/// ```text
+///   bayrak yok  ->  "bu istisnayi sahipleniyor musun?"   (__except filtresi)
+///   bayrak var  ->  "cerceven yikiliyor, temizligini yap" (__finally)
+/// ```
+pub const EXCEPTION_UNWINDING: u32 = 0x2;
+/// Hedefsiz geri sarma: zincirin tamami cozuluyor.
+pub const EXCEPTION_EXIT_UNWIND: u32 = 0x4;
+
+/// Isleyici geri sarma icin mi cagrildi?
+///
+/// # Safety
+/// `record` cekirdegin verdigi gecerli bir kayit olmalidir.
+pub unsafe fn unwinding(record: *const ExceptionRecord) -> bool {
+    (*record).flags & EXCEPTION_UNWINDING != 0
+}
+
 /// VEH isleyicisinin aldigi tek arguman.
 #[repr(C)]
 pub struct ExceptionPointers {

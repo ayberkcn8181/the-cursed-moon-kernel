@@ -92,6 +92,8 @@ pub const NT_GET_THREAD_PRIORITY: u32 = 0x3044;
 pub const NT_GET_THREAD_CONTEXT: u32 = 0x3045;
 /// `SetThreadContext(hThread, lpContext)` -> BOOL.
 pub const NT_SET_THREAD_CONTEXT: u32 = 0x3046;
+/// `RtlUnwind(TargetFrame, TargetIp, ExceptionRecord, ReturnValue)`.
+pub const NT_RTL_UNWIND: u32 = 0x3047;
 pub const NT_SLEEP_MS: u32 = 0x3001;
 pub const NT_GET_TICK_COUNT: u32 = 0x3002;
 pub const NT_WIN32_CLOSE_HANDLE: u32 = 0x3003;
@@ -2289,6 +2291,37 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
                     THREAD_PRIORITY_ERROR_RETURN as usize
                 }
             }
+        }
+
+        // RtlUnwind(TargetFrame, TargetIp, ExceptionRecord, ReturnValue)
+        //
+        // Istisna dagitiminin **ikinci yarisi**. Dagitim "bu istisnayi
+        // kim sahipleniyor" sorusunu cevapliyor; geri sarma ondan sonra
+        // geleni: aradaki cerceveler ne olacak? Derleyicinin
+        // `__finally` icin urettigi kod yalnizca bu yolda calisir
+        // (bkz. `seh::unwind`).
+        //
+        // Donus degeri **yok** -- Windows'ta da `void`. Cagri ya
+        // baglami degistirip baska bir yere doner, ya da reddedilip
+        // siradan bir cagri gibi. Ikinci durumda cagiran hicbir sey
+        // olmamis gibi devam eder; `GetLastError` sebebi soyler.
+        NT_RTL_UNWIND => {
+            let target_frame = arg_ptr(args, 0).unwrap_or(0);
+            let target_ip = arg_ptr(args, 1).unwrap_or(0);
+            // `ExceptionRecord` yok sayiliyor: cekirdek geri sarmaya
+            // **kendi** kaydini yaziyor, cunku bayraklarinda
+            // `EXCEPTION_UNWINDING` kurulu olmasi sart ve cagiranin
+            // verdigi kaydi degistirmek onu okuyan baska kodu bozardi.
+            let return_value = arg_ptr(args, 3).unwrap_or(0);
+
+            if unsafe {
+                seh::unwind(frame, from_interrupt, target_frame, target_ip, return_value)
+            } {
+                // Baglam degisti; donus degeri yazilmamali.
+                return;
+            }
+            set_last_error(ERROR_INVALID_PARAMETER);
+            WIN32_FALSE
         }
 
         // GetThreadContext(hThread, lpContext) -> BOOL
