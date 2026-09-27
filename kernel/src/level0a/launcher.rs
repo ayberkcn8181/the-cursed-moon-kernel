@@ -147,6 +147,7 @@ static KNOWN_APPS: &[(&str, &str, &str)] = &[
     ("swapx", "/bin/swapx", "swapx"),
     ("jobs", "/bin/jobs", "jobs"),
     ("sigfault", "/bin/sigfault", "sigfault"),
+    ("altstack", "/bin/altstack", "altstack"),
     // Windows ikilisi: yol .exe ile biter, cekirdek bicimi magic'ten
     // anlar (bkz. vfs::format) ve PE yukleyicisine yonlendirir. Yol iki
     // mimaride de aynidir; VFS'te duran ikilinin PE32 mi PE32+ mi oldugu

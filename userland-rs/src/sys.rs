@@ -75,6 +75,7 @@ mod i386_numbers {
     pub const SYS_PAUSE: usize = 29;
     /// `rt_sigsuspend` -- 32 bitlik maskeye dogrudan oturur.
     pub const SYS_SIGSUSPEND: usize = 179;
+    pub const SYS_SIGALTSTACK: usize = 186;
     pub const SYS_MMAP: usize = 192;
     pub const SYS_MUNMAP: usize = 91;
     pub const SYS_GETPRIORITY: usize = 96;
@@ -133,6 +134,7 @@ mod x86_64_numbers {
     pub const SYS_ALARM: usize = 37;
     pub const SYS_PAUSE: usize = 34;
     pub const SYS_SIGSUSPEND: usize = 130;
+    pub const SYS_SIGALTSTACK: usize = 131;
     pub const SYS_MMAP: usize = 9;
     pub const SYS_MUNMAP: usize = 11;
     pub const SYS_GETPRIORITY: usize = 140;

@@ -162,6 +162,9 @@ static JOBS_ELF: &[u8] = include_bytes!("../../userland/jobs.elf");
 /// Sayfa hatasini yakalayip **duzeltmek**: SA_SIGINFO + ucontext_t.
 #[cfg(target_arch = "x86")]
 static SIGFAULT_ELF: &[u8] = include_bytes!("../../userland/sigfault.elf");
+/// Yigin tasmasini yakalamak: koruma sayfasi + sigaltstack.
+#[cfg(target_arch = "x86")]
+static ALTSTACK_ELF: &[u8] = include_bytes!("../../userland/altstack.elf");
 /// Sayilan aski: CREATE_SUSPENDED, SuspendThread/ResumeThread.
 #[cfg(target_arch = "x86")]
 static WINSUSP_EXE: &[u8] = include_bytes!("../../userland/winsusp.exe");
@@ -285,6 +288,8 @@ static SWAPX64: &[u8] = include_bytes!("../../userland/swapx.elf64");
 static JOBS64: &[u8] = include_bytes!("../../userland/jobs.elf64");
 #[cfg(target_arch = "x86_64")]
 static SIGFAULT64: &[u8] = include_bytes!("../../userland/sigfault.elf64");
+#[cfg(target_arch = "x86_64")]
+static ALTSTACK64: &[u8] = include_bytes!("../../userland/altstack.elf64");
 
 /// **Windows (PE32+) uygulamalari** -- i386'dakilerle ayni kaynak, ayni
 /// ithal kutuphaneleri; degisen yalnizca hedef. Taban 0x140000000
@@ -368,6 +373,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/swapx", SWAPX_ELF),
     ("/bin/jobs", JOBS_ELF),
     ("/bin/sigfault", SIGFAULT_ELF),
+    ("/bin/altstack", ALTSTACK_ELF),
     ("/bin/winclock.exe", WINCLOCK_EXE),
     ("/bin/winpad.exe", WINPAD_EXE),
     ("/bin/winfiles.exe", WINFILES_EXE),
@@ -426,6 +432,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/swapx", SWAPX64),
     ("/bin/jobs", JOBS64),
     ("/bin/sigfault", SIGFAULT64),
+    ("/bin/altstack", ALTSTACK64),
     ("/bin/winclock.exe", WINCLOCK_EXE64),
     ("/bin/winpad.exe", WINPAD_EXE64),
     ("/bin/winfiles.exe", WINFILES_EXE64),

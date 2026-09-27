@@ -27,6 +27,18 @@ use crate::level0b1::binary_loader::{elf64, pe64};
 /// daraltmak demekti.
 const USER_STACK_SIZE: usize = 16 * 1024;
 
+/// Yigin ile program break arasinda birakilan **koruma sayfasi**.
+///
+/// Tek bir sayfa ve tek isi var: yigin tasmasini sessiz bir bozulmadan
+/// gorunur bir hataya cevirmek. Olmadigi surece yigin asagi buyudugunde
+/// brk bolgesine girip programin kendi verisini eziyordu -- hicbir hata
+/// uretmeden. Tanisi olmayan bir bozulma, coken bir surecten cok daha
+/// kotudur.
+///
+/// Sayfa **eslenmis** kalir, yalnizca Ring 3'e kapatilir (bkz.
+/// `mmu::guard_user_page`).
+const STACK_GUARD_SIZE: usize = 4096;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryFormat {
     #[cfg(target_arch = "x86")]
@@ -595,8 +607,10 @@ unsafe fn enter_ring3(
     program: &str,
     args: &str,
 ) -> Result<(), SpawnError> {
-    // Kullanici yigini: imajin bittigi yerden sonra, sayfa hizali.
-    let stack_bottom = (prepared.end + 0xFFF) & !0xFFF;
+    // Kullanici yigini: imajin bittigi yerden sonra, sayfa hizali. Arada
+    // bir **koruma sayfasi** var (bkz. `STACK_GUARD_SIZE`).
+    let guard = (prepared.end + 0xFFF) & !0xFFF;
+    let stack_bottom = guard + STACK_GUARD_SIZE;
     let stack_top = stack_bottom + USER_STACK_SIZE;
     // Sinir, gercekten eslenmis pencere: kendi adres uzayinda 512 KiB,
     // paylasimli modelde (x86_64) tum bolge.
@@ -611,8 +625,20 @@ unsafe fn enter_ring3(
         None => mmu::protect_user_range(mmu::USER_MEM_START, stack_top - mmu::USER_MEM_START),
     }
 
-    // Program break: imajin bittigi yerden yigin tabanina kadar buyuyebilir.
-    kernel_api::set_program_break(prepared.end, stack_bottom);
+    // Koruma sayfasi, izinler verildikten **sonra** kapatiliyor: sira
+    // ters olsaydi `protect_user_range` onu yeniden acardi.
+    if !mmu::guard_user_page(guard) {
+        crate::println!(
+            "[LEVEL-0b1] uyari: yigin koruma sayfasi kurulamadi (0x{:08x}).",
+            guard
+        );
+    }
+
+    // Program break: imajin bittigi yerden **koruma sayfasina** kadar
+    // buyuyebilir. Tavanin yigin tabani degil de koruma sayfasi olmasi
+    // sart: aksi halde brk sayfayi asip yiginla bitisirdi ve koruma
+    // anlamsizlasirdi.
+    kernel_api::set_program_break(prepared.end, guard);
 
     // Yeni imaj eski sinyal isleyicilerini devralmaz: kayitli adresler
     // artik var olmayan bir programa aittir, calistirilirsa surec kendi

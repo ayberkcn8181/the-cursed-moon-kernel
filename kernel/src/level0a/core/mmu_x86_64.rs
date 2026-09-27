@@ -212,6 +212,38 @@ pub unsafe fn protect_user_range(start: usize, len: usize) {
     flush_tlb();
 }
 
+/// Bir sayfayi Ring 3'e **kapatir** -- koruma sayfasi.
+///
+/// Sayfa eslenmis kalir; yalnizca User biti dusurulur. Yani cekirdek ona
+/// hala erisebilir, Ring 3 dokununca sayfa hatasi olusur.
+///
+/// Yigin ile program break arasina bir tane konuyor (bkz.
+/// `process::enter_ring3`) ve sebebi somut: koruma sayfasi olmadan bir
+/// yigin tasmasi **hicbir hata uretmez**. Yigin asagi buyurur, brk
+/// bolgesine girer ve program kendi verisini sessizce bozar. Sessiz
+/// bozulma, coken bir surecten cok daha kotudur -- tanisi yoktur.
+///
+/// Windows ayni isi ayni yolla yapar ve adi da odur: yigin cercevesinin
+/// altindaki `PAGE_GUARD` sayfasi. Ayrildiklari yer sonrasi -- Windows
+/// hatayi yakalayip yigini **buyutur**, POSIX ise `SIGSEGV` gonderir ve
+/// isleyiciye ayri bir yigin (`sigaltstack`) verir.
+///
+/// Doner: sayfa bulundu ve kapatildi mi.
+///
+/// # Safety
+/// Yalnizca kullanici bolgesindeki bir adres icin cagrilmalidir ve
+/// cagrildigi anda o adres uzayi etkin olmalidir.
+pub unsafe fn guard_user_page(addr: usize) -> bool {
+    match user_pte((read_cr3() & ADDR_MASK) as usize, addr) {
+        Some(entry) => {
+            entry.write(entry.read() & !PTE_USER);
+            flush_tlb();
+            true
+        }
+        None => false,
+    }
+}
+
 unsafe fn flush_tlb() {
     write_cr3(read_cr3());
 }

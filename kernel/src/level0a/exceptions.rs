@@ -120,7 +120,30 @@ pub unsafe fn dispatch(frame: &mut crate::arch::cpu::regs::ExceptionFrame, fault
     if vector == 14 {
         const PRESENT: usize = 1 << 0;
         const WRITE: usize = 1 << 1;
-        let recovered = if error_code & PRESENT == 0 {
+        const USER: usize = 1 << 2;
+
+        // **Koruma sayfasi kurtarilamaz.**
+        //
+        // Ring 3'ten gelen bir erisim, Ring 3'e **kapali** bir sayfaya
+        // ise ortada duzeltilecek bir sey yok: o sayfa zaten
+        // dokunulmasin diye kapatilmis. Bu denetim olmadan yol sessizce
+        // yanlis calisiyordu ve sebebi ince:
+        //
+        //   `fork`tan sonra yigin koruma sayfasi da copy-on-write olur
+        //   (bayraklar korunur, User biti kapali kalir). Cocukta yigin
+        //   tastiginda olusan hata "present + write" gorunur ve asagidaki
+        //   COW yolu onu **kurtarir**: sayfayi kopyalar, yazilabilir ve
+        //   Ring 3'e acik yapar. Yani koruma, ilk dokunusta kendiliginden
+        //   deliniyordu.
+        //
+        // Olcum bunu boyle buldu: cocuk surecte tasma koruma sayfasinda
+        // durmuyor, .bss'i ezerek ilerliyordu.
+        let guarded = error_code & USER != 0
+            && !crate::level0a::core::mmu::is_user_accessible(fault_addr);
+
+        let recovered = if guarded {
+            false
+        } else if error_code & PRESENT == 0 {
             crate::level0a::core::mmu::handle_demand_fault(fault_addr)
         } else if error_code & WRITE != 0 {
             crate::level0a::core::mmu::handle_cow_fault(fault_addr)

@@ -26,9 +26,9 @@ masaustu sunuyor.
 |---|---|
 | Mimariler | i386 (Multiboot1, `int 0x80`) · x86_64 (Multiboot2, `syscall`) |
 | Ikili bicimleri | ELF32/ELF64 · PE32/PE32+ (ithal tablosu cozulur) |
-| POSIX cagrilari | 71 (+ ELF yardimci vektoru, dosya destekli `mmap`, `clone`, `futex`, `SIGPIPE`, `EINTR`/`SA_RESTART`, is denetimi, `SA_SIGINFO`) |
+| POSIX cagrilari | 72 (+ ELF yardimci vektoru, dosya destekli `mmap`, `clone`, `futex`, `SIGPIPE`, `EINTR`/`SA_RESTART`, is denetimi, `SA_SIGINFO`, `sigaltstack`) |
 | NT/Win32 cagrilari | 86 (`KERNEL32.dll` 64 ihracat + `TCMKGUI.dll`) |
-| Ring 3 uygulamalari | 38 ELF + 16 PE |
+| Ring 3 uygulamalari | 39 ELF + 16 PE |
 | Kalici depolama | ATA PIO + MBR + TCMKFS (yazilabilir, iki mimari) + takas |
 | Kod | ~30 bin satir cekirdek + ~17 bin satir userland |
 
@@ -60,7 +60,7 @@ artik POSIX yuzunde de **yakalanip duzeltilebiliyor**
 gucte cevap veriyor.
 
 Her yetenek QEMU'da **olculerek** dogrulanmistir: `probe` (16 sinav),
-`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (5), `bigfile` (6), `heap` (5), `swapx` (6), `jobs` (6), `winsusp` (6), `winctx` (7), `sigfault` (7), `winunwind` (7), `bequest`
+`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (5), `bigfile` (6), `heap` (5), `swapx` (6), `jobs` (6), `winsusp` (6), `winctx` (7), `sigfault` (7), `winunwind` (7), `altstack` (7), `bequest`
 (6), `nested` (4), `winenv` (4) gibi programlar sonucu hem ekrana hem
 seri gunluge yaziyor. Olcumler yol boyunca gercek hatalar buldu -- dolan
 VFS tablosu, `CreateFileA`'nin cevrilmeyen Windows yollari, `GDT`
@@ -6688,10 +6688,10 @@ pes edip cikiyor. Ikisi birlikte, bozuk bir cekirdekte sinavin
   Win32 yuzunde de ayni kural var.
 * **Segment secicileri sabit.** Ring 3 degerleri yaziliyor; bir program
   kendi CS/SS'ini bu kapidan degistirememeli.
-* **Ayri sinyal yigini (`sigaltstack`) yok.** Cerceve her zaman kesilen
-  yiginin ustune kuruluyor. Yigin tasmasini (`SIGSEGV` on the stack)
-  yakalamak bu yuzden mumkun degil -- cerceveyi yazacak yer kalmaz ve
-  teslim olumcul yola duser.
+* ~~**Ayri sinyal yigini (`sigaltstack`) yok.**~~ Geldi -- bkz.
+  [Yigin tasmasini yakalamak](#yigin-tasmasini-yakalamak-koruma-sayfasi--ayri-yigin).
+  Artik hem koruma sayfasi hem `SA_ONSTACK` var, yani yigin tasmasi
+  gorunur bir hata uretiyor ve yakalanabiliyor.
 * **`si_code` kumesi dar.** `SI_USER`, `SI_KERNEL`, `SEGV_MAPERR`,
   `SEGV_ACCERR`, `FPE_INTDIV`, `ILL_ILLOPN` var; `BUS_*`, `TRAP_*` ve
   `CLD_*` yok (son kume icin once `SIGCHLD` gerekir, o da yok).
@@ -6820,6 +6820,135 @@ yigindir.
   kalemle birlikte gelecek.
 * **`RtlUnwindEx` ve `RtlRestoreContext` yok.** Ikisi de 64-bit yuzun
   parcasi.
+
+## Yigin tasmasini yakalamak: koruma sayfasi + ayri yigin
+
+Bir onceki bati POSIX yuzunun bir sayfa hatasini yakalayip
+duzeltebilmesini getirdi. Geriye o ailenin **en zor** uyesi kalmisti:
+yigin tasmasi. Zor olmasinin sebebi tuhaf bir kisir dongu --
+
+```text
+  yigin tasti  ->  SIGSEGV teslim edilecek
+  teslim icin  ->  cekirdek kullanici YIGININA cerceve kurmali
+  ama yigin    ->  tasmis; yazacak yer yok
+  sonuc        ->  sinyal teslim edilemez, surec tanisiz oler
+```
+
+POSIX'in cozumu `sigaltstack`: isleyiciye **ayri** bir yigin ver.
+
+```
+[altstack] A kuruldu:        gecti (kuruldu ve geri okunan ayni)
+[altstack] B ustunde kostu:  gecti (isleyicinin yigini ayri bolgede)
+[altstack] C SS_ONSTACK:     gecti (isleyici icinde SS_ONSTACK gorundu)
+[altstack] D YIGIN TASMASI:  gecti (tasma yakalandi, isleyici rapor edebildi)
+[altstack] E koruma sayfasi: gecti (tasma yiginin hemen altinda durdu)
+[altstack] F bayraksiz:      gecti (bayraksiz isleyici normal yiginda kostu)
+[altstack] G dar yigin:      gecti (reddedildi ve kurulu yigin bozulmadi)
+```
+
+![altstack](docs/screenshot-altstack.png)
+
+### Once bir hata gorunur olmaliydi
+
+TCMK'de yigin tasmasi bu batiya kadar **hicbir hata uretmiyordu**.
+Yigin asagi buyuyup program break bolgesine giriyor ve programin kendi
+verisini sessizce eziyordu. Sessiz bozulma, coken bir surecten cok daha
+kotudur: tanisi yoktur.
+
+Cozum bir **koruma sayfasi**: yigin ile brk arasinda, eslenmis ama Ring
+3'e kapali tek bir sayfa. Sayfa eslenmis kalir, yalnizca `User` biti
+duser; Ring 3 dokununca sayfa hatasi olusur.
+
+```text
+  ONCE   [ imaj ][ brk -> ][ <- yigin ]        tasma sessizce brk'ye girer
+  SONRA  [ imaj ][ brk -> ][ K ][ <- yigin ]   tasma K'de durur
+```
+
+Windows ayni isi ayni yolla yapar ve adi da odur (`PAGE_GUARD`).
+Ayrildiklari yer sonrasi:
+
+```text
+  Windows  koruma sayfasi -> yigin OTOMATIK buyur
+  POSIX    koruma sayfasi -> SIGSEGV, isleyici ayri yiginda kosar
+```
+
+Windows'unki daha rahat, POSIX'inki daha acik: birinde program tasmayi
+fark etmez bile, otekinde tasmayi **gorur** ve ne yapacagina kendisi
+karar verir.
+
+### Isleyici geri donemez
+
+Tasmayi yakalayan bir isleyici kaldigi yerden devam **edemez**:
+donusteki ilk komut ayni yigin isaretcisiyle yine tasar. Gercek
+programlar bu yuzden orada gunluge yazip cikar. Yakalamanin degeri
+kurtarmak degil, **raporlamak** -- ve raporlayabilmek icin once
+calisabilmesi gerekiyor.
+
+### Olcumun buldugu uc hata
+
+Bu bati uc ayri hata cikardi ve ucu de yalnizca olcumle gorunurdu.
+
+**1. `ucontext_t` ayri yigini kaydediyordu.** Cerceve tabani once
+dogrudan `context.sp`ye yaziliyordu; `ucontext_t` ayni baglamdan
+dolduruldugu icin `uc_mcontext.esp` **ayri yigini** gosteriyordu.
+Isleyici donunce cekirdek o degeri geri yukluyor, yani surec ayri
+yiginin ustunde devam ediyordu -- kesilen yigin kayboluyordu. Olcum
+bunu, `SA_ONSTACK`**siz** bir isleyicinin de ayri yiginda gorunmesiyle
+yakaladi: ondan onceki teslim, yigin isaretcisini oraya kaydirmisti.
+Taban artik ayri bir arguman olarak geciyor ve `context` kesilen
+baglami tasimaya devam ediyor.
+
+**2. Koruma sayfasi `fork`tan sonra kendiliginden deliniyordu.**
+Copy-on-write sayfa bayraklarini koruyor (yani `User` biti kapali
+kaliyor), ama cocukta tasma olustugunda hata "present + write" gorunuyor
+ve kurtarma yolu onu **COW hatasi sanip duzeltiyordu**: sayfayi
+kopyalayip yazilabilir ve Ring 3'e acik yapiyordu. Koruma, ilk
+dokunusta yok oluyordu. Artik Ring 3'ten gelen bir erisim Ring 3'e
+kapali bir sayfaya ise kurtarma hic denenmiyor -- dogru kural zaten
+buydu.
+
+**3. `fork` ayri yigini devretmiyordu.** Linux devreder (adres uzayi
+kopyalandigi icin ayni adres gecerlidir), `execve` ise birakir. TCMK
+ikincisini yapiyordu, birincisini degil.
+
+### Sinav neyi olcuyor, neyi olcmuyor
+
+E ilk yazilista "ayri yigin yokken tasma sureci olduruyor mu" diye
+soruyordu ve **gecti** -- koruma sayfasi kapaliyken bile. Cunku koruma
+olmasa da surec oluyor, yalnizca once `.bss`i ezerek ve cok daha
+asagida. "Oldu mu" sorusu koruma sayfasini olcmuyordu.
+
+Olcen soru, tasmanin **nerede** durdugu: isleyici `si_addr`i okuyup
+yiginin hemen altinda olup olmadigina bakiyor. Bu haliyle koruma
+kaldirilinca dusuyor.
+
+### Olcumun kendisiyle ugrasmak
+
+Tasmayi ureten ozyineleme iki kez optimize edilip kayboldu. LLVM
+`f(n+1) + c` kalibini birikecli bir kuyruk cagrisina cevirip **donguye**
+donusturuyor; yigin hic tukenmiyor ve sinav olcmesi gereken seyi
+kaciriyor. i386'da cagridan sonra yerel diziye dokunmak yetti,
+x86_64'te yetmedi -- `core::hint::black_box` ile cerceveyi optimize
+ediciden gizlemek gerekti.
+
+Ders genel: bir sinavin **olcegi** de olculmeli. Gecen bir sinav,
+olcmesi gereken seyi olctugunu kendiliginden gostermez.
+
+### Bilerek yapilmayanlar
+
+* **Yigin otomatik buyumuyor.** Koruma sayfasi hatayi gorunur kiliyor
+  ama Windows'un yaptigi gibi yigini genisletmiyor. Buyutmek icin
+  yiginin altinda ayrilmis bos bir bolge gerekir; TCMK'de yigin ile brk
+  bitisik.
+* **Ayri yigin gorev basina, is parcacigi basina degil.** POSIX'te her
+  akisin kendi `sigaltstack`i olur; TCMK'de gorev = akis oldugu icin
+  bugun ayni sey, ama `clone` ile dogan bir akis ebeveynin yiginini
+  devraliyor -- ikisi ayni anda tasarsa ayni bolgeye yazarlardi.
+* **`SS_AUTODISARM` yok.** Linux'un `sigaltstack`i isleyiciye girerken
+  yigini otomatik kapatabilir; burada yalnizca sayilan bir derinlik var.
+* **Koruma sayfasi tek.** Bir cerceve 4 KiB'den buyukse (cok buyuk
+  yerel diziler) tasma koruma sayfasini atlayabilir. Gercek cekirdekler
+  de bu yuzden derleyiciden yigin sondasi (`stack probe`) bekler.
 
 ## Alfa'nin bilinen sinirlari
 

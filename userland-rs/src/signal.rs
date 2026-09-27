@@ -199,6 +199,59 @@ pub fn install(signo: u32, handler: extern "C" fn(u32)) -> isize {
 /// duzeltilmis haliyle tekrarlanir.
 pub const SA_SIGINFO: u32 = 0x0000_0004;
 
+/// Isleyici **ayri** bir yiginda kossun (`sigaltstack` ile kurulan).
+///
+/// Tek bir sey icin var ve o sey onemli: **yigin tasmasini yakalamak**.
+/// Tasma aninda yigin isaretcisi artik gecerli bir yeri gostermiyor;
+/// sinyal cercevesi oraya kurulamaz, yani sinyal teslim edilemez ve
+/// surec tanisiz oler.
+pub const SA_ONSTACK: u32 = 0x0800_0000;
+
+/// `ss_flags`: su an o yiginin **ustunde** kosuluyor.
+pub const SS_ONSTACK: u32 = 1;
+/// `ss_flags`: ayri yigini kaldir.
+pub const SS_DISABLE: u32 = 2;
+
+/// Ayri yigin icin kabul edilen en kucuk olcu (Linux ile ayni).
+pub const MINSIGSTKSZ: usize = 2048;
+
+/// `stack_t` -- `sigaltstack`in aldigi ve dondurdugu yapi.
+///
+/// Alan sirasi Linux ile birebir: `sigaltstack` cagiran derlenmis bir
+/// kod onu tam bu duzende yazar.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct AltStack {
+    pub sp: usize,
+    pub flags: u32,
+    pub size: usize,
+}
+
+impl AltStack {
+    /// Kurulu olmayan yigin.
+    pub const NONE: Self = AltStack {
+        sp: 0,
+        flags: SS_DISABLE,
+        size: 0,
+    };
+}
+
+/// Ayri sinyal yigini kurar ve/veya oncekini okur.
+///
+/// `new` `None` ise yalnizca sorulur; `old` `None` ise yalnizca kurulur.
+/// Doner: 0 ya da negatif hata.
+pub fn sigaltstack(new: Option<&AltStack>, old: Option<&mut AltStack>) -> isize {
+    let new_ptr = new.map_or(core::ptr::null(), |s| s as *const AltStack);
+    let old_ptr = old.map_or(core::ptr::null_mut(), |s| s as *mut AltStack);
+    unsafe {
+        sys::syscall2(
+            sys::SYS_SIGALTSTACK,
+            new_ptr as usize,
+            old_ptr as usize,
+        ) as isize
+    }
+}
+
 /// Uc argumanli isleyicinin imzasi.
 pub type SigActionHandler = extern "C" fn(u32, *const SigInfo, *mut UContext);
 

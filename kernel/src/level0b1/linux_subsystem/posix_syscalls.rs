@@ -156,6 +156,7 @@ mod i386_numbers {
     /// i386'da `sigsuspend`(72) eski `sigset_t`u alir; `rt_sigsuspend`
     /// 179'dur ve TCMK'nin 32-bit maskesine dogrudan oturur.
     pub const SYS_SIGSUSPEND: u32 = 179;
+    pub const SYS_SIGALTSTACK: u32 = 186;
     /// i386'da `mmap2` -- eski `mmap`(90) argumanlari bir yapida alirdi.
     pub const SYS_MMAP: u32 = 192;
     pub const SYS_MUNMAP: u32 = 91;
@@ -230,6 +231,7 @@ mod x86_64_numbers {
     pub const SYS_PAUSE: u32 = 34;
     /// x86_64'te `rt_sigsuspend`.
     pub const SYS_SIGSUSPEND: u32 = 130;
+    pub const SYS_SIGALTSTACK: u32 = 131;
     pub const SYS_MMAP: u32 = 9;
     pub const SYS_MUNMAP: u32 = 11;
     pub const SYS_GETPRIORITY: u32 = 140;
@@ -238,6 +240,8 @@ mod x86_64_numbers {
 
 // Linux hata kodlari negatif dondurulur (ornegin -EBADF = -9).
 const EBADF: i32 = 9;
+/// Islem izin verilmiyor -- `sigaltstack` ustunde kosulurken degisemez.
+const EPERM: i32 = 1;
 const EFAULT: i32 = 14;
 const ENOENT: i32 = 2;
 const EMFILE: i32 = 24;
@@ -565,6 +569,62 @@ fn stat_user_path(
 ///
 /// Hata durumunda **negatif errno** doner, yani cagiran dogrudan
 /// dondurebilir.
+
+/// `sigaltstack(yeni, eski)` -- isleyiciye **ayri bir yigin**.
+///
+/// Tek bir sey icin var ve o sey onemli: yigin tasmasini yakalamak.
+/// Tasma aninda yigin isaretcisi artik gecerli bir yeri gostermiyor,
+/// yani sinyal cercevesi oraya kurulamaz ve surec tanisiz oler. Ayri
+/// yigin o dongunun disina cikmanin tek yolu -- ve bir yigin
+/// tasmasinin gunluge yazilabilmesi icin gereken sey.
+///
+/// Yapi uc kelimedir: `{ ss_sp, ss_flags, ss_size }`. Sira Linux'un
+/// `stack_t`si ile ayni, cunku `sigaltstack` cagiran derlenmis bir kod
+/// onu tam bu duzende yazar.
+fn sys_sigaltstack(task: usize, new: usize, old: usize) -> i32 {
+    let word = core::mem::size_of::<usize>();
+    // Yapinin boyu: iki isaretci + bir `int`. `ss_flags` ile `ss_size`
+    // arasinda hizalama dolgusu oldugu icin son alanin ofseti iki
+    // kelimedir, boyu da iki kelime + bir kelime.
+    let span = 3 * word;
+
+    // Once **eski** yaziliyor: kurulum basarisiz olsa bile cagiranin
+    // sordugu cevap dogru olmali. Ters sirada yazilsaydi reddedilen bir
+    // istek eski degeri de goturebilirdi.
+    if old != 0 {
+        if !mmu::is_user_accessible(old) || !mmu::is_user_accessible(old + span - 1) {
+            return -EFAULT;
+        }
+        let (sp, size, flags) = signal::alt_stack_of(task);
+        unsafe {
+            (old as *mut usize).write_unaligned(sp);
+            ((old + word) as *mut u32).write_unaligned(flags);
+            ((old + 2 * word) as *mut usize).write_unaligned(size);
+        }
+    }
+
+    if new == 0 {
+        return 0;
+    }
+    if !mmu::is_user_accessible(new) || !mmu::is_user_accessible(new + span - 1) {
+        return -EFAULT;
+    }
+    let (sp, flags, size) = unsafe {
+        (
+            (new as *const usize).read_unaligned(),
+            ((new + word) as *const u32).read_unaligned(),
+            ((new + 2 * word) as *const usize).read_unaligned(),
+        )
+    };
+    match signal::set_alt_stack(task, sp, size, flags) {
+        Ok(()) => 0,
+        Err(signal::AltStackError::Busy) => -EPERM,
+        Err(signal::AltStackError::BadFlags) => -EINVAL,
+        Err(signal::AltStackError::TooSmall) => -ENOMEM,
+        Err(signal::AltStackError::BadAddress) => -EFAULT,
+    }
+}
+
 fn with_user_path(
     ptr: usize,
     action: fn(&str) -> Result<(), KernelError>,
@@ -1992,6 +2052,20 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
             signal::sigsuspend(scheduler::current_id(), arg1 as u32);
             -EINTR
         }
+
+        // `sigaltstack(yeni, eski)` -- isleyiciye **ayri bir yigin**.
+        //
+        // Tek bir sey icin var ve o sey onemli: yigin tasmasini
+        // yakalamak. Tasma aninda yigin isaretcisi artik gecerli bir
+        // yeri gostermiyor, yani sinyal cercevesi oraya kurulamaz ve
+        // surec tanisiz oler. Ayri yigin o dongunun disina cikmanin tek
+        // yolu -- ve bir yigin tasmasinin gunluge yazilabilmesi icin
+        // gereken sey.
+        //
+        // Yapi uc kelimedir: `{ ss_sp, ss_flags, ss_size }`. Sira
+        // Linux'un `stack_t`si ile ayni, cunku `sigaltstack` cagiran
+        // derlenmis bir kod onu tam bu duzende yazar.
+        SYS_SIGALTSTACK => sys_sigaltstack(scheduler::current_id(), arg1, arg2),
 
         // `chdir(yol)` -- surecin calisma dizinini degistirir.
         //

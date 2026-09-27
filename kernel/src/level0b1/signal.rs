@@ -186,10 +186,59 @@ pub const SA_RESTART: u32 = 0x1000_0000;
 /// mekanizma zaten donusun kendisidir (bkz. `sigreturn`).
 pub const SA_SIGINFO: u32 = 0x0000_0004;
 
+/// Isleyici **ayri** bir yiginda kossun (`sigaltstack` ile kurulan).
+///
+/// Tek bir sey icin var ve o sey onemli: **yigin tasmasini yakalamak**.
+/// Tasma aninda yigin isaretcisi artik gecerli bir yeri gostermiyor;
+/// sinyal cercevesi oraya kurulamaz, yani sinyal teslim edilemez ve
+/// surec tanisiz oler. Ayri yigin bu dongunun disina cikmanin tek yolu.
+///
+/// ```text
+///   bayrak yok  ->  cerceve kesilen yiginin ustune  (tasmada YAZILAMAZ)
+///   bayrak var  ->  cerceve AYRI yigina             (tasmada yazilabilir)
+/// ```
+pub const SA_ONSTACK: u32 = 0x0800_0000;
+
 /// Cekirdegin tanidigi bayraklar. Digerleri sessizce yok sayilir --
 /// `SA_RESTART` gibi, karsiligi olmayan bir bayragi kabul ediyormus gibi
 /// yapmak yaniltici olurdu (bkz. README).
-pub const SUPPORTED_FLAGS: u32 = SA_NODEFER | SA_RESETHAND | SA_RESTART | SA_SIGINFO;
+pub const SUPPORTED_FLAGS: u32 =
+    SA_NODEFER | SA_RESETHAND | SA_RESTART | SA_SIGINFO | SA_ONSTACK;
+
+// --- `sigaltstack` ---------------------------------------------------
+
+/// `ss_flags`: su an o yiginin **ustunde** kosuluyor.
+pub const SS_ONSTACK: u32 = 1;
+/// `ss_flags`: ayri yigini kaldir.
+pub const SS_DISABLE: u32 = 2;
+
+/// Ayri yigin icin kabul edilen en kucuk olcu.
+///
+/// Linux'un `MINSIGSTKSZ`i 2 KiB'dir ve TCMK'nin cercevesi de oraya
+/// siginiyor: `siginfo_t` (128) + `ucontext_t` (348/968) + cagri
+/// cercevesi. Daha kucugunu kabul etmek, isleyiciye girer girmez
+/// tasacak bir yigin vermek olurdu -- yani sorunu cozmek yerine
+/// tasimak.
+pub const MINSIGSTKSZ: usize = 2048;
+
+/// Ayri yiginin tabani ve olcusu; taban 0 = kurulu degil.
+static ALT_SP: [core::sync::atomic::AtomicUsize; scheduler::MAX_TASKS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; scheduler::MAX_TASKS];
+static ALT_SIZE: [core::sync::atomic::AtomicUsize; scheduler::MAX_TASKS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; scheduler::MAX_TASKS];
+
+/// Kac isleyici su an ayri yiginin ustunde kosuyor.
+///
+/// Sayac, cunku ic ice teslim mumkun: ayri yiginda kosan bir isleyicinin
+/// icinde ikinci bir sinyal teslim edilirse o da **ayni** yigini
+/// kullanmali -- yeniden tepeye donmek, alttaki cerceveyi ezmek olurdu.
+static ALT_DEPTH: [core::sync::atomic::AtomicUsize; scheduler::MAX_TASKS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; scheduler::MAX_TASKS];
+
+/// Hangi katman ayri yigina **gecti** -- `sigreturn` geri sayarken bakar.
+static USED_ALT: [[core::sync::atomic::AtomicUsize; NEST_DEPTH]; scheduler::MAX_TASKS] =
+    [const { [const { core::sync::atomic::AtomicUsize::new(0) }; NEST_DEPTH] };
+        scheduler::MAX_TASKS];
 
 // --- `si_code`: sinyalin **kaynagi** (Linux ile ayni sayilar) ---------
 //
@@ -836,6 +885,12 @@ pub fn clone_into(child: usize) {
     if child >= scheduler::MAX_TASKS || parent >= scheduler::MAX_TASKS {
         return;
     }
+    // Ayri sinyal yigini **devralinir**: adres uzayi kopyalandigi icin
+    // ayni adres cocukta da gecerli. `execve` ise onu birakir (bkz.
+    // `reset`), cunku orada adres artik baska bir seyin olabilir.
+    ALT_SP[child].store(ALT_SP[parent].load(Ordering::SeqCst), Ordering::SeqCst);
+    ALT_SIZE[child].store(ALT_SIZE[parent].load(Ordering::SeqCst), Ordering::SeqCst);
+    ALT_DEPTH[child].store(0, Ordering::SeqCst);
     crate::arch::cpu::without_interrupts(|| unsafe {
         let base = core::ptr::addr_of_mut!(DISPOSITIONS) as *mut Disposition;
         let width = MAX_SIGNAL as usize + 1;
@@ -862,6 +917,10 @@ pub fn reset(task: usize) {
     // Askida kalan bir `sigsuspend` geri yuklemesi yeni imaja tasinmaz:
     // maske o programin degil, oncekinin karariydi.
     RESTORE_PENDING[task].store(false, Ordering::SeqCst);
+    // Ayri yigin eski imajin adres uzayinda duruyordu: yeni imajda o
+    // adres baska bir seyin olabilir. `cwd` ve ortamdan farkli olarak
+    // **korunmamali**.
+    forget_alt_stack(task);
     crate::arch::cpu::without_interrupts(|| unsafe {
         let base = core::ptr::addr_of_mut!(DISPOSITIONS) as *mut Disposition;
         let width = MAX_SIGNAL as usize + 1;
@@ -1073,6 +1132,112 @@ pub unsafe fn deliver_pending(frame: &mut SyscallFrame, from_interrupt: bool) {
     }
 }
 
+// --- Ayri yigin: sorgu ve kurulum ------------------------------------
+
+/// Gorevin ayri yigini: `(taban, olcu, ss_flags)`.
+///
+/// `ss_flags` uc halden birini soyler ve ucu de ayri bir cevap:
+///
+/// ```text
+///   SS_DISABLE   kurulu degil
+///   SS_ONSTACK   kurulu ve su an USTUNDE kosuluyor
+///   0            kurulu, ama su an kullanilmiyor
+/// ```
+pub fn alt_stack_of(task: usize) -> (usize, usize, u32) {
+    if task >= scheduler::MAX_TASKS {
+        return (0, 0, SS_DISABLE);
+    }
+    let sp = ALT_SP[task].load(Ordering::SeqCst);
+    if sp == 0 {
+        return (0, 0, SS_DISABLE);
+    }
+    let flags = if ALT_DEPTH[task].load(Ordering::SeqCst) > 0 {
+        SS_ONSTACK
+    } else {
+        0
+    };
+    (sp, ALT_SIZE[task].load(Ordering::SeqCst), flags)
+}
+
+/// Calisan gorevin ayri yigini -- `ucontext_t`nin `uc_stack` alani icin.
+pub fn current_alt_stack() -> (usize, usize, u32) {
+    alt_stack_of(scheduler::current_id())
+}
+
+/// `sigaltstack`in reddedilme sebepleri.
+///
+/// Hata **numarasi** degil, sebep donuyor: errno sayilari tek bir yerde
+/// (`posix_syscalls`) duruyor ve ikinci bir kopya, iki yerde
+/// ayrisabilen bir sozlesme birakirdi.
+#[derive(Debug, Clone, Copy)]
+pub enum AltStackError {
+    /// Ustunde kosulurken degistirilemez.
+    Busy,
+    /// Taninmayan `ss_flags`.
+    BadFlags,
+    /// `MINSIGSTKSZ`den kucuk.
+    TooSmall,
+    /// Ring 3'ten erisilemeyen bolge.
+    BadAddress,
+}
+
+/// `sigaltstack`in kurulum yarisi.
+pub fn set_alt_stack(
+    task: usize,
+    sp: usize,
+    size: usize,
+    flags: u32,
+) -> Result<(), AltStackError> {
+    if task >= scheduler::MAX_TASKS {
+        return Err(AltStackError::BadFlags);
+    }
+    // Ustunde kosulurken degistirmek yasak: cerceve tam orada duruyor.
+    // POSIX'in kurali bu ve gerekcesi somut -- degisim kabul edilseydi
+    // isleyici kendi altindaki zemini cekmis olurdu.
+    if ALT_DEPTH[task].load(Ordering::SeqCst) > 0 {
+        return Err(AltStackError::Busy);
+    }
+    if flags & SS_DISABLE != 0 {
+        ALT_SP[task].store(0, Ordering::SeqCst);
+        ALT_SIZE[task].store(0, Ordering::SeqCst);
+        return Ok(());
+    }
+    if flags != 0 {
+        return Err(AltStackError::BadFlags);
+    }
+    if size < MINSIGSTKSZ {
+        // Linux burada `ENOMEM` der: istek gecersiz degil, **yetersiz**.
+        return Err(AltStackError::TooSmall);
+    }
+    if sp == 0 || !mmu::is_user_accessible(sp) || !mmu::is_user_accessible(sp + size - 1) {
+        return Err(AltStackError::BadAddress);
+    }
+    ALT_SP[task].store(sp, Ordering::SeqCst);
+    ALT_SIZE[task].store(size, Ordering::SeqCst);
+    Ok(())
+}
+
+/// Ayri yigini kaldirir (`execve`, gorev cikisi).
+fn forget_alt_stack(task: usize) {
+    ALT_SP[task].store(0, Ordering::SeqCst);
+    ALT_SIZE[task].store(0, Ordering::SeqCst);
+    ALT_DEPTH[task].store(0, Ordering::SeqCst);
+}
+
+/// Cerceve kurulacak yigin tepesi -- ayri yigina gecilecekse.
+///
+/// `None` donuyorsa kesilen yigin kullanilacak. Uc sebepten biriyle:
+/// ayri yigin kurulu degil, ya da zaten onun ustundeyiz (o zaman
+/// **tepeye donmek** alttaki cerceveyi ezerdi).
+fn alt_top(task: usize) -> Option<usize> {
+    let sp = ALT_SP[task].load(Ordering::SeqCst);
+    if sp == 0 || ALT_DEPTH[task].load(Ordering::SeqCst) > 0 {
+        return None;
+    }
+    let size = ALT_SIZE[task].load(Ordering::SeqCst);
+    Some((sp + size) & !0xF)
+}
+
 /// Baglami isleyiciye cevirir; `ucontext_t` adresini de kaydeder.
 ///
 /// Iki yuz arasindaki tek fark burada secilir:
@@ -1097,16 +1262,36 @@ unsafe fn enter_handler(
     signo: u32,
     d: &Disposition,
 ) -> Option<()> {
+    // `SA_ONSTACK`: cerceve **ayri** yigina kuruluyor.
+    //
+    // Secilen taban `context`e yazilmiyor, ayri bir arguman olarak
+    // gecirilyor -- ve bu bir uslup tercihi degil. Ilk yazilista taban
+    // dogrudan `context.sp`ye konuyordu ve `ucontext_t` o baglamdan
+    // dolduruldugu icin `uc_mcontext.esp` **ayri yigini** gosteriyordu.
+    // Isleyici donunce cekirdek o degeri geri yukluyor, yani surec ayri
+    // yiginin ustunde devam ediyordu: kesilen yigin kayboluyordu.
+    // Olcum bunu, `SA_ONSTACK`siz bir isleyicinin de ayri yiginda
+    // gorunmesiyle yakaladi.
+    USED_ALT[task][depth].store(0, Ordering::SeqCst);
+    let mut stack = context.stack_pointer();
+    if d.flags & SA_ONSTACK != 0 {
+        if let Some(top) = alt_top(task) {
+            stack = top;
+            USED_ALT[task][depth].store(1, Ordering::SeqCst);
+            ALT_DEPTH[task].fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
     if d.flags & SA_SIGINFO == 0 {
         UCONTEXT_AT[task][depth].store(0, Ordering::SeqCst);
-        return usermode::build_signal_frame(context, signo, d.handler, d.restorer);
+        return usermode::build_signal_frame(context, stack, signo, d.handler, d.restorer);
     }
 
     let info = (core::ptr::addr_of!(INFO) as *const SigInfo)
         .add(task * (MAX_SIGNAL as usize + 1) + signo as usize)
         .read();
     let ucontext_at =
-        usermode::build_siginfo_frame(context, signo, d.handler, d.restorer, &info)?;
+        usermode::build_siginfo_frame(context, stack, signo, d.handler, d.restorer, &info)?;
     UCONTEXT_AT[task][depth].store(ucontext_at, Ordering::SeqCst);
     Some(())
 }
@@ -1249,6 +1434,13 @@ pub unsafe fn sigreturn(frame: &mut SyscallFrame, from_interrupt: bool) -> bool 
     // guvenilmez. `read_ucontext` bunu bilerek yaziyor: yalnizca genel
     // registerlar aliniyor ve bayraklarin sistem bitleri cekirdegin
     // degeriyle kaliyor (bkz. `usermode.rs`).
+    // Ayri yigina gecilmisse sayac geri aliniyor: bu katman artik onun
+    // ustunde degil.
+    if USED_ALT[task][depth].swap(0, Ordering::SeqCst) != 0 {
+        let previous = ALT_DEPTH[task].load(Ordering::SeqCst);
+        ALT_DEPTH[task].store(previous.saturating_sub(1), Ordering::SeqCst);
+    }
+
     let ucontext_at = UCONTEXT_AT[task][depth].swap(0, Ordering::SeqCst);
     if ucontext_at != 0 && mmu::is_user_accessible(ucontext_at) {
         usermode::read_ucontext(ucontext_at, &mut context);

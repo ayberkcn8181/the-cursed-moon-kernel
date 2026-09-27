@@ -211,13 +211,14 @@ pub unsafe fn leave_user_mode() -> ! {
 /// Cagiran gorevin adres uzayi etkin olmalidir; yazilan adres dogrulanir.
 pub unsafe fn build_signal_frame(
     context: &mut UserContext,
+    stack: usize,
     signo: u32,
     handler: usize,
     restorer: usize,
 ) -> Option<()> {
     use crate::level0a::core::mmu;
 
-    let sp = ((context.stack_pointer() - 128) & !0xF) - 8;
+    let sp = ((stack - 128) & !0xF) - 8;
     if !mmu::is_user_accessible(sp) || !mmu::is_user_accessible(sp + 7) {
         return None;
     }
@@ -315,6 +316,7 @@ const USER_FLAGS: u64 = 0x0000_0CD5;
 /// `build_signal_frame` ile ayni kosul.
 pub unsafe fn build_siginfo_frame(
     context: &mut UserContext,
+    stack: usize,
     signo: u32,
     handler: usize,
     restorer: usize,
@@ -323,7 +325,7 @@ pub unsafe fn build_siginfo_frame(
     use crate::level0a::core::mmu;
 
     const RECORDS: usize = SIGINFO_SIZE + UCONTEXT_SIZE;
-    let sp = context.stack_pointer();
+    let sp = stack;
     if sp < RECORDS + 256 {
         return None;
     }
@@ -380,7 +382,15 @@ unsafe fn write_ucontext(
     let put = |offset: usize, value: u64| ((at + offset) as *mut u64).write_unaligned(value);
     put(uc::FLAGS, 0);
     put(uc::LINK, 0);
-    put(uc::STACK, 0);
+    // `uc_stack`: isleyicinin ustunde kostugu yigin. `sigaltstack`
+    // kuruluysa **o** yazilir, cunku POSIX'in sordugu sey budur:
+    // "bu isleyici hangi yiginda?" Kurulu degilse alanlar sifir kalir.
+    {
+        let (alt_sp, alt_size, alt_flags) = crate::level0b1::signal::current_alt_stack();
+        put(uc::STACK, alt_sp as u64);
+        ((at + uc::STACK + 8) as *mut u32).write_unaligned(alt_flags);
+        put(uc::STACK + 16, alt_size as u64);
+    }
     put(uc::R8, context.r8);
     put(uc::R9, context.r9);
     put(uc::R10, context.r10);

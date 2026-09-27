@@ -65,6 +65,10 @@ name = "sigfault"
 path = "src/bin/sigfault.rs"
 
 [[bin]]
+name = "altstack"
+path = "src/bin/altstack.rs"
+
+[[bin]]
 name = "swapx"
 path = "src/bin/swapx.rs"
 
