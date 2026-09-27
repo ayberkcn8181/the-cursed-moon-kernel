@@ -128,7 +128,7 @@ cevirisi** yapip Level-0a'nin ortak API'sine devreder.
 | `fork.rs` | `fork`: adres uzayini copy-on-write kopyalar, cocuk gorevi kurar, ebeveynin baglamini 0 donusuyle cocuga verir. `execve` zinciri de burada yurutulur. |
 | `signal.rs` | POSIX sinyalleri: yerlestirme tablosu, maske, ic ice teslim, `sigreturn`. Cekirdek kullanici yiginina bir cerceve kurup baglami isleyiciye cevirir. |
 | `futex.rs` | **Adres uzerinde bekleme.** `futex` ve `WaitOnAddress`in ortak govdesi: deger sinamasi, zaman asiminin tik cevrimi, `CLONE_CHILD_CLEARTID` sozunun yerine getirilmesi. Iki ABI'nin ayrisan sozlesmeleri (sayi mi adres mi, `-EAGAIN` mi `TRUE` mi) burada belgeli. |
-| `thread.rs` | **Is parcaciklari.** `clone` ve `CreateThread`in ortak govdesi: yaratanin adres uzayini/grubunu paylasan yeni bir gorev, ayri yigin ve TEB, yiginin tepesine yazilan 13 baytlik cikis trambleni (ELF'te `int 0x80`, PE'de `int 0x2E`). |
+| `thread.rs` | **Is parcaciklari.** `clone` ve `CreateThread`in ortak govdesi: yaratanin adres uzayini/grubunu paylasan yeni bir gorev, ayri yigin ve TEB, yiginin tepesine yazilan 13 baytlik cikis trambleni (ELF'te `int 0x80`, PE'de `int 0x2E`). Giris baglami **yaratma aninda** kurulup saklanir; `GetThreadContext`/`SetThreadContext` onu okur ve yazar, giris noktasi yalnizca yukler. |
 
 ## `binary_loader/` -- ikili yukleyiciler
 
@@ -154,7 +154,7 @@ cevirisi** yapip Level-0a'nin ortak API'sine devreder.
 | `nt_syscalls.rs` | `int 0x2E` ile gelen cagrilar. Uc aralik: `0x1000` (ham NT), `0x2000` (win32k), `0x3000` (Win32 API, yigin argumanli). Deponun en uzun kaynak dosyasi. |
 | `dll.rs` | **Gomulu DLL tablosu.** Diskte `KERNEL32.dll` yok; bu tablo adi bir NT servis numarasina cevirir ve `emit_thunk` surecin adres uzayina cagri stub'i yazar. |
 | `teb.rs` | Is Parcacigi Ortam Blogu. `fs:[0x18]` / `gs:[0x30]`den ulasilan yapi; SEH zinciri, son hata kodu, yigin sinirlari. PEB ve modul listesi de bu blokta kurulur. |
-| `seh.rs` | **Windows istisna dagitimi.** VEH listesi, `fs:[0]` zinciri, `UnhandledExceptionFilter`. Cekirdek kullanici yiginina `EXCEPTION_RECORD` + `CONTEXT` yazip cerceveyi isleyiciye cevirir. |
+| `seh.rs` | **Windows istisna dagitimi.** VEH listesi, `fs:[0]` zinciri, `UnhandledExceptionFilter`. Cekirdek kullanici yiginina `EXCEPTION_RECORD` + `CONTEXT` yazip cerceveyi isleyiciye cevirir. `CONTEXT` cevirici (`store_context`/`load_context`) burada duruyor ve `Get`/`SetThreadContext` da onu kullanir -- ikinci bir kopya, iki yerde ayrisabilen bir ABI birakirdi. |
 | `modules.rs` | Modul tablosu: `GetModuleHandleA`, `GetProcAddress`, `LoadLibraryA`. Ithal edilmemis bir fonksiyon istendiginde thunk'i **o anda** uretir. |
 | `mapping.rs` | Dosya esleme nesneleri: `CreateFileMapping` + `MapViewOfFile`. POSIX'in tek cagrisina karsilik iki adim; gorunum uzunlugu cekirdekte tutulur. |
 | `mod.rs` | Modul agaci. |
@@ -285,6 +285,7 @@ gunluge yazarlar ve olcum bunlardan okunur.
 | `mapped.rs` (4 sinav) | Dosya destekli `mmap`: icerik, hizasiz ofset reddi, dosya sonu sifirlamasi. |
 | `death.rs` (6 sinav) | Cocugun **nasil** oldugu: `WIFEXITED`/`WIFSIGNALED`/`WTERMSIG`, cokmenin `SIGSEGV`e ve sifira bolmenin `SIGFPE`ye eslenmesi, `exit(9)` ile `SIGKILL(9)`un ayirt edilmesi. |
 | `intr.rs` (6 sinav) | `EINTR` ve `SA_RESTART`: bekleyen okuma/yazmanin sinyalle bolunmesi, bolunen cagrinin veriyi tuketmemesi, cerceve geri sarilarak yeniden baslatma, ve yok sayilan sinyalin **bolmemesi**. |
+| `win/context.rs` (7 sinav) | **Baglam okuma/yazma.** Askida dogan akisin `Eip`i giris fonksiyonunu gosteriyor mu, yazilan `Eip` gercekten yuruyor mu (akis BASKA bir yerden basliyor), cagiranin kendi baglami canli cerceveden mi geliyor (okunan `Esp` yerel bir degiskene komsu mu), kosan bir akis icin cagri uydurmak yerine **reddediliyor** mu, ve `CreateThread` cagiranin segment tabanini bozmuyor mu. |
 | `win/suspend.rs` (6 sinav) | Win32'nin **sayilan** askisi: `CREATE_SUSPENDED` ile askida dogan akis, iki `Suspend` + bir `Resume` sonrasi hala duruyor mu (POSIX ikizinde ayni dizi kosan bir surec verir), donus degerleri **onceki** sayiyi veriyor mu, ve `SetThreadPriority` gidip geliyor mu. |
 | `jobs.rs` (6 sinav) | Is denetimi: `SIGSTOP` durduruyor mu (boru uzerinden olculen ilerlemeyle), `waitpid` `WUNTRACED` ile bildiriyor mu, `SIGCONT` kaldiriyor mu, `SIGSTOP` yakalanamiyor mu, `kill(-pgid)` gruptaki iki cocugu da etkiliyor mu, ve durmus cocuk `WIFSIGNALED` gorunmuyor mu. |
 | `swapx.rs` (6 sinav) | Takas: sayfa diske gidiyor mu, icerik bozulmadan geri geliyor mu, yuva geri veriliyor mu, ve `fork` diskteki sayfayi gorebiliyor mu. Disk yoksa hepsi **atlandi**. |

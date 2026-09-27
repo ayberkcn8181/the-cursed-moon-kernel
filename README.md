@@ -27,8 +27,8 @@ masaustu sunuyor.
 | Mimariler | i386 (Multiboot1, `int 0x80`) · x86_64 (Multiboot2, `syscall`) |
 | Ikili bicimleri | ELF32/ELF64 · PE32/PE32+ (ithal tablosu cozulur) |
 | POSIX cagrilari | 71 (+ ELF yardimci vektoru, dosya destekli `mmap`, `clone`, `futex`, `SIGPIPE`, `EINTR`/`SA_RESTART`, is denetimi) |
-| NT/Win32 cagrilari | 83 (`KERNEL32.dll` 61 ihracat + `TCMKGUI.dll`) |
-| Ring 3 uygulamalari | 37 ELF + 14 PE |
+| NT/Win32 cagrilari | 85 (`KERNEL32.dll` 63 ihracat + `TCMKGUI.dll`) |
+| Ring 3 uygulamalari | 37 ELF + 15 PE |
 | Kalici depolama | ATA PIO + MBR + TCMKFS (yazilabilir, iki mimari) + takas |
 | Kod | ~30 bin satir cekirdek + ~17 bin satir userland |
 
@@ -51,9 +51,13 @@ beklemek istemeyen `poll` ya da `O_NONBLOCK` kullaniyor. Cerceve havuzu
 tukendiginde de cevap artik "reddet" degil: sayfa **diske gidiyor** ve
 hatada geri okunuyor. Bir surec artik olmenin disinda **durabiliyor**
 da (`SIGSTOP`/`SIGCONT`, surec gruplari) -- is denetiminin temeli.
+Duran bir akisin **registerlari** da okunup yazilabiliyor
+(`GetThreadContext`/`SetThreadContext`): bir akis, giris noktasina hic
+girmeden baska bir yerden baslatilabiliyor -- POSIX'te karsiligi
+olmayan bir kalip.
 
 Her yetenek QEMU'da **olculerek** dogrulanmistir: `probe` (16 sinav),
-`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (5), `bigfile` (6), `heap` (5), `swapx` (6), `jobs` (6), `winsusp` (6), `bequest`
+`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (5), `bigfile` (6), `heap` (5), `swapx` (6), `jobs` (6), `winsusp` (6), `winctx` (7), `bequest`
 (6), `nested` (4), `winenv` (4) gibi programlar sonucu hem ekrana hem
 seri gunluge yaziyor. Olcumler yol boyunca gercek hatalar buldu -- dolan
 VFS tablosu, `CreateFileA`'nin cevrilmeyen Windows yollari, `GDT`
@@ -62,7 +66,8 @@ siniri, x86_64'te segment secicisinin taban MSR'sini silmesi, kesme ve
 `fork`+`execve` kalibi, hala kullanilan bir adres uzayinin yikilmasi,
 her zaman acik olan `stdin`e `EBADF` diyen `fcntl`, yuvasini hic
 birakmayan bitmis is parcaciklari, yuvasi geri verilmis bir gorevi
-bekleyenin bir daha uyanmamasi -- ve her biri README'de kendi
+bekleyenin bir daha uyanmamasi, yeni bir akis yaratanin cocugunun
+TEB'ine bakmaya baslamasi -- ve her biri README'de kendi
 bolumunde yazili. Olcum bir de sunu gosterdi: bir tavani kaldirmak,
 altinda duran daha sikisik bir tavani (VFS dugum tablosu) gormeden
 anlamsiz. Ve birkac kez, hata cekirdekte degil **sinavin kendisinde** cikti --
@@ -6376,14 +6381,164 @@ gorunurdu. Ayirt edici olan tek sey, **bir** `Resume`un yetmemesi.
 * **`SuspendThread` kendi uzerinde tehlikeli.** Windows da bunu
   onermiyor; TCMK'de cagiran kendini askiya alirsa yalnizca bir
   `ResumeThread` ile kalkabilir ve onu baska bir akis yapmali.
-* **`GetThreadContext`/`SetThreadContext` yok.** Askiya almanin en
-  yaygin sebebi baglami okumak; o yuzey henuz yok.
 * **`SetThreadPriority` dilim butcesine yuvarlaniyor.** Yedi duzey dort
   kademeye dusuyor; okuma yine yedi duzeyden birini veriyor ama
   aradaki degerler korunmuyor.
 * **Oncelik sinifi (`SetPriorityClass`) yok.** Windows'ta gercek
   oncelik surec sinifi ile akis duzeyinin **toplami**; burada yalnizca
   ikincisi var.
+
+## Akis baska bir yerden baslatilabilir: `Get`/`SetThreadContext`
+
+Askiya almanin en yaygin sebebi durdurmak degil, o arada **baglami**
+okuyup degistirmek. Windows'un `CREATE_SUSPENDED`i asil degerini bu
+dizide kazaniyor:
+
+```text
+  CreateThread(.., CREATE_SUSPENDED, ..)
+  GetThreadContext(h, &c)
+  c.Eip = baska_bir_yer
+  SetThreadContext(h, &c)
+  ResumeThread(h)              -> akis BASKA yerden baslar
+```
+
+```
+[winctx] A giris baglami:   gecti (Eip giris fonksiyonunu gosteriyor)
+[winctx] B kendi baglami:   gecti (Esp yerel degiskene komsu)
+[winctx] C YAZILAN YURUDU:  gecti (akis yazilan yerden basladi)
+[winctx] D kosani reddet:   gecti (kosan akis icin ERROR_NOT_SUPPORTED)
+[winctx] E iki ret:         gecti (eksik bayrak ve kendine yazma reddedildi)
+[winctx] F gecersiz tutamac:gecti (ERROR_INVALID_HANDLE dondu)
+[winctx] G segment tabani:  gecti (taban hala cagiranin TEB'inde)
+[winctx] eski giris: 0  yeni giris: 8
+```
+
+![winctx](docs/screenshot-winctx.png)
+
+Son satir sinavin ozeti: `CreateThread`e verilen giris noktasi **hic**
+kosmadi, yazilan giris noktasi kostu.
+
+### POSIX'te karsiligi yok
+
+En yakini `ptrace` ve yakinligi yalnizca "register okuyor" duzeyinde:
+
+```text
+  POSIX  ptrace(PTRACE_ATTACH, pid)     -> iliski KUR
+         waitpid(pid, ..)               -> durmasini BEKLE
+         ptrace(PTRACE_GETREGS, ..)     -> oku
+         ptrace(PTRACE_DETACH, pid)     -> iliskiyi BOZ
+
+  Win32  GetThreadContext(h, &c)        -> oku
+```
+
+Ayrim isin ne oldugundan cok **kimin yapabildigi**. POSIX'te register
+okumak hata ayiklamaya ozel bir iliski gerektirir ve o iliski tekildir:
+bir surecin tek izleyeni olur. Windows'ta yalnizca bir tutamac
+yetkisidir -- bir profilleyici, bir kurtarma kodu ya da bir paketleyici
+bunu siradan bir cagri gibi kullanir. Kalibi yayginlastiran sey bu,
+ve Wine'in taklit etmekte en cok zorlandigi yuzeylerden biri olmasinin
+sebebi de bu: kullanici alaninda bir kutuphane, kardes bir akisin
+registerlarini isletim sisteminin izni olmadan yazamaz.
+
+### Baglam nereden geliyor
+
+Degisiklik gorunurden buyuk. Eskiden yeni akisin Ring 3 baglami
+**kendi icinde**, Ring 3'e gecmeden hemen once hesaplaniyordu
+(`thread_task`). Gec hesaplanan bir sey okunamaz: `CREATE_SUSPENDED`
+ile dogmus bir akis icin sorulacak bir baglam yoktu.
+
+Artik `thread::create` kuruyor -- tramplen, TEB ve baglamin kendisi --
+ve giris noktasi yalnizca yukluyor. Bu mumkun, cunku adres uzayi zaten
+paylasiliyor: yazilar iki taraftan da ayni yere gidiyor.
+
+```text
+  ONCE   create: yuva ayir      thread_task: tramplen + TEB + baglam -> Ring 3
+  SONRA  create: tramplen + TEB + baglam    thread_task: yukle -> Ring 3
+```
+
+### Olcumun buldugu hata: erken kurmanin bedeli
+
+Erken kurmak bedava degil ve bedeli hicbir mevcut sinavin bakmadigi bir
+yerdeydi. `teb::install` segment tabanini **hemen** etkinlestiriyor
+(`tls::set_fs` -> `activate`). Cagiranin baglaminda cagrildiginda bu,
+cagirani cocugunun TEB'ine bakmaya birakiyor: son hata kodu ve SEH
+zinciri yanlis bloktan okunur, ta ki bir sonraki baglam degisimi tabani
+kendiliginden duzeltene kadar.
+
+Cekirdek tabani geri koyuyor. G sinavi bunu olcmek icin yazildi ve
+satir kaldirildiginda tam olarak onu yakaladi:
+
+```
+[winctx] G segment tabani: KALDI (segment COCUGUN TEB'ini gosteriyor)
+```
+
+Olcunun sirasi onemli: TEB alani `CreateThread`den **hemen sonra**,
+arada tek bir cagri bile olmadan okunuyor. Arada bir cagri olsaydi
+baglam degisimi tabani kendiliginden geri koyar ve sinav olcmesi
+gereken seyi kacirirdi.
+
+### Ne kadari gercek
+
+Baglam okumak "o akis su an nerede" sorusudur ve cevabin **bugune ait**
+olmasi gerekir. TCMK iki durumda bunu gercekten biliyor:
+
+```text
+  hedef                  GetThreadContext     SetThreadContext
+  cagiranin kendisi      GERCEK (canli)       reddedilir
+  hic kosmamis akis      GERCEK (giris)       GERCEK
+  kosmaya baslamis akis  REDDEDILIR           REDDEDILIR
+```
+
+"Cagiranin kendisi" durumunda okunan sey canli syscall cercevesidir --
+yani tam olarak cagrinin yapildigi an. B sinavi bunu yerel bir
+degiskenin adresiyle okunan `Esp` arasindaki mesafeye bakarak
+dogruluyor: uydurulmus ya da bayatlamis bir deger o pencereye dusmez.
+
+Ucuncu satir eksik bir yetenek ve oyle yazildi. Kosan bir akisin
+registerlari cekirdekte saklanmiyor; o akisin cekirdek yigininda,
+bir kesme cercevesinde duruyorlar. Oraya uzanmak mumkun olabilirdi ama
+verecegi sey **son syscall anina** ait bir goruntu olurdu -- cagiran
+onu "simdi" sanip yanilirdi. Reddetmek daha az yetenek, daha fazla
+dogru bilgi. D sinavi bu reddin kendisini olcuyor.
+
+### `ContextFlags` neden zorunlu
+
+`CONTEXT` kaydinin ilk alani "bu kayitta hangi bolumler gecerli"
+demektir. TCMK bolum bolum uygulamiyor; eksik bir kume kabul edilseydi
+cagiranin hic doldurmadigi registerlar sifirla ezilirdi -- bir akisi
+duzeltmek icin yapilan cagri onu bozardi. Kume istenmesi o sessiz
+hasarin yerine bir hata koyuyor (`ERROR_INVALID_PARAMETER`).
+
+Yazma ayrica **askida** olmayi sart kosuyor. Kosmayi bekleyen bir akis
+her an zamanlanabilir, yani "henuz kosmadi" cevabi bir sonraki komuta
+kadar gecerli olurdu. Windows da ayni sarti koyar.
+
+### `CONTEXT` ikinci kez yazilmadi
+
+Kaydin ofsetleri derlenmis Windows kodunun icine gomulu sayilardir ve
+TCMK'de zaten bir kez yazilmislardi: istisna dagitimi bir isleyiciye
+`CONTEXT` verir ve isleyicinin yazdigini geri okur (bkz. `seh.rs`).
+Yeni cagrilar ayni ceviriciyi kullaniyor. Ikinci bir kopya, iki yerde
+ayrisabilen bir ABI birakirdi.
+
+Bayraklarin sistem bitleri hicbir yolda alinmiyor: bir program kendi
+IOPL'unu ya da kesme bayragini bu kapidan degistiremez.
+
+### Bilerek yapilmayanlar
+
+* **Kosan bir akisin baglami okunamiyor.** Yukari bkz.: eksik olan
+  yetenek acikca reddediliyor, uydurulmuyor.
+* **Kayan nokta ve hata ayiklama bolumleri bos.** `CONTEXT_FLOATING_POINT`
+  ve `CONTEXT_DEBUG_REGISTERS` yok; kayit o bolgelerde sifir donuyor ve
+  bayraklarinda da o bitler kurulu degil.
+* **Segment secicileri sabit.** Ring 3 degerleri yaziliyor, cagiranin
+  yazdigi secici yok sayiliyor -- bir program kendi CS/SS'ini
+  degistirememeli.
+* **`Wow64GetThreadContext` yok.** x86_64 tarafinda 32-bit bir baglam
+  kavrami yok; TCMK'de bir surec tek bir bit genisligindedir.
+* **`SetThreadContext` kendine yazamiyor.** Teknik olarak mumkun --
+  SEH'in `NtContinue` yolu tam olarak bunu yapiyor -- ama bir cagrinin
+  nereye donecegi tek anlamli olmali.
 
 ## Alfa'nin bilinen sinirlari
 

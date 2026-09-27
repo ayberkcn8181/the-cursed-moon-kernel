@@ -431,6 +431,21 @@ static KERNEL32: &[Export] = &[
         service: nt::NT_GET_THREAD_PRIORITY,
         stack_bytes: 4,
     },
+    // Baglam okuma/yazma. POSIX'te karsiligi yok: `ptrace` benzer isi
+    // yapar ama ayri bir iliski (izleyen/izlenen) kurmayi ister.
+    Export {
+        name: "GetThreadContext",
+        ordinal: 62,
+        service: nt::NT_GET_THREAD_CONTEXT,
+        // hThread, lpContext
+        stack_bytes: 8,
+    },
+    Export {
+        name: "SetThreadContext",
+        ordinal: 63,
+        service: nt::NT_SET_THREAD_CONTEXT,
+        stack_bytes: 8,
+    },
     Export {
         name: "GetExitCodeThread",
         ordinal: 50,

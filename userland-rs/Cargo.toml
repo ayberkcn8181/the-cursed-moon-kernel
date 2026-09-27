@@ -116,6 +116,10 @@ path = "src/win/suspend.rs"
 name = "windeath"
 path = "src/win/death.rs"
 
+[[bin]]
+name = "winctx"
+path = "src/win/context.rs"
+
 [profile.dev]
 panic = "abort"
 opt-level = 1

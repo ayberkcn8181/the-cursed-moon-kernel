@@ -88,6 +88,10 @@ pub const NT_RESUME_THREAD: u32 = 0x3042;
 pub const NT_SET_THREAD_PRIORITY: u32 = 0x3043;
 /// `GetThreadPriority(hThread)` -> oncelik ya da hata degeri.
 pub const NT_GET_THREAD_PRIORITY: u32 = 0x3044;
+/// `GetThreadContext(hThread, lpContext)` -> BOOL.
+pub const NT_GET_THREAD_CONTEXT: u32 = 0x3045;
+/// `SetThreadContext(hThread, lpContext)` -> BOOL.
+pub const NT_SET_THREAD_CONTEXT: u32 = 0x3046;
 pub const NT_SLEEP_MS: u32 = 0x3001;
 pub const NT_GET_TICK_COUNT: u32 = 0x3002;
 pub const NT_WIN32_CLOSE_HANDLE: u32 = 0x3003;
@@ -390,6 +394,43 @@ pub fn resume_thread(task: usize) -> u32 {
         crate::level0a::core::scheduler::continue_task(task);
     }
     previous
+}
+
+/// `GetCurrentThread()`in dondurdugu **sahte** tutamac.
+///
+/// Windows'ta gercek bir tutamac degil, sabit bir `-1`: "su anda kosan
+/// akis" demenin kisayolu. Bir sayi olmasi kasitli -- cagiran onu
+/// `CloseHandle`a verse bile bir sey kapanmaz.
+///
+/// Olcusu `usize::MAX` degil, **32 bitlik** -1: tutamaclar arguman
+/// blogundan `DWORD` olarak okunuyor (bkz. `arg`), yani x86_64'te de
+/// buraya bu sayi geliyor.
+const CURRENT_THREAD_PSEUDO: usize = 0xFFFF_FFFF;
+
+/// Bir akis tutamacini gorev numarasina cevirir.
+///
+/// Iki bicim kabul ediliyor ve ikisi de gecerli Win32: `CreateThread`in
+/// verdigi gercek tutamac, ve `GetCurrentThread()`in sahte tutamaci.
+/// Ikincisini ayri ele almak sart, cunku `-1`in isaret bitini soymak
+/// gorev tablosu disinda bir sayi verir.
+fn thread_of_handle(handle: usize) -> Option<usize> {
+    if handle == CURRENT_THREAD_PSEUDO {
+        return Some(crate::level0a::core::scheduler::current_id());
+    }
+    match handle.checked_sub(PROCESS_HANDLE_FLAG) {
+        Some(task) if task < crate::level0a::core::scheduler::MAX_TASKS => Some(task),
+        _ => None,
+    }
+}
+
+/// Bir `CONTEXT` tamponu Ring 3'ten okunup yazilabilir mi?
+///
+/// Iki uc denetleniyor: kayit 4 KiB'den kucuk oldugu icin en fazla iki
+/// sayfaya yayilir, yani iki ucu gormek butununu gormek demek.
+fn context_buffer_ok(at: usize) -> bool {
+    at != 0
+        && mmu::is_user_accessible(at)
+        && mmu::is_user_accessible(at + seh::CONTEXT_SIZE - 1)
 }
 
 /// `WaitForSingleObject`: nesne isaretlendi (surec bitti).
@@ -2133,9 +2174,8 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
         // yalnizca istedigi boyu soyler (sifir = varsayilan). `clone`da
         // ise yigini cagiran ayirir ve isaretcisini verir.
         //
-        // Desteklenmeyenler bilerek yok sayiliyor: guvenlik
-        // tanimlayicilari ve `CREATE_SUSPENDED` (durdurulmus baslatma
-        // icin zamanlayicida bir "askida" durumu gerekir).
+        // Guvenlik tanimlayicilari bilerek yok sayiliyor. `dwStackSize`
+        // de: cekirdek her akisa ayni olcuyu veriyor.
         NT_CREATE_THREAD => {
             let start = arg_ptr(args, 2).unwrap_or(0);
             let parameter = arg_ptr(args, 3).unwrap_or(0);
@@ -2247,6 +2287,132 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
                 _ => {
                     set_last_error(ERROR_INVALID_HANDLE);
                     THREAD_PRIORITY_ERROR_RETURN as usize
+                }
+            }
+        }
+
+        // GetThreadContext(hThread, lpContext) -> BOOL
+        //
+        // POSIX'te karsiligi **yoktur**. `ptrace(PTRACE_GETREGS)` benzer
+        // is yapar ama sozlesmesi bambaska: izleyen tarafin izlenene
+        // baglanmasi, izlenenin durmasi ve iliskinin ebeveyn/cocuk olmasi
+        // gerekir. Windows'ta bir akis kardesinin registerlarini
+        // tutamacla okur -- hata ayiklama ozel bir iliski degil, siradan
+        // bir yetki.
+        //
+        // TCMK iki durumda **gercek** cevap veriyor:
+        //
+        //   * cagiranin kendisi -- canli syscall cercevesi tam olarak bu
+        //     cagrinin yapildigi andir;
+        //   * henuz kosmamis bir akis -- giris baglami `create` icinde
+        //     kurulup saklanmis durumda (bkz. `thread.rs`).
+        //
+        // Ucuncu durum, kosmaya baslamis baska bir akis, **reddediliyor**.
+        // Cekirdek onun Ring 3 registerlarini saklamiyor: bunlar o
+        // gorevin cekirdek yiginindaki bir kesme cercevesinde duruyor ve
+        // oraya elle uzanmak kirilgan olurdu. Eski bir anlik goruntuyu
+        // dondurmek daha kotusu olurdu -- cagiran onu **bugunun** cevabi
+        // sanardi. Sinir README'de yazili.
+        NT_GET_THREAD_CONTEXT => {
+            let handle = arg(args, 0).unwrap_or(0) as usize;
+            let out = arg_ptr(args, 1).unwrap_or(0);
+            let me = crate::level0a::core::scheduler::current_id();
+
+            match thread_of_handle(handle) {
+                None => {
+                    set_last_error(ERROR_INVALID_HANDLE);
+                    WIN32_FALSE
+                }
+                Some(_) if !context_buffer_ok(out) => {
+                    set_last_error(ERROR_INVALID_PARAMETER);
+                    WIN32_FALSE
+                }
+                Some(task) if task == me => {
+                    // SAFETY: cerceve Ring 3'ten geldi (bu bir syscall) ve
+                    // tampon iki ucundan dogrulandi.
+                    let context = unsafe { frame.user_context_via(from_interrupt) };
+                    unsafe { seh::store_context(out, &context) };
+                    WIN32_TRUE
+                }
+                Some(task) => match crate::level0b1::thread::entry_context(task) {
+                    Some(context) => {
+                        unsafe { seh::store_context(out, &context) };
+                        WIN32_TRUE
+                    }
+                    None => {
+                        set_last_error(ERROR_NOT_SUPPORTED);
+                        WIN32_FALSE
+                    }
+                },
+            }
+        }
+
+        // SetThreadContext(hThread, lpContext) -> BOOL
+        //
+        // Okumanin aynasi, ama daha dar: yalnizca **henuz kosmamis ve
+        // askida** bir akis icin kabul ediliyor. Iki kosulun ikisi de
+        // gerekli:
+        //
+        //   * kosmamis olmali -- kostuysa yazilacak yuva zaten tuketildi;
+        //   * askida olmali -- kosmayi bekleyen bir akis her an
+        //     zamanlanabilir, yani "kosmadi" cevabi bir sonraki komuta
+        //     kadar gecerli. Askiya alinmis olmasi o yarisi kapatiyor.
+        //     Windows da ayni sarti koyar.
+        //
+        // Kabul edilen bu tek durum, Win32'nin POSIX'te hic karsiligi
+        // olmayan kalibidir:
+        //
+        // ```text
+        //   CreateThread(.., CREATE_SUSPENDED, ..)
+        //   GetThreadContext(h, &c)
+        //   c.Eip = baska_bir_yer
+        //   SetThreadContext(h, &c)
+        //   ResumeThread(h)        -> akis BASKA yerden baslar
+        // ```
+        //
+        // Cagiranin kendisi de reddediliyor. Teknik olarak mumkun --
+        // canli cerceveye yazmak SEH'in `NtContinue` yolunun tam olarak
+        // yaptigi sey. Ama o yolun bir adi var; `SetThreadContext`i
+        // ikinci bir kapi yapmak, cagrinin nereye donecegi belirsiz iki
+        // anlami tek isme yuklemek olurdu.
+        NT_SET_THREAD_CONTEXT => {
+            let handle = arg(args, 0).unwrap_or(0) as usize;
+            let source = arg_ptr(args, 1).unwrap_or(0);
+            let me = crate::level0a::core::scheduler::current_id();
+
+            match thread_of_handle(handle) {
+                None => {
+                    set_last_error(ERROR_INVALID_HANDLE);
+                    WIN32_FALSE
+                }
+                Some(_) if !context_buffer_ok(source) => {
+                    set_last_error(ERROR_INVALID_PARAMETER);
+                    WIN32_FALSE
+                }
+                Some(task) if task == me => {
+                    set_last_error(ERROR_NOT_SUPPORTED);
+                    WIN32_FALSE
+                }
+                Some(task) => {
+                    // Bayrak kumesi yetmiyorsa cagiranin doldurmadigi
+                    // registerlar sifirla ezilirdi; sessiz hasar yerine
+                    // hata (bkz. `seh::context_flags_enough`).
+                    let flags = unsafe { seh::context_flags(source) };
+                    if !seh::context_flags_enough(flags) {
+                        set_last_error(ERROR_INVALID_PARAMETER);
+                        WIN32_FALSE
+                    } else if !crate::level0a::core::scheduler::is_stopped(task) {
+                        set_last_error(ERROR_NOT_SUPPORTED);
+                        WIN32_FALSE
+                    } else {
+                        let context = unsafe { seh::load_context(source) };
+                        if crate::level0b1::thread::set_entry_context(task, &context) {
+                            WIN32_TRUE
+                        } else {
+                            set_last_error(ERROR_NOT_SUPPORTED);
+                            WIN32_FALSE
+                        }
+                    }
                 }
             }
         }

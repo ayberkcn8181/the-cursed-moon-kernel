@@ -71,3 +71,5 @@ SuspendThread@4 @58
 ResumeThread@4 @59
 SetThreadPriority@8 @60
 GetThreadPriority@4 @61
+GetThreadContext@8 @62
+SetThreadContext@8 @63

@@ -179,6 +179,13 @@ mod ctx {
     pub const SEG_SS: usize = 0xC8;
     /// `CONTEXT_i386 | CONTROL | INTEGER | SEGMENTS`
     pub const FULL: u32 = 0x0001_0007;
+    /// Bir baglami **yazmak** icin en az bu kume istenir.
+    ///
+    /// `ContextFlags` "bu kayittaki hangi bolumler gecerli" demek. TCMK
+    /// bolum bolum uygulamiyor; o yuzden eksik bir kume kabul edilseydi
+    /// cagiranin hic doldurmadigi registerlar sifirla ezilirdi. Kumeyi
+    /// istemek, o sessiz hasarin yerine bir hata koyuyor.
+    pub const REQUIRED: u32 = 0x0001_0003;
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -204,6 +211,8 @@ mod ctx {
     pub const RIP: usize = 0xF8;
     /// `CONTEXT_AMD64 | CONTROL | INTEGER | SEGMENTS`
     pub const FULL: u32 = 0x0010_0007;
+    /// i386'daki ikiziyle ayni gerekce (bkz. orada).
+    pub const REQUIRED: u32 = 0x0010_0003;
 }
 
 // --- Gorev basina dagitim durumu --------------------------------------
@@ -802,6 +811,52 @@ pub fn fault_address(task: usize) -> usize {
         return 0;
     }
     unsafe { ((record + rec::ADDRESS) as *const usize).read_unaligned() }
+}
+
+// --- CONTEXT kaydinin dis yuzu ----------------------------------------
+//
+// Asagidaki cevirici istisna dagitimi icin yazildi ama sozlesmesi ona
+// ozgu degil: Win32'de bir Ring 3 baglami **her zaman** bu kayitla
+// konusulur. `GetThreadContext`/`SetThreadContext` (bkz.
+// `nt_syscalls`) ayni ceviriciyi kullaniyor -- ikinci bir kopya
+// yazmak, iki yerde ayrisabilen bir ABI birakmak olurdu.
+
+/// Win32 `CONTEXT` kaydinin bayt olcusu.
+///
+/// Sayi ABI'nin parcasidir: cagiran tamponu bu kadar ayirir ve cekirdek
+/// tam bu kadarini yazar.
+pub const CONTEXT_SIZE: usize = sizes::CONTEXT;
+
+/// Cagiranin bildirdigi `ContextFlags`.
+///
+/// # Safety
+/// `at` en az `CONTEXT_SIZE` bayt okunabilir olmalidir.
+pub unsafe fn context_flags(at: usize) -> u32 {
+    ((at + ctx::FLAGS) as *const u32).read_unaligned()
+}
+
+/// Verilen bayrak kumesi bir baglami **yazmaya** yetiyor mu?
+pub fn context_flags_enough(flags: u32) -> bool {
+    flags & ctx::REQUIRED == ctx::REQUIRED
+}
+
+/// Bir cekirdek baglamini Ring 3'teki `CONTEXT` kaydina doker.
+///
+/// # Safety
+/// `at` Ring 3'e acik ve en az `CONTEXT_SIZE` bayt yazilabilir olmalidir.
+pub unsafe fn store_context(at: usize, context: &UserContext) {
+    write_context(at, context)
+}
+
+/// Tersi: Ring 3'teki `CONTEXT` kaydini cekirdek baglamina cevirir.
+///
+/// Bayraklarin sistem bitleri **alinmaz** (bkz. `read_context`): bir
+/// program kendi IOPL'unu ya da kesme bayragini bu yolla degistirememeli.
+///
+/// # Safety
+/// `at` en az `CONTEXT_SIZE` bayt okunabilir olmalidir.
+pub unsafe fn load_context(at: usize) -> UserContext {
+    read_context(at)
 }
 
 // --- CONTEXT okuma/yazma ----------------------------------------------

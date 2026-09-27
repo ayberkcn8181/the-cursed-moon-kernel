@@ -453,6 +453,154 @@ extern "system" {
 
     /// Akisin onceligi; hata durumunda `THREAD_PRIORITY_ERROR_RETURN`.
     pub fn GetThreadPriority(thread: Handle) -> i32;
+
+    /// Bir akisin **tam register durumunu** `CONTEXT` kaydina yazar.
+    ///
+    /// POSIX'te karsiligi yok. `ptrace(PTRACE_GETREGS)` benzer is yapar
+    /// ama once bir izleyen/izlenen iliskisi kurmak gerekir; Windows'ta
+    /// bu siradan bir tutamac yetkisi.
+    ///
+    /// TCMK yalnizca **gercek** cevap verebildigi yerde basarili olur:
+    /// cagiranin kendisi (`CURRENT_THREAD`) ve henuz kosmamis bir akis.
+    /// Kosmaya baslamis bir kardesin baglami saklanmadigi icin cagri
+    /// reddedilir -- eski bir goruntu dondurmek yerine.
+    pub fn GetThreadContext(thread: Handle, context: *mut c_void) -> Bool;
+
+    /// Okumanin aynasi: verilen baglami akisa **yazar**.
+    ///
+    /// Yalnizca askida ve henuz kosmamis bir akis icin kabul edilir --
+    /// yani `CREATE_SUSPENDED` kalibi. Kosan bir akisa yazmak sessizce
+    /// yarisan bir istek olurdu.
+    pub fn SetThreadContext(thread: Handle, context: *const c_void) -> Bool;
+}
+
+/// `GetCurrentThread()`in dondurdugu **sahte** tutamac.
+///
+/// Windows'ta gercek bir tutamac degil, sabit bir `-1`. Bir cagri
+/// gerektirmedigi icin burada dogrudan sabit olarak duruyor.
+pub const CURRENT_THREAD: Handle = 0xFFFF_FFFF;
+
+/// `CONTEXT` kaydinin bayt olcusu -- Windows ABI'sinin parcasi.
+#[cfg(target_arch = "x86")]
+pub const CONTEXT_SIZE: usize = 0x2CC;
+#[cfg(target_arch = "x86_64")]
+pub const CONTEXT_SIZE: usize = 0x4D0;
+
+/// `ContextFlags`: hangi bolumlerin gecerli oldugunu soyler.
+///
+/// Mimari biti sart: ayni bayrak sayilari iki mimaride ayri anlamlara
+/// gelir, o yuzden kayit hangi mimarinin kaydi oldugunu kendi icinde
+/// tasir.
+#[cfg(target_arch = "x86")]
+pub const CONTEXT_FULL: u32 = 0x0001_0007;
+#[cfg(target_arch = "x86_64")]
+pub const CONTEXT_FULL: u32 = 0x0010_0007;
+
+/// Win32 `CONTEXT` kaydi.
+///
+/// Alan alan bir `struct` yazmak yerine ham bayt blogu tutuluyor ve
+/// alanlara ofsetle erisiliyor. Sebep: kaydin yarisi bu programin hic
+/// dokunmadigi kayan nokta ve hata ayiklama bolgeleri, ve o bolgelerin
+/// ic duzeni burada yazilirsa iki yerde ayrisabilen bir ABI olusur.
+/// Ofsetler ise derlenmis Windows kodunun icine gomulu olan sayilardir
+/// -- cekirdek tarafiyla (bkz. `seh.rs`) ayni.
+#[repr(C, align(16))]
+pub struct Context {
+    bytes: [u8; CONTEXT_SIZE],
+}
+
+/// Baglam kaydindaki alan ofsetleri.
+#[cfg(target_arch = "x86")]
+mod ctx {
+    pub const FLAGS: usize = 0x00;
+    pub const EAX: usize = 0xB0;
+    pub const EIP: usize = 0xB8;
+    pub const ESP: usize = 0xC4;
+}
+
+#[cfg(target_arch = "x86_64")]
+mod ctx {
+    pub const FLAGS: usize = 0x30;
+    pub const EAX: usize = 0x78;
+    pub const ESP: usize = 0x98;
+    pub const EIP: usize = 0xF8;
+}
+
+impl Context {
+    /// Bos kayit; `ContextFlags` `CONTEXT_FULL` ile dolu gelir.
+    ///
+    /// Bayragi bastan kurmak kolaylik degil, dogru varsayilan: cekirdek
+    /// eksik bir kume ile gelen yazma istegini reddediyor.
+    pub fn new() -> Self {
+        let mut context = Context {
+            bytes: [0u8; CONTEXT_SIZE],
+        };
+        context.set_flags(CONTEXT_FULL);
+        context
+    }
+
+    /// Kaydi tumden sifirlar -- `ContextFlags` dahil.
+    ///
+    /// "Hicbir bolumu gecerli olmayan" bir kayit: cekirdegin reddetmesi
+    /// gereken istegin ta kendisi.
+    pub fn clear(&mut self) {
+        self.bytes = [0u8; CONTEXT_SIZE];
+    }
+
+    fn get(&self, offset: usize) -> usize {
+        const WORD: usize = core::mem::size_of::<usize>();
+        let mut value = [0u8; WORD];
+        value.copy_from_slice(&self.bytes[offset..offset + WORD]);
+        usize::from_ne_bytes(value)
+    }
+
+    fn put(&mut self, offset: usize, value: usize) {
+        let bytes = value.to_ne_bytes();
+        self.bytes[offset..offset + bytes.len()].copy_from_slice(&bytes);
+    }
+
+    pub fn flags(&self) -> u32 {
+        let mut value = [0u8; 4];
+        value.copy_from_slice(&self.bytes[ctx::FLAGS..ctx::FLAGS + 4]);
+        u32::from_ne_bytes(value)
+    }
+
+    pub fn set_flags(&mut self, flags: u32) {
+        self.bytes[ctx::FLAGS..ctx::FLAGS + 4].copy_from_slice(&flags.to_ne_bytes());
+    }
+
+    /// Komut isaretcisi (`Eip` / `Rip`).
+    pub fn ip(&self) -> usize {
+        self.get(ctx::EIP)
+    }
+
+    pub fn set_ip(&mut self, value: usize) {
+        self.put(ctx::EIP, value)
+    }
+
+    /// Yigin isaretcisi (`Esp` / `Rsp`).
+    pub fn sp(&self) -> usize {
+        self.get(ctx::ESP)
+    }
+
+    /// Birikec (`Eax` / `Rax`).
+    pub fn ax(&self) -> usize {
+        self.get(ctx::EAX)
+    }
+
+    pub fn as_mut_ptr(&mut self) -> *mut c_void {
+        self.bytes.as_mut_ptr() as *mut c_void
+    }
+
+    pub fn as_ptr(&self) -> *const c_void {
+        self.bytes.as_ptr() as *const c_void
+    }
+}
+
+impl Default for Context {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// `CreateThread` bayragi: akis **askida dogar** ve `ResumeThread`
@@ -718,6 +866,10 @@ pub const ERROR_NOT_SUPPORTED: Dword = 50;
 pub const ERROR_DISK_FULL: Dword = 112;
 pub const ERROR_DIR_NOT_EMPTY: Dword = 145;
 pub const ERROR_ALREADY_EXISTS: Dword = 183;
+/// Cagriya verilen parametre gecersiz -- okunamayan bir isaretci ya da
+/// anlamsiz bir deger. `ERROR_NOT_SUPPORTED`den ayri durmasi onemli:
+/// biri "boyle bir istek olmaz" der, oteki "bu istek yapilamaz".
+pub const ERROR_INVALID_PARAMETER: Dword = 87;
 /// `GetEnvironmentVariableA` adi bulamayinca birakir. Sifir donusu ile
 /// birlikte "yok" demektir -- POSIX'te bunun karsiligi yalnizca `NULL`.
 pub const ERROR_ENVVAR_NOT_FOUND: Dword = 203;

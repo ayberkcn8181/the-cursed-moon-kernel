@@ -164,6 +164,7 @@ static KNOWN_APPS: &[(&str, &str, &str)] = &[
     ("winpipe", "/bin/winpipe.exe", "winpipe"),
     ("windeath", "/bin/windeath.exe", "windeath"),
     ("winsusp", "/bin/winsusp.exe", "winsusp"),
+    ("winctx", "/bin/winctx.exe", "winctx"),
 ];
 
 /// Kabuktan gelen adi tam yola ve gorev adina cevirir.

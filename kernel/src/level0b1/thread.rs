@@ -62,25 +62,109 @@ const THREAD_STACK_SIZE: usize = 8 * 1024;
 /// Yiginin tepesinden donus trampleni icin ayrilan yer.
 const TRAMPOLINE_RESERVE: usize = 32;
 
-/// Bekleyen is parcacigi istekleri -- gorev basina bir yuva.
+/// Henuz **kosmamis** akisin tam Ring 3 baglami -- gorev basina bir yuva.
 ///
-/// `fork`taki `CHILD_CONTEXT` ile ayni desen: yeni gorev cekirdek
-/// tarafinda dogar, giris noktasi bu tabloyu okuyup Ring 3'e gecer.
-static START: [AtomicUsize; scheduler::MAX_TASKS] =
-    [const { AtomicUsize::new(0) }; scheduler::MAX_TASKS];
-static PARAM: [AtomicUsize; scheduler::MAX_TASKS] =
-    [const { AtomicUsize::new(0) }; scheduler::MAX_TASKS];
-static STACK: [AtomicUsize; scheduler::MAX_TASKS] =
-    [const { AtomicUsize::new(0) }; scheduler::MAX_TASKS];
-/// Yaratanin ikili bicimi: donus trampleni buna gore secilir.
-static WINDOWS: [AtomicUsize; scheduler::MAX_TASKS] =
-    [const { AtomicUsize::new(0) }; scheduler::MAX_TASKS];
+/// Daha once burada dort ayri tablo (`START`, `PARAM`, `STACK`,
+/// `WINDOWS`) duruyordu ve baglam yeni gorevin kendi icinde, Ring 3'e
+/// gecmeden hemen once hesaplaniyordu. Sira bu yuzden degisti:
+/// `CREATE_SUSPENDED` ile dogan bir akisin baglami, o akis bir komut
+/// bile yurutmeden **okunabilir ve yazilabilir** olmali
+/// (`GetThreadContext`/`SetThreadContext`). Gec hesaplanan bir sey
+/// okunamaz; o yuzden artik `create` kuruyor, giris noktasi yalnizca
+/// yukluyor.
+///
+/// Erken kurmanin bedava olmadigi tek yer TLS: `teb::install` segment
+/// tabanini **hemen** etkinlestiriyor, yani cagiranin kendi tabanini geri
+/// koymak gerekiyor (bkz. `create`).
+static mut ENTRY: [UserContext; scheduler::MAX_TASKS] =
+    [UserContext::ZERO; scheduler::MAX_TASKS];
+
+/// `ENTRY[id]` yuvasinin durumu.
+///
+/// Uc degerin **ucu de** ayri bir cevap: "boyle bir akis yok", "var ve
+/// hic kosmadi", "kostu". Ucuncusunu ikinciden ayirmak sart, cunku
+/// kosmus bir akisin baglami artik bu yuvada durmuyor -- cekirdek onu
+/// okuyup Ring 3'e vermis. O durumda dogru cevap eski baglami
+/// gostermek degil, **reddetmek**.
+const CONTEXT_NONE: usize = 0;
+const CONTEXT_PENDING: usize = 1;
+const CONTEXT_STARTED: usize = 2;
+
+static CONTEXT_STATE: [AtomicUsize; scheduler::MAX_TASKS] =
+    [const { AtomicUsize::new(CONTEXT_NONE) }; scheduler::MAX_TASKS];
 
 /// Kac is parcacigi yaratildi (kabuk raporu).
 static CREATED: AtomicUsize = AtomicUsize::new(0);
 
 pub fn created() -> usize {
     CREATED.load(Ordering::Relaxed)
+}
+
+/// Bir gorev yuvasi yeniden kullanilirken baglam kaydi silinir.
+///
+/// `nt_syscalls::forget_suspend` ile ayni gerekce ve ayni cagri yeri
+/// (`scheduler::spawn_inner`): yuva numarasi yeniden kullanildiginda
+/// onceki kiracinin baglami yeni gorevin baglami gibi gorunurdu.
+pub fn forget_context(task: usize) {
+    if task < scheduler::MAX_TASKS {
+        CONTEXT_STATE[task].store(CONTEXT_NONE, Ordering::Relaxed);
+    }
+}
+
+/// Henuz kosmamis bir akisin baglami -- yoksa `None`.
+///
+/// `None` iki ayri anlami birlestiriyor ("boyle bir akis yok" ve "akis
+/// kostu") ama cagiran icin ikisinin sonucu ayni: gosterilecek dogru bir
+/// baglam yok.
+pub fn entry_context(task: usize) -> Option<UserContext> {
+    if task >= scheduler::MAX_TASKS
+        || CONTEXT_STATE[task].load(Ordering::SeqCst) != CONTEXT_PENDING
+    {
+        return None;
+    }
+    // SAFETY: yuva gorev numarasina ozel ve gorev henuz kosmuyor.
+    Some(unsafe { (core::ptr::addr_of!(ENTRY) as *const UserContext).add(task).read() })
+}
+
+/// Henuz kosmamis bir akisin baglamini **degistirir**.
+///
+/// Doner: yazildi mi. Yazilmadiysa sebep tek: akis ya yok ya da artik
+/// kosuyor.
+pub fn set_entry_context(task: usize, context: &UserContext) -> bool {
+    if task >= scheduler::MAX_TASKS
+        || CONTEXT_STATE[task].load(Ordering::SeqCst) != CONTEXT_PENDING
+    {
+        return false;
+    }
+    // SAFETY: entry_context ile ayni kosul.
+    unsafe {
+        (core::ptr::addr_of_mut!(ENTRY) as *mut UserContext)
+            .add(task)
+            .write(*context)
+    };
+    true
+}
+
+/// Baglami saklar ve yuvayi "kosmadi" isaretler.
+fn store_entry_context(task: usize, context: &UserContext) {
+    // SAFETY: yuva gorev numarasina ozel; gorev daha kosmaya baslamadi.
+    unsafe {
+        (core::ptr::addr_of_mut!(ENTRY) as *mut UserContext)
+            .add(task)
+            .write(*context)
+    };
+    CONTEXT_STATE[task].store(CONTEXT_PENDING, Ordering::SeqCst);
+}
+
+/// Baglami **tuketir**: okur ve yuvayi "kostu" isaretler.
+///
+/// Isaretlemenin okumayla ayni yerde olmasi onemli: bu satirdan sonra
+/// `SetThreadContext` artik dogru cevap veremez, o yuzden reddetmesi
+/// gerekir.
+fn take_entry_context(task: usize) -> Option<UserContext> {
+    let context = entry_context(task)?;
+    CONTEXT_STATE[task].store(CONTEXT_STARTED, Ordering::SeqCst);
+    Some(context)
 }
 
 #[derive(Debug)]
@@ -124,14 +208,38 @@ pub unsafe fn create(
     };
 
     let id = scheduler::spawn_thread("thread", thread_task).ok_or(ThreadError::OutOfResources)?;
-    START[id].store(entry, Ordering::Relaxed);
-    PARAM[id].store(param, Ordering::Relaxed);
-    STACK[id].store(top, Ordering::Relaxed);
-    WINDOWS[id].store(usize::from(windows), Ordering::Relaxed);
 
     // Is parcacigi tabanlari **devralinmaz**: her akisin kendi TEB'i
     // olmak zorunda (son hata kodu ve SEH zinciri orada duruyor).
     crate::level0a::core::tls::reset(id);
+
+    // --- Ring 3 kurulumu, **burada** ---
+    //
+    // Butun bunlar bir zamanlar yeni gorevin kendi icinde (`thread_task`)
+    // yapiliyordu ve o zaman da dogruydu: adres uzayi paylasilmis, yani
+    // yazilar iki taraftan da ayni yere gidiyor. Buraya tasinmasinin
+    // sebebi zamanlama: `CREATE_SUSPENDED` ile dogan bir akisin baglami
+    // daha kosmadan sorulabilmeli.
+    let mut top = top - TRAMPOLINE_RESERVE;
+    let trampoline = top;
+    unsafe { emit_exit_trampoline(trampoline, windows) };
+
+    if windows {
+        // Yigin tabani: cagiran kendi yiginini verdiyse gercek sinirini
+        // bilmiyoruz, o yuzden ayni olcu varsayiliyor. TEB'deki
+        // `StackLimit` yalnizca bilgi amacli -- cekirdek onu kullanmiyor.
+        let bottom = top.saturating_sub(THREAD_STACK_SIZE);
+        top = unsafe { crate::level0b1::nt_subsystem::teb::install(id, top, bottom) };
+        // `teb::install` yeni akisin segment tabanini **hemen**
+        // etkinlestiriyor (bkz. `tls::set_fs`). Cagiran hala biziz ve
+        // Ring 3'e o donecek: taban geri konmazsa cagiran, cocugunun
+        // TEB'ini kendi TEB'i sanarak devam eder -- son hata kodu ve SEH
+        // zinciri yanlis yerden okunur.
+        crate::level0a::core::tls::activate(parent);
+    }
+
+    let context = unsafe { build_entry_context(entry, top, trampoline, param) };
+    store_entry_context(id, &context);
 
     CREATED.fetch_add(1, Ordering::Relaxed);
     crate::println!(
@@ -146,40 +254,20 @@ pub unsafe fn create(
 
 /// Yeni gorevin cekirdek tarafindaki giris noktasi.
 ///
-/// Ring 3'e gecmeden once iki sey kurulur: donus trampleni ve --
-/// Windows ikilileri icin -- kendi TEB'i.
+/// Artik yalnizca **yukluyor**: tramplen, TEB ve baglamin kendisi
+/// `create` icinde, akis dogarken kurulmus durumda. Ayrimin sebebi
+/// `GetThreadContext`: gec kurulan bir baglam, kosmayi bekleyen bir akis
+/// icin okunamaz olurdu.
+///
+/// Adres uzayi paylasilmis ve baglam degisimi CR3'u zaten yukledi;
+/// burada ayrica gecmeye gerek yok (bkz. `fork::child_task`).
 extern "C" fn thread_task() -> ! {
     let id = scheduler::current_id();
-    let entry = START[id].load(Ordering::Relaxed);
-    let param = PARAM[id].load(Ordering::Relaxed);
-    let mut top = STACK[id].load(Ordering::Relaxed);
-    let windows = WINDOWS[id].load(Ordering::Relaxed) != 0;
 
-    if entry == 0 {
-        crate::println!("[LEVEL-0b1] is parcacigi: gorev #{} icin giris yok.", id);
+    let Some(context) = take_entry_context(id) else {
+        crate::println!("[LEVEL-0b1] is parcacigi: gorev #{} icin baglam yok.", id);
         scheduler::terminate_current();
-    }
-
-    // Adres uzayi paylasilmis ve baglam degisimi CR3'u zaten yukledi;
-    // burada ayrica gecmeye gerek yok (bkz. `fork::child_task`).
-    //
-    // Donus trampleni yiginin tepesine yazilir. Bicim, ikilinin
-    // dunyasina gore degisir: ELF `int 0x80`, PE `int 0x2E` kullanir.
-    top -= TRAMPOLINE_RESERVE;
-    let trampoline = top;
-    unsafe { emit_exit_trampoline(trampoline, windows) };
-
-    // Windows is parcaciklarinin kendi TEB'i olur; POSIX'te blogun
-    // icerigini program belirler, cekirdek yalnizca tabani tutar.
-    if windows {
-        // Yigin tabani: cagiran kendi yiginini verdiyse gercek sinirini
-        // bilmiyoruz, o yuzden ayni olcu varsayiliyor. TEB'deki
-        // `StackLimit` yalnizca bilgi amacli -- cekirdek onu kullanmiyor.
-        let bottom = top.saturating_sub(THREAD_STACK_SIZE);
-        top = unsafe { crate::level0b1::nt_subsystem::teb::install(id, top, bottom) };
-    }
-
-    let context = unsafe { build_entry_context(entry, top, trampoline, param) };
+    };
     unsafe { usermode::resume_user_context(&context) };
 
     // Buraya donulduyse is parcacigi cikti.

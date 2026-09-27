@@ -426,6 +426,9 @@ fn spawn_inner(
         // Aski sayaci da yuvaya bagli: yeni bir gorev onceki
         // kiracinin askisiyla dogmamali.
         crate::level0b1::nt_subsystem::nt_syscalls::forget_suspend(index);
+        // Saklanan Ring 3 baglami da: yoksa `GetThreadContext` yuvanin
+        // onceki kiracisinin giris noktasini gosterirdi.
+        crate::level0b1::thread::forget_context(index);
         (*tasks.add(index)).parent = CURRENT.load(Ordering::Relaxed);
         (*tasks.add(index)).waitable = waitable;
         // Siradan bir gorev kendi grubunun lideridir. Is parcaciklari
