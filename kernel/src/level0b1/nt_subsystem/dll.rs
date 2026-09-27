@@ -407,6 +407,31 @@ static KERNEL32: &[Export] = &[
         stack_bytes: 4,
     },
     Export {
+        name: "SuspendThread",
+        ordinal: 58,
+        service: nt::NT_SUSPEND_THREAD,
+        stack_bytes: 4,
+    },
+    Export {
+        name: "ResumeThread",
+        ordinal: 59,
+        service: nt::NT_RESUME_THREAD,
+        stack_bytes: 4,
+    },
+    Export {
+        name: "SetThreadPriority",
+        ordinal: 60,
+        service: nt::NT_SET_THREAD_PRIORITY,
+        // hThread, nPriority
+        stack_bytes: 8,
+    },
+    Export {
+        name: "GetThreadPriority",
+        ordinal: 61,
+        service: nt::NT_GET_THREAD_PRIORITY,
+        stack_bytes: 4,
+    },
+    Export {
         name: "GetExitCodeThread",
         ordinal: 50,
         service: nt::NT_GET_EXIT_CODE_THREAD,

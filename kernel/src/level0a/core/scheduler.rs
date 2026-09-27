@@ -423,6 +423,9 @@ fn spawn_inner(
         // NT tarafinin sakladigi cikis kodu da yuvaya bagli: temizlemezsek
         // yeni surec, onceki kiracinin kodunu gosterir.
         crate::level0b1::nt_subsystem::nt_syscalls::forget_exit(index);
+        // Aski sayaci da yuvaya bagli: yeni bir gorev onceki
+        // kiracinin askisiyla dogmamali.
+        crate::level0b1::nt_subsystem::nt_syscalls::forget_suspend(index);
         (*tasks.add(index)).parent = CURRENT.load(Ordering::Relaxed);
         (*tasks.add(index)).waitable = waitable;
         // Siradan bir gorev kendi grubunun lideridir. Is parcaciklari
@@ -928,6 +931,14 @@ pub fn continue_task(index: usize) -> bool {
         (*tasks.add(index)).stop_signal = 0;
         (*tasks.add(index)).stop_pending = false;
         (*tasks.add(index)).cont_pending = true;
+        // Win32'nin aski **sayaci** da sifirlaniyor.
+        //
+        // Iki yuz ayni mekanizmayi paylasiyor ama sozlesmeleri ayri:
+        // POSIX'in `SIGCONT`i sayilmaz, Windows'un `ResumeThread`i
+        // sayilir. Sayac sifirlanmasaydi `SIGCONT` gorevi kosar yapar,
+        // Win32 yuzu ise "hala askida" derdi -- ayni gorev icin iki
+        // ayri gercek.
+        crate::level0b1::nt_subsystem::nt_syscalls::forget_suspend(index);
         wake_child_watchers(index);
         true
     })

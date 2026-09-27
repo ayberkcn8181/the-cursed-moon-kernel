@@ -159,6 +159,9 @@ static SWAPX_ELF: &[u8] = include_bytes!("../../userland/swapx.elf");
 /// Is denetimi: durdurma, devam ettirme, surec gruplari.
 #[cfg(target_arch = "x86")]
 static JOBS_ELF: &[u8] = include_bytes!("../../userland/jobs.elf");
+/// Sayilan aski: CREATE_SUSPENDED, SuspendThread/ResumeThread.
+#[cfg(target_arch = "x86")]
+static WINSUSP_EXE: &[u8] = include_bytes!("../../userland/winsusp.exe");
 /// FindFirstFileA gosterimi -- ayni dizinler, Win32 yuzu.
 #[cfg(target_arch = "x86")]
 static WINFILES_EXE: &[u8] = include_bytes!("../../userland/winfiles.exe");
@@ -302,6 +305,8 @@ static WINSYNC_EXE64: &[u8] = include_bytes!("../../userland/winsync.exe64");
 static WINPIPE_EXE64: &[u8] = include_bytes!("../../userland/winpipe.exe64");
 #[cfg(target_arch = "x86_64")]
 static WINDEATH_EXE64: &[u8] = include_bytes!("../../userland/windeath.exe64");
+#[cfg(target_arch = "x86_64")]
+static WINSUSP_EXE64: &[u8] = include_bytes!("../../userland/winsusp.exe64");
 
 /// Kullanici programlarinin VFS uzerinden okudugu test dosyasi.
 static BOOT_MSG: &[u8] = b"/boot/msg.txt: VFS uzerinden okundu (RAMFS).\n";
@@ -360,6 +365,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/winsync.exe", WINSYNC_EXE),
     ("/bin/winpipe.exe", WINPIPE_EXE),
     ("/bin/windeath.exe", WINDEATH_EXE),
+    ("/bin/winsusp.exe", WINSUSP_EXE),
     ("/boot/msg.txt", BOOT_MSG),
 ];
 
@@ -414,6 +420,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/winsync.exe", WINSYNC_EXE64),
     ("/bin/winpipe.exe", WINPIPE_EXE64),
     ("/bin/windeath.exe", WINDEATH_EXE64),
+    ("/bin/winsusp.exe", WINSUSP_EXE64),
     ("/boot/msg.txt", BOOT_MSG),
 ];
 

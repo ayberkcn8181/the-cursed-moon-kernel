@@ -109,6 +109,10 @@ name = "winpipe"
 path = "src/win/pipe.rs"
 
 [[bin]]
+name = "winsusp"
+path = "src/win/suspend.rs"
+
+[[bin]]
 name = "windeath"
 path = "src/win/death.rs"
 

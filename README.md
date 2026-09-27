@@ -26,10 +26,10 @@ masaustu sunuyor.
 |---|---|
 | Mimariler | i386 (Multiboot1, `int 0x80`) · x86_64 (Multiboot2, `syscall`) |
 | Ikili bicimleri | ELF32/ELF64 · PE32/PE32+ (ithal tablosu cozulur) |
-| POSIX cagrilari | 68 (+ ELF yardimci vektoru, dosya destekli `mmap`, `clone`, `futex`, `SIGPIPE`, `EINTR`/`SA_RESTART`) |
-| NT/Win32 cagrilari | 79 (`KERNEL32.dll` 57 ihracat + `TCMKGUI.dll`) |
-| Ring 3 uygulamalari | 32 ELF + 13 PE |
-| Kalici depolama | ATA PIO + MBR + TCMKFS (yazilabilir, i386) |
+| POSIX cagrilari | 71 (+ ELF yardimci vektoru, dosya destekli `mmap`, `clone`, `futex`, `SIGPIPE`, `EINTR`/`SA_RESTART`, is denetimi) |
+| NT/Win32 cagrilari | 83 (`KERNEL32.dll` 61 ihracat + `TCMKGUI.dll`) |
+| Ring 3 uygulamalari | 37 ELF + 14 PE |
+| Kalici depolama | ATA PIO + MBR + TCMKFS (yazilabilir, iki mimari) + takas |
 | Kod | ~30 bin satir cekirdek + ~17 bin satir userland |
 
 Uyumluluk yuzeyi su alanlarda **iki ABI'de birden** kurulu: dosya
@@ -53,7 +53,7 @@ hatada geri okunuyor. Bir surec artik olmenin disinda **durabiliyor**
 da (`SIGSTOP`/`SIGCONT`, surec gruplari) -- is denetiminin temeli.
 
 Her yetenek QEMU'da **olculerek** dogrulanmistir: `probe` (16 sinav),
-`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (5), `bigfile` (6), `heap` (5), `swapx` (6), `jobs` (6), `bequest`
+`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (5), `bigfile` (6), `heap` (5), `swapx` (6), `jobs` (6), `winsusp` (6), `bequest`
 (6), `nested` (4), `winenv` (4) gibi programlar sonucu hem ekrana hem
 seri gunluge yaziyor. Olcumler yol boyunca gercek hatalar buldu -- dolan
 VFS tablosu, `CreateFileA`'nin cevrilmeyen Windows yollari, `GDT`
@@ -4905,10 +4905,12 @@ gelmiyor -- once **hatali** surumde basarisiz oldugunu gormek gerekiyor.
   bitince gercek kod (`winsync` D).
 * **`dwStackSize` yok sayiliyor**: yigin her zaman sabit 8 KiB.
   Istenen boyu tutmak, tutulamayacak bir soz vermek olurdu.
-* **`CREATE_SUSPENDED` yok** (`ResumeThread` de yok): is parcacigi
-  dogar dogmaz kosmaya baslar.
-* **Oncelik cagrilari yok**: `SetThreadPriority`/`GetThreadPriority`
-  yerine zamanlayicinin `nice` alani var, ama Win32 yuzu baglanmadi.
+* ~~**`CREATE_SUSPENDED` yok**~~ -- var (asagi bkz.): akis askida
+  doguyor, `SuspendThread`/`ResumeThread` **sayilan** bir askiyla
+  calisiyor. Eksik olan `GetThreadContext`/`SetThreadContext`.
+* ~~**Oncelik cagrilari yok**~~ -- `SetThreadPriority`/
+  `GetThreadPriority` zamanlayicinin `nice` alanina baglandi (asagi
+  bkz.); `SetPriorityClass` (surec oncelik sinifi) yok.
 * **`clone`un butun bayraklari desteklenmiyor.** `CLONE_VM|CLONE_FS|
   CLONE_FILES|CLONE_THREAD` bekleniyor; `CLONE_SETTLS`,
   `CLONE_PARENT_SETTID`, `CLONE_CHILD_CLEARTID` yok -- sonuncusu gercek
@@ -6269,6 +6271,119 @@ bir boru hattinda ucunde de ayni sayi gorunur.
   yeniden sinadigi icin bu guvenli, ama `sleep` kisa kesilebiliyor.
 * **Grup uyeligi tabloda taraniyor.** Ayri bir grup listesi yok; on iki
   gorevlik bir tabloda tarama zaten ucuz.
+
+## Askiya almak: ayni mekanizma, **sayilan** bir soz
+
+Bir onceki bati POSIX'in is denetimini getirdi. Windows ayni seyi
+yapiyor gibi gorunuyor ve yapmiyor -- cunku onun askisi **sayiliyor**:
+
+```text
+  POSIX  SIGSTOP x2 + SIGCONT x1  ->  KOSUYOR   (sayilmaz)
+  Win32  Suspend x2 + Resume x1   ->  DURUYOR   (sayilir)
+```
+
+```
+[winsusp] A askida dogdu:  gecti (CREATE_SUSPENDED akisi hic kosmadi)
+[winsusp] B Resume:        gecti (devam edince ilerledi)
+[winsusp] C SAYILIYOR:     gecti (iki Suspend + bir Resume: hala duruyor)
+[winsusp] D sayac sifir:   gecti (ikinci Resume ile yeniden ilerledi)
+[winsusp] E donus degeri:  gecti (her cagri onceki sayiyi dondurdu)
+[winsusp] F oncelik:       gecti (HIGHEST ve NORMAL gidip geldi)
+```
+
+![winsusp](docs/screenshot-winsusp.png)
+
+### Fark neden var
+
+Sayac, ayni akisi birbirinden habersiz **iki kutuphanenin** askiya
+alabilmesi icin: biri devam ettirdiginde otekinin askisi bozulmamali.
+Bir hata ayiklayici ile bir profilleyici ayni anda calisiyorsa bu sart.
+
+POSIX'in yaklasimi daha yalin -- ve daha kaba: son `SIGCONT` kazanir,
+kim niye durdurmus olursa olsun.
+
+Bu, projenin tezinin kucuk ama net bir ornegi: ayni donanim, ayni
+cekirdek mekanizmasi, iki ayri **sozlesme**. TCMK ikisini de
+`TaskState::Stopped` uzerine kuruyor ve sayaci NT tarafinda tutuyor;
+POSIX tarafi onu hic gormuyor.
+
+Iki yuzun ayrismamasi icin tek bir bag var: `SIGCONT` gorevi kaldirirken
+sayaci da sifirliyor. Olmasaydi `SIGCONT` gorevi kosar yapar, Win32 yuzu
+"hala askida" derdi -- ayni gorev icin iki ayri gercek.
+
+### `CREATE_SUSPENDED`: POSIX'te karsiligi olmayan bir dogum
+
+```text
+  Win32  CreateThread(.., CREATE_SUSPENDED, ..)
+           -> akis dogar, giris noktasina HIC girmez
+  POSIX  clone(..)
+           -> akis dogar ve KOSAR; durdurmak icin once kosmasi gerekir
+```
+
+Ayrim gorunurden fazlasi: `CREATE_SUSPENDED` ile bir akis yaratilip,
+kosmadan **once** onceligi ayarlanabilir ya da baglami degistirilebilir.
+POSIX'te arada birkac komut mutlaka yurur.
+
+TCMK'de sozun tutulabilmesi yerel bir ayrintiya dayaniyor: `spawn_thread`
+ile `stop_task` arasinda baglam degisimi yok (ikisi de cagiranin
+baglaminda, yield etmeden calisiyor), yani akis gercekten bir komut bile
+yurutmeden duruyor.
+
+### Donus degeri bilgi tasiyor
+
+Windows her iki cagride de **onceki** sayiyi donduruyor:
+
+```text
+  Resume  (askida dogmus)  -> 1
+  Suspend (kosuyor)        -> 0
+  Suspend (bir kez askida) -> 1
+  Resume  (iki kez askida) -> 2
+  Resume  (bir kez askida) -> 1
+```
+
+Yani cagiran, kendi askisindan **once** kac kez alinmis oldugunu
+ogreniyor. POSIX'in `kill`i yalnizca "gonderildi" der. E sinavi bu
+diziyi bastan sona dogruluyor.
+
+### Oncelik: zit yonlu iki olcek
+
+```text
+  Win32  buyuk sayi = daha oncelikli   (-15 .. +15)
+  POSIX  buyuk sayi = daha NAZIK       (+19 .. -20)
+```
+
+Yedi adlandirilmis Win32 duzeyi `nice` ile tam olarak gidip geliyor;
+aradaki degerler en yakinina kirpiliyor. Birebir bir eslesme uydurmak,
+olmayan bir cozunurluk vaat etmek olurdu -- zamanlayicinin dilim
+butcesi zaten dort kademeli (bkz. `slice_ticks`).
+
+### Olcumun ayirt ettigi sey
+
+Uc kasitli hatayla sinandi ve C'nin varlik sebebi ucuncusunde gorunuyor.
+Sayac kaldirilip her `Resume` kaldiriyor yapildiginda:
+
+```
+[winsusp] C SAYILIYOR: KALDI (bir Resume yetti (POSIX gibi davrandi))
+```
+
+A, B ve D o surumde de gecerdi -- "durdur/devam ettir" calisiyor
+gorunurdu. Ayirt edici olan tek sey, **bir** `Resume`un yetmemesi.
+
+### Bilerek yapilmayanlar
+
+* **Aski sayisi tavansiz degil.** `u32` sayac; gercek Windows'ta
+  `MAXIMUM_SUSPEND_COUNT` (127) asilinca cagri basarisiz olur.
+* **`SuspendThread` kendi uzerinde tehlikeli.** Windows da bunu
+  onermiyor; TCMK'de cagiran kendini askiya alirsa yalnizca bir
+  `ResumeThread` ile kalkabilir ve onu baska bir akis yapmali.
+* **`GetThreadContext`/`SetThreadContext` yok.** Askiya almanin en
+  yaygin sebebi baglami okumak; o yuzey henuz yok.
+* **`SetThreadPriority` dilim butcesine yuvarlaniyor.** Yedi duzey dort
+  kademeye dusuyor; okuma yine yedi duzeyden birini veriyor ama
+  aradaki degerler korunmuyor.
+* **Oncelik sinifi (`SetPriorityClass`) yok.** Windows'ta gercek
+  oncelik surec sinifi ile akis duzeyinin **toplami**; burada yalnizca
+  ikincisi var.
 
 ## Alfa'nin bilinen sinirlari
 

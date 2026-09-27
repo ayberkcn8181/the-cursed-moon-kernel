@@ -74,6 +74,20 @@ pub const NT_EXIT_PROCESS_W32: u32 = 0x3000;
 /// argumanlari yigina koyar. Ayni numaraya bindirmek, `ExitProcess`
 /// icin bir kez yapilmis ve dll.rs'te uyari olarak yazilmis bir hata.
 pub const NT_TERMINATE_PROCESS_W32: u32 = 0x3040;
+
+// --- Is parcacigi askiya alma (Win32) ---
+//
+// Hepsi **yigin** argumanli 0x3040 araliginda; `TerminateProcess`in
+// yasattigi dersin geregi (yukari bkz.).
+
+/// `SuspendThread(hThread)` -> onceki aski sayisi.
+pub const NT_SUSPEND_THREAD: u32 = 0x3041;
+/// `ResumeThread(hThread)` -> onceki aski sayisi.
+pub const NT_RESUME_THREAD: u32 = 0x3042;
+/// `SetThreadPriority(hThread, nPriority)` -> BOOL.
+pub const NT_SET_THREAD_PRIORITY: u32 = 0x3043;
+/// `GetThreadPriority(hThread)` -> oncelik ya da hata degeri.
+pub const NT_GET_THREAD_PRIORITY: u32 = 0x3044;
 pub const NT_SLEEP_MS: u32 = 0x3001;
 pub const NT_GET_TICK_COUNT: u32 = 0x3002;
 pub const NT_WIN32_CLOSE_HANDLE: u32 = 0x3003;
@@ -248,6 +262,136 @@ static REAPED_EXIT: [core::sync::atomic::AtomicU32;
     crate::level0a::core::scheduler::MAX_TASKS] = [const {
     core::sync::atomic::AtomicU32::new(u32::MAX)
 }; crate::level0a::core::scheduler::MAX_TASKS];
+/// `CreateThread` bayragi: akis askida dogar.
+const CREATE_SUSPENDED: u32 = 0x0000_0004;
+
+/// `GetThreadPriority` hata donusu.
+const THREAD_PRIORITY_ERROR_RETURN: i32 = 0x7FFF_FFFFu32 as i32;
+
+/// Win32 oncelik duzeyi -> POSIX `nice`.
+///
+/// Iki olcek zit yonlu ve bu bir ayrinti degil, tasarim farki:
+///
+/// ```text
+///   Win32  buyuk sayi = daha oncelikli   (-15 .. +15)
+///   POSIX  buyuk sayi = daha NAZIK       (+19 .. -20)
+/// ```
+///
+/// Eslemede yedi adlandirilmis duzey **tam olarak** gidip geliyor
+/// (bkz. `priority_of_nice`); aradaki degerler en yakinina kirpiliyor.
+/// Birebir bir eslesme uydurmak, olmayan bir cozunurluk vaat etmek
+/// olurdu -- zamanlayicinin dilim butcesi zaten dort kademeli.
+fn nice_of_priority(priority: i32) -> i8 {
+    match priority {
+        i32::MIN..=-15 => 19,  // THREAD_PRIORITY_IDLE
+        -14..=-2 => 10,        // THREAD_PRIORITY_LOWEST
+        -1 => 5,               // THREAD_PRIORITY_BELOW_NORMAL
+        0 => 0,                // THREAD_PRIORITY_NORMAL
+        1 => -5,               // THREAD_PRIORITY_ABOVE_NORMAL
+        2..=14 => -10,         // THREAD_PRIORITY_HIGHEST
+        _ => -20,              // THREAD_PRIORITY_TIME_CRITICAL
+    }
+}
+
+/// POSIX `nice` -> Win32 oncelik duzeyi.
+fn priority_of_nice(nice: i8) -> i32 {
+    match nice {
+        19 => -15,
+        10 => -2,
+        5 => -1,
+        0 => 0,
+        -5 => 1,
+        -10 => 2,
+        -20 => 15,
+        // Adlandirilmis duzeylerden biri degil: isaretine gore en
+        // yakin komsuya yuvarlaniyor.
+        n if n > 10 => -15,
+        n if n > 0 => -1,
+        n if n < -10 => 15,
+        _ => 2,
+    }
+}
+
+/// Gorev basina **aski sayisi** (`SuspendThread` / `ResumeThread`).
+///
+/// Sayac olmasi Win32'nin POSIX'ten en net ayrildigi yerlerden biri:
+///
+/// ```text
+///   POSIX  SIGSTOP x2 + SIGCONT x1  ->  KOSUYOR   (sayilmaz)
+///   Win32  Suspend x2 + Resume x1   ->  DURUYOR   (sayilir)
+/// ```
+///
+/// Ikisi de "durdur" diyor ama sozleri ayri. Windows'un sayaci, ayni
+/// akisi birbirinden habersiz iki kutuphanenin askiya alabilmesi icin:
+/// biri devam ettirdiginde otekinin askisi bozulmamali. POSIX'in
+/// yaklasimi daha yalin -- ve daha kaba.
+///
+/// TCMK ikisini ayni mekanizmanin (`TaskState::Stopped`) uzerine
+/// kuruyor ama sozlesmeleri ayri tutuyor: sayac **burada**, NT
+/// tarafinda duruyor. Bir `SIGCONT` gelirse sayac sifirlaniyor
+/// (bkz. `forget_suspend`), yoksa iki yuz birbirinden habersiz
+/// kalirdi.
+static SUSPEND_COUNT: [core::sync::atomic::AtomicU32;
+    crate::level0a::core::scheduler::MAX_TASKS] = [const {
+    core::sync::atomic::AtomicU32::new(0)
+}; crate::level0a::core::scheduler::MAX_TASKS];
+
+/// Aski sayacini sifirlar.
+///
+/// Iki yerden cagriliyor ve ikisinin de gerekcesi ayni: sayac gorev
+/// yuvasina bagli, yuva ise yeniden kullaniliyor.
+///
+/// * `spawn_inner` -- yeni bir gorev onceki kiracinin askisiyla
+///   dogmamali.
+/// * `continue_task` -- POSIX `SIGCONT` gorevi kosar yapiyor; sayac
+///   sifirlanmazsa Win32 yuzu "hala askida" der ve iki yuz ayrisir.
+pub fn forget_suspend(task: usize) {
+    if task < crate::level0a::core::scheduler::MAX_TASKS {
+        SUSPEND_COUNT[task].store(0, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Askiyi bir artirir; **onceki** sayiyi doner.
+///
+/// Sifirdan bire gecis gorevi gercekten durduruyor; sonraki artislar
+/// yalnizca sayaci buyutuyor.
+pub fn suspend_thread(task: usize) -> u32 {
+    use core::sync::atomic::Ordering;
+    if task >= crate::level0a::core::scheduler::MAX_TASKS {
+        return u32::MAX;
+    }
+    let previous = SUSPEND_COUNT[task].fetch_add(1, Ordering::SeqCst);
+    if previous == 0 && !crate::level0a::core::scheduler::stop_task(task, 0) {
+        // Durdurulamadi (ornegin gorev bitmis): sayaci geri al, yoksa
+        // olu bir yuva "askida" gorunurdu.
+        SUSPEND_COUNT[task].store(0, Ordering::SeqCst);
+        return u32::MAX;
+    }
+    previous
+}
+
+/// Askiyi bir azaltir; **onceki** sayiyi doner.
+///
+/// Gorev ancak sayac sifira dusunce kosmaya baslar -- POSIX'in
+/// `SIGCONT`iyla arasindaki butun fark bu satirda.
+pub fn resume_thread(task: usize) -> u32 {
+    use core::sync::atomic::Ordering;
+    if task >= crate::level0a::core::scheduler::MAX_TASKS {
+        return u32::MAX;
+    }
+    let previous = SUSPEND_COUNT[task].load(Ordering::SeqCst);
+    if previous == 0 {
+        // Zaten askida degil. Windows da bu durumda 0 doner.
+        return 0;
+    }
+    let next = previous - 1;
+    SUSPEND_COUNT[task].store(next, Ordering::SeqCst);
+    if next == 0 {
+        crate::level0a::core::scheduler::continue_task(task);
+    }
+    previous
+}
+
 /// `WaitForSingleObject`: nesne isaretlendi (surec bitti).
 const WAIT_OBJECT_0: usize = 0;
 /// `WaitForSingleObject`: sure doldu.
@@ -1995,10 +2139,23 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
         NT_CREATE_THREAD => {
             let start = arg_ptr(args, 2).unwrap_or(0);
             let parameter = arg_ptr(args, 3).unwrap_or(0);
+            let flags = arg(args, 4).unwrap_or(0);
             let out_id = arg_ptr(args, 5).unwrap_or(0);
 
             match unsafe { crate::level0b1::thread::create(start, parameter, 0, true) } {
                 Ok(id) => {
+                    // `CREATE_SUSPENDED`: akis dogar ama **kosmaz**.
+                    //
+                    // Yeni gorevle bu satir arasinda baglam degisimi
+                    // olmuyor (`spawn_thread` ve `stop_task` ikisi de
+                    // cagiranin baglaminda, yield etmeden calisiyor),
+                    // yani akis bir komut bile yurutmeden duruyor.
+                    // Windows'un verdigi soz tam olarak budur: `Resume`
+                    // gelene kadar giris noktasina hic girilmez.
+                    if flags & CREATE_SUSPENDED != 0 {
+                        SUSPEND_COUNT[id].store(1, core::sync::atomic::Ordering::SeqCst);
+                        crate::level0a::core::scheduler::stop_task(id, 0);
+                    }
                     if out_id != 0 && mmu::is_user_accessible(out_id) {
                         unsafe { (out_id as *mut u32).write_unaligned(id as u32) };
                     }
@@ -2023,6 +2180,75 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
         NT_EXIT_THREAD => {
             let code = arg(args, 0).unwrap_or(0);
             kernel_api::exit_current_task(code & 0xFF);
+        }
+
+        // SuspendThread(hThread) -> onceki aski sayisi (hata: (DWORD)-1)
+        NT_SUSPEND_THREAD => {
+            let handle = arg(args, 0).unwrap_or(0) as usize;
+            match handle.checked_sub(PROCESS_HANDLE_FLAG) {
+                Some(task) => {
+                    let previous = suspend_thread(task);
+                    if previous == u32::MAX {
+                        set_last_error(ERROR_INVALID_HANDLE);
+                    }
+                    previous as usize
+                }
+                None => {
+                    set_last_error(ERROR_INVALID_HANDLE);
+                    u32::MAX as usize
+                }
+            }
+        }
+
+        // ResumeThread(hThread) -> onceki aski sayisi
+        NT_RESUME_THREAD => {
+            let handle = arg(args, 0).unwrap_or(0) as usize;
+            match handle.checked_sub(PROCESS_HANDLE_FLAG) {
+                Some(task) => {
+                    let previous = resume_thread(task);
+                    if previous == u32::MAX {
+                        set_last_error(ERROR_INVALID_HANDLE);
+                    }
+                    previous as usize
+                }
+                None => {
+                    set_last_error(ERROR_INVALID_HANDLE);
+                    u32::MAX as usize
+                }
+            }
+        }
+
+        // SetThreadPriority(hThread, nPriority) -> BOOL
+        NT_SET_THREAD_PRIORITY => {
+            let handle = arg(args, 0).unwrap_or(0) as usize;
+            let priority = arg(args, 1).unwrap_or(0) as i32;
+            match handle.checked_sub(PROCESS_HANDLE_FLAG) {
+                Some(task)
+                    if crate::level0a::core::scheduler::set_nice(task, nice_of_priority(priority))
+                        .is_ok() =>
+                {
+                    WIN32_TRUE
+                }
+                _ => {
+                    set_last_error(ERROR_INVALID_HANDLE);
+                    WIN32_FALSE
+                }
+            }
+        }
+
+        // GetThreadPriority(hThread) -> oncelik (hata: THREAD_PRIORITY_ERROR_RETURN)
+        NT_GET_THREAD_PRIORITY => {
+            let handle = arg(args, 0).unwrap_or(0) as usize;
+            match handle.checked_sub(PROCESS_HANDLE_FLAG) {
+                Some(task) if task < crate::level0a::core::scheduler::MAX_TASKS => {
+                    let nice = crate::level0a::core::scheduler::nice_of(task);
+                    priority_of_nice(nice) as usize
+                }
+                _ => {
+                    set_last_error(ERROR_INVALID_HANDLE);
+                    THREAD_PRIORITY_ERROR_RETURN as usize
+                }
+            }
         }
 
         // GetExitCodeThread(hThread, lpExitCode)

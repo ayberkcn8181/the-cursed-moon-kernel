@@ -426,7 +426,54 @@ extern "system" {
     /// **yok**: `waitpid` is parcacigini gormez, `pthread_join` ise
     /// donus degerini kutuphanenin kendi yapisindan alir.
     pub fn GetExitCodeThread(thread: Handle, exit_code: *mut Dword) -> Bool;
+
+    /// Akisi askiya alir; **onceki** aski sayisini doner.
+    ///
+    /// Win32'nin POSIX'ten en net ayrildigi yerlerden biri: aski
+    /// **sayilir**.
+    ///
+    /// ```text
+    ///   POSIX  SIGSTOP x2 + SIGCONT x1  ->  KOSUYOR
+    ///   Win32  Suspend x2 + Resume x1   ->  DURUYOR
+    /// ```
+    ///
+    /// Sebebi, ayni akisi birbirinden habersiz iki kutuphanenin
+    /// askiya alabilmesi: biri devam ettirdiginde otekinin askisi
+    /// bozulmamali.
+    pub fn SuspendThread(thread: Handle) -> Dword;
+
+    /// Askiyi bir azaltir; **onceki** aski sayisini doner. Akis ancak
+    /// sayi sifira dusunce kosmaya baslar.
+    pub fn ResumeThread(thread: Handle) -> Dword;
+
+    /// Akisin onceligini ayarlar.
+    ///
+    /// Olcek POSIX'in `nice`inin **tersi**: buyuk sayi daha oncelikli.
+    pub fn SetThreadPriority(thread: Handle, priority: i32) -> Bool;
+
+    /// Akisin onceligi; hata durumunda `THREAD_PRIORITY_ERROR_RETURN`.
+    pub fn GetThreadPriority(thread: Handle) -> i32;
 }
+
+/// `CreateThread` bayragi: akis **askida dogar** ve `ResumeThread`
+/// gelene kadar giris noktasina hic girmez.
+///
+/// POSIX'te karsiligi yok: `clone` ile dogan akis hemen kosar. Bir
+/// akisi "hazir ama durmus" yaratmak icin POSIX'te once kosturup sonra
+/// durdurmak gerekir -- yani arada birkac komut mutlaka yurur.
+pub const CREATE_SUSPENDED: Dword = 0x0000_0004;
+
+/// `GetThreadPriority` hata donusu.
+pub const THREAD_PRIORITY_ERROR_RETURN: i32 = 0x7FFF_FFFFu32 as i32;
+
+// Adlandirilmis oncelik duzeyleri.
+pub const THREAD_PRIORITY_IDLE: i32 = -15;
+pub const THREAD_PRIORITY_LOWEST: i32 = -2;
+pub const THREAD_PRIORITY_BELOW_NORMAL: i32 = -1;
+pub const THREAD_PRIORITY_NORMAL: i32 = 0;
+pub const THREAD_PRIORITY_ABOVE_NORMAL: i32 = 1;
+pub const THREAD_PRIORITY_HIGHEST: i32 = 2;
+pub const THREAD_PRIORITY_TIME_CRITICAL: i32 = 15;
 
 /// `WaitOnAddress` sure dolunca `GetLastError` bunu verir.
 pub const ERROR_TIMEOUT: Dword = 1460;

@@ -67,3 +67,7 @@ CreatePipe@16 @54
 PeekNamedPipe@24 @55
 SetNamedPipeHandleState@16 @56
 TerminateProcess@8 @57
+SuspendThread@4 @58
+ResumeThread@4 @59
+SetThreadPriority@8 @60
+GetThreadPriority@4 @61
