@@ -226,3 +226,211 @@ pub unsafe fn build_signal_frame(
     context.redirect(handler, sp);
     Some(())
 }
+
+// --- `SA_SIGINFO` cercevesi (x86_64) ----------------------------------
+//
+// i386'daki ikiziyle ayni gerekce: sayilar Linux ABI'sinin parcasidir
+// (bkz. orada). Duzen yine de **ayni degil** -- `siginfo_t`nin birlesimi
+// 8'e hizalandigi icin arada bir dolgu var, ve `ucontext_t` registerlari
+// bir dizide (`gregs`) tutuyor.
+
+const SIGINFO_SIZE: usize = 128;
+
+/// `siginfo_t` alan ofsetleri (x86_64).
+mod si {
+    pub const SIGNO: usize = 0x00;
+    pub const ERRNO: usize = 0x04;
+    pub const CODE: usize = 0x08;
+    /// 0x0C'de dolgu var: birlesim 8'e hizali basliyor.
+    pub const ADDR: usize = 0x10;
+    pub const PID: usize = 0x10;
+    pub const UID: usize = 0x14;
+}
+
+/// `ucontext_t` icin ayrilan yer (glibc olcusu; bkz. i386 ikizi).
+const UCONTEXT_SIZE: usize = 968;
+
+/// `ucontext_t` alan ofsetleri (x86_64).
+///
+/// `uc_mcontext` 0x28'te basliyor ve ilk alani `gregs`, 23 kelimelik bir
+/// dizi. Asagidaki ofsetler `ucontext_t`nin basina goredir; her biri
+/// `0x28 + REG_* * 8`.
+mod uc {
+    pub const FLAGS: usize = 0x00;
+    pub const LINK: usize = 0x08;
+    pub const STACK: usize = 0x10;
+    pub const MCONTEXT: usize = 0x28;
+
+    pub const R8: usize = MCONTEXT;
+    pub const R9: usize = MCONTEXT + 8;
+    pub const R10: usize = MCONTEXT + 16;
+    pub const R11: usize = MCONTEXT + 24;
+    pub const R12: usize = MCONTEXT + 32;
+    pub const R13: usize = MCONTEXT + 40;
+    pub const R14: usize = MCONTEXT + 48;
+    pub const R15: usize = MCONTEXT + 56;
+    pub const RDI: usize = MCONTEXT + 64;
+    pub const RSI: usize = MCONTEXT + 72;
+    pub const RBP: usize = MCONTEXT + 80;
+    pub const RBX: usize = MCONTEXT + 88;
+    pub const RDX: usize = MCONTEXT + 96;
+    pub const RAX: usize = MCONTEXT + 104;
+    pub const RCX: usize = MCONTEXT + 112;
+    pub const RSP: usize = MCONTEXT + 120;
+    pub const RIP: usize = MCONTEXT + 128;
+    pub const EFL: usize = MCONTEXT + 136;
+    pub const CSGSFS: usize = MCONTEXT + 144;
+    pub const ERR: usize = MCONTEXT + 152;
+    pub const TRAPNO: usize = MCONTEXT + 160;
+    pub const OLDMASK: usize = MCONTEXT + 168;
+    /// `cr2` -- sayfa hatasinin adresi.
+    pub const CR2: usize = MCONTEXT + 176;
+    pub const SIGMASK: usize = 0x128;
+}
+
+/// i386 ikiziyle ayni: bayraklarin kullaniciya birakilan bitleri.
+const USER_FLAGS: u64 = 0x0000_0CD5;
+
+/// Ring 3 yigininin ustune bir **`SA_SIGINFO` cercevesi** kurar.
+///
+/// System V duzeni: uc arguman da registerda gider, yigina yalnizca
+/// donus adresi konur.
+///
+/// ```text
+///   RDI   = signo
+///   RSI   = siginfo_t*
+///   RDX   = ucontext_t*
+///   [rsp] = restorer
+///
+///   ... yukarida (kirmizi bolgenin de ustunde):
+///   [siginfo_t]    128 bayt
+///   [ucontext_t]   968 bayt
+/// ```
+///
+/// Kirmizi bolge yine atlaniyor (bkz. `build_signal_frame`).
+///
+/// Doner: Ring 3'teki `ucontext_t`nin adresi.
+///
+/// # Safety
+/// `build_signal_frame` ile ayni kosul.
+pub unsafe fn build_siginfo_frame(
+    context: &mut UserContext,
+    signo: u32,
+    handler: usize,
+    restorer: usize,
+    info: &crate::level0b1::signal::SigInfo,
+) -> Option<usize> {
+    use crate::level0a::core::mmu;
+
+    const RECORDS: usize = SIGINFO_SIZE + UCONTEXT_SIZE;
+    let sp = context.stack_pointer();
+    if sp < RECORDS + 256 {
+        return None;
+    }
+    let base = (sp - 128 - RECORDS) & !0xF;
+    let mut probe = base;
+    while probe < base + RECORDS {
+        if !mmu::is_user_accessible(probe) {
+            return None;
+        }
+        probe += 4096;
+    }
+    if !mmu::is_user_accessible(base + RECORDS - 1) {
+        return None;
+    }
+
+    let siginfo_at = base;
+    let ucontext_at = base + SIGINFO_SIZE;
+
+    let call = (base & !0xF) - 8;
+    if !mmu::is_user_accessible(call) || !mmu::is_user_accessible(call + 7) {
+        return None;
+    }
+
+    core::ptr::write_bytes(siginfo_at as *mut u8, 0, RECORDS);
+    let put32 = |at: usize, value: u32| (at as *mut u32).write_unaligned(value);
+
+    put32(siginfo_at + si::SIGNO, signo);
+    put32(siginfo_at + si::ERRNO, 0);
+    put32(siginfo_at + si::CODE, info.code as u32);
+    if info.addr != 0 {
+        ((siginfo_at + si::ADDR) as *mut u64).write_unaligned(info.addr as u64);
+    } else {
+        put32(siginfo_at + si::PID, info.pid as u32);
+        put32(siginfo_at + si::UID, 0);
+    }
+
+    write_ucontext(ucontext_at, context, info);
+
+    (call as *mut u64).write_unaligned(restorer as u64);
+    context.rdi = signo as u64;
+    context.rsi = siginfo_at as u64;
+    context.rdx = ucontext_at as u64;
+
+    context.redirect(handler, call);
+    Some(ucontext_at)
+}
+
+/// Kesilen baglami `ucontext_t`ye doker.
+unsafe fn write_ucontext(
+    at: usize,
+    context: &UserContext,
+    info: &crate::level0b1::signal::SigInfo,
+) {
+    let put = |offset: usize, value: u64| ((at + offset) as *mut u64).write_unaligned(value);
+    put(uc::FLAGS, 0);
+    put(uc::LINK, 0);
+    put(uc::STACK, 0);
+    put(uc::R8, context.r8);
+    put(uc::R9, context.r9);
+    put(uc::R10, context.r10);
+    put(uc::R11, context.r11);
+    put(uc::R12, context.r12);
+    put(uc::R13, context.r13);
+    put(uc::R14, context.r14);
+    put(uc::R15, context.r15);
+    put(uc::RDI, context.rdi);
+    put(uc::RSI, context.rsi);
+    put(uc::RBP, context.rbp);
+    put(uc::RBX, context.rbx);
+    put(uc::RDX, context.rdx);
+    put(uc::RAX, context.rax);
+    put(uc::RCX, context.rcx);
+    put(uc::RSP, context.rsp);
+    put(uc::RIP, context.rip);
+    put(uc::EFL, context.rflags);
+    // `csgsfs`: CS, GS, FS seciciileri tek kelimede paketlenir. Ring 3
+    // CS'i 0x33'tur (bkz. `gdt::x86_64`).
+    put(uc::CSGSFS, 0x33);
+    put(uc::ERR, 0);
+    put(uc::TRAPNO, 0);
+    put(uc::OLDMASK, 0);
+    put(uc::CR2, info.addr as u64);
+    let _ = uc::SIGMASK;
+}
+
+/// Tersi: isleyicinin (belki degistirdigi) `ucontext_t`sini okur.
+///
+/// # Safety
+/// `at` Ring 3'e ait, okunabilir bir `ucontext_t` olmalidir.
+pub unsafe fn read_ucontext(at: usize, context: &mut UserContext) {
+    let get = |offset: usize| ((at + offset) as *const u64).read_unaligned();
+    context.r8 = get(uc::R8);
+    context.r9 = get(uc::R9);
+    context.r10 = get(uc::R10);
+    context.r11 = get(uc::R11);
+    context.r12 = get(uc::R12);
+    context.r13 = get(uc::R13);
+    context.r14 = get(uc::R14);
+    context.r15 = get(uc::R15);
+    context.rdi = get(uc::RDI);
+    context.rsi = get(uc::RSI);
+    context.rbp = get(uc::RBP);
+    context.rbx = get(uc::RBX);
+    context.rdx = get(uc::RDX);
+    context.rax = get(uc::RAX);
+    context.rcx = get(uc::RCX);
+    context.rsp = get(uc::RSP);
+    context.rip = get(uc::RIP);
+    context.rflags = (get(uc::EFL) & USER_FLAGS) | 0x202;
+}

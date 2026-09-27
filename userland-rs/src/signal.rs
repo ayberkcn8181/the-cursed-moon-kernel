@@ -80,12 +80,26 @@ core::arch::global_asm!(
     "int 0x80",
 );
 
+// x86_64'te donus **kesme kapisindan** yapiliyor, `syscall`dan degil.
+//
+// Fark ince ama belirleyici: `syscall` komutu donus adresini `RCX`e,
+// bayraklari `R11`e koyar. Yani o yoldan donen bir cagri **o iki
+// registeri geri yukleyemez** -- ikisi donus bilgisinin kendisini
+// tasir. Siradan bir cagri icin bu sorun degil (ABI zaten ikisini
+// "cagri tarafindan bozulur" sayar), ama `sigreturn` siradan bir cagri
+// degil: isleyicinin `ucontext_t`de yaptigi duzeltmeyi geri yuklemesi
+// gerekiyor ve duzeltilen sey `RCX` olabilir.
+//
+// `int 0x80` bir kesme kapisidir ve `iretq` ile doner; cerceve butun
+// registerlari tasir. Bu yuzden TCMK'nin x86_64 cekirdegi o vektoru
+// de bagli tutuyor (bkz. `idt::x86_64`). Windows yuzu ayni sebeple
+// zaten `int 0x2E` kullaniyordu -- POSIX yuzu de artik esit.
 #[cfg(target_arch = "x86_64")]
 core::arch::global_asm!(
     ".globl __tcmk_sigreturn",
     "__tcmk_sigreturn:",
     "mov eax, 15",
-    "syscall",
+    "int 0x80",
 );
 
 extern "C" {
@@ -175,6 +189,188 @@ pub fn action(signo: u32, handler: extern "C" fn(u32), flags: u32, mask: u32) ->
 /// bilmesi gereken bir sey.
 pub fn install(signo: u32, handler: extern "C" fn(u32)) -> isize {
     install_with(signo, handler, 0)
+}
+
+/// Isleyici **uc** arguman alir: `(signo, *const SigInfo, *mut UContext)`.
+///
+/// Tek argumanli yuz yalnizca "hangi sinyal" der. Uc argumanli yuz
+/// "neden" ve "nerede" sorularina da cevap veriyor -- ve ikincisi
+/// **yazilabilir**: isleyici bir registeri duzeltip donerse hatali komut
+/// duzeltilmis haliyle tekrarlanir.
+pub const SA_SIGINFO: u32 = 0x0000_0004;
+
+/// Uc argumanli isleyicinin imzasi.
+pub type SigActionHandler = extern "C" fn(u32, *const SigInfo, *mut UContext);
+
+/// Isleyiciyi `SA_SIGINFO` ile kurar.
+///
+/// `action`dan farki yalnizca imzasi ve bayragin kendiliginden
+/// konmasi. Ayri bir fonksiyon olmasi bilincli: iki imza ikili duzeyde
+/// uyumsuz, yani bayragi yanlislikla unutmak ya da fazladan koymak
+/// isleyiciyi cop argumanlarla cagirirdi.
+pub fn action_info(signo: u32, handler: SigActionHandler, flags: u32, mask: u32) -> isize {
+    let act = SigAction {
+        handler: handler as *const () as usize,
+        restorer: __tcmk_sigreturn as *const () as usize,
+        flags: flags | SA_SIGINFO,
+        mask,
+    };
+    sigaction_raw(signo, &act, core::ptr::null_mut())
+}
+
+// --- `si_code`: sinyalin kaynagi (Linux ile ayni sayilar) ------------
+pub const SI_USER: i32 = 0;
+pub const SI_KERNEL: i32 = 0x80;
+/// `SIGSEGV`: adres **eslenmemis**.
+pub const SEGV_MAPERR: i32 = 1;
+/// `SIGSEGV`: adres eslenmis ama erisim izni yok.
+pub const SEGV_ACCERR: i32 = 2;
+/// `SIGFPE`: tam sayi sifira bolme.
+pub const FPE_INTDIV: i32 = 1;
+/// `SIGILL`: gecersiz islem.
+pub const ILL_ILLOPN: i32 = 2;
+
+/// `siginfo_t`nin okunan bolumu.
+///
+/// Gercek `siginfo_t` 128 bayttir ve sonrasi sinyale gore degisen bir
+/// birlesimdir. Burada yalnizca **ortak bas** alaniyla birlesimin ilk
+/// kelimesi tanimli; geri kalani okunmuyor, o yuzden yazilmasina da
+/// gerek yok.
+///
+/// Birlesimin tek alanla temsil edilmesi bir sadelestirme degil, ikili
+/// gercek: `si_addr` ile `si_pid` **ayni ofsette** durur. Hangisinin
+/// gecerli oldugunu sinyal ve `si_code` belirler.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SigInfo {
+    pub signo: i32,
+    pub errno: i32,
+    pub code: i32,
+    /// x86_64'te birlesim 8'e hizali basliyor; bu dolgu onun yeri.
+    #[cfg(target_arch = "x86_64")]
+    #[allow(dead_code)]
+    _pad: i32,
+    /// Birlesimin ilk kelimesi.
+    field: usize,
+}
+
+impl SigInfo {
+    /// Hataya yol acan adres (`SIGSEGV`, `SIGBUS`, `SIGFPE`, `SIGILL`).
+    pub fn addr(&self) -> usize {
+        self.field
+    }
+
+    /// Gonderenin kimligi (`si_code == SI_USER`).
+    pub fn pid(&self) -> usize {
+        self.field & 0xFFFF_FFFF
+    }
+}
+
+/// `ucontext_t` -- sinyal kesildiginde registerlarin durumu.
+///
+/// Ham bayt blogu olarak tutuluyor ve alanlara ofsetle erisiliyor;
+/// gerekce `winapi::Context` ile ayni (bkz. orada): kaydin buyuk
+/// bolumu bu programin dokunmadigi bolgeler ve ic duzenlerini burada
+/// yazmak, iki yerde ayrisabilen bir ABI birakirdi.
+///
+/// **Yazilabilir** olmasi asil nokta: isleyici bir registeri
+/// degistirip donerse cekirdek degistirilmis baglami geri yukler.
+#[repr(C)]
+pub struct UContext {
+    _opaque: [u8; 16],
+}
+
+/// `ucontext_t` icindeki register ofsetleri.
+///
+/// i386'da `uc_mcontext` 0x14'te bir `struct sigcontext`tir; x86_64'te
+/// 0x28'te 23 kelimelik bir `gregs` dizisi. Sayilar Linux ABI'sinin
+/// parcasidir.
+#[cfg(target_arch = "x86")]
+mod uc {
+    const M: usize = 0x14;
+    pub const EDI: usize = M + 16;
+    pub const ESI: usize = M + 20;
+    pub const EBP: usize = M + 24;
+    pub const ESP: usize = M + 28;
+    pub const EBX: usize = M + 32;
+    pub const EDX: usize = M + 36;
+    pub const ECX: usize = M + 40;
+    pub const EAX: usize = M + 44;
+    pub const EIP: usize = M + 56;
+    pub const CR2: usize = M + 84;
+}
+
+#[cfg(target_arch = "x86_64")]
+mod uc {
+    const M: usize = 0x28;
+    pub const EDI: usize = M + 64;
+    pub const ESI: usize = M + 72;
+    pub const EBP: usize = M + 80;
+    pub const EBX: usize = M + 88;
+    pub const EDX: usize = M + 96;
+    pub const EAX: usize = M + 104;
+    pub const ECX: usize = M + 112;
+    pub const ESP: usize = M + 120;
+    pub const EIP: usize = M + 128;
+    pub const CR2: usize = M + 176;
+}
+
+/// `ucontext_t`de adlandirilmis bir register.
+///
+/// Adlar i386 yuzunden geliyor ve x86_64'te 64 bitlik ikizine denk
+/// duser (`Cx` -> `ecx`/`rcx`). `winapi`nin `Reg`i ile ayni desen:
+/// kaydin duzeni mimariye gore degisiyor ama **hangi register** oldugu
+/// degismiyor.
+#[derive(Clone, Copy)]
+pub enum Reg {
+    Ax,
+    Bx,
+    Cx,
+    Dx,
+    Si,
+    Di,
+    Bp,
+    Sp,
+    Ip,
+    /// Sayfa hatasinin adresi -- register degil, ama ayni kayitta.
+    Cr2,
+}
+
+fn reg_offset(reg: Reg) -> usize {
+    match reg {
+        Reg::Ax => uc::EAX,
+        Reg::Bx => uc::EBX,
+        Reg::Cx => uc::ECX,
+        Reg::Dx => uc::EDX,
+        Reg::Si => uc::ESI,
+        Reg::Di => uc::EDI,
+        Reg::Bp => uc::EBP,
+        Reg::Sp => uc::ESP,
+        Reg::Ip => uc::EIP,
+        Reg::Cr2 => uc::CR2,
+    }
+}
+
+/// `ucontext_t`den bir register okur.
+///
+/// # Safety
+/// `context` cekirdegin kurdugu gecerli bir `ucontext_t` olmalidir --
+/// yani yalnizca bir `SA_SIGINFO` isleyicisinin icinde.
+pub unsafe fn get_reg(context: *const UContext, reg: Reg) -> usize {
+    ((context as usize + reg_offset(reg)) as *const usize).read_unaligned()
+}
+
+/// `ucontext_t`ye bir register yazar.
+///
+/// Yazilan deger isleyici **dondugunde** yururluge girer: cekirdek
+/// baglami bu kayittan geri okur. Hatali bir komutu duzeltmenin yolu
+/// budur -- Windows'ta ayni isi `CONTEXT` + `EXCEPTION_CONTINUE_EXECUTION`
+/// yapiyor.
+///
+/// # Safety
+/// `get_reg` ile ayni kosul.
+pub unsafe fn set_reg(context: *mut UContext, reg: Reg, value: usize) {
+    ((context as usize + reg_offset(reg)) as *mut usize).write_unaligned(value)
 }
 
 /// Isleyiciyi **bayraklarla** kurar (`SA_RESTART`, `SA_NODEFER`, ...).

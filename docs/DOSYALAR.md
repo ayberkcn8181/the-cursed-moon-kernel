@@ -126,7 +126,7 @@ cevirisi** yapip Level-0a'nin ortak API'sine devreder.
 | `process.rs` | Bir ikiliyi yukleyip Ring 3'e sokan akis. Adres uzayi kurar, yigin yerlesimini yapar (POSIX'te `argc/argv/envp/auxv`, Win32'de tek komut satiri), TSS'i ayarlar. |
 | `argv.rs` | **Arguman vektoru.** POSIX `argv[]` dizisi ile Win32 komut satiri arasindaki ortak tasiyici (NUL ayrilmis blok) ve `CommandLineToArgvW`nin alintilama kurallari. |
 | `fork.rs` | `fork`: adres uzayini copy-on-write kopyalar, cocuk gorevi kurar, ebeveynin baglamini 0 donusuyle cocuga verir. `execve` zinciri de burada yurutulur. |
-| `signal.rs` | POSIX sinyalleri: yerlestirme tablosu, maske, ic ice teslim, `sigreturn`. Cekirdek kullanici yiginina bir cerceve kurup baglami isleyiciye cevirir. |
+| `signal.rs` | POSIX sinyalleri: yerlestirme tablosu, maske, ic ice teslim, `sigreturn`. Cekirdek kullanici yiginina bir cerceve kurup baglami isleyiciye cevirir. `deliver_fault` bir CPU hatasini sinyale ceviriyor (`exceptions.rs`ten cagriliyor); `SA_SIGINFO` yuzu isleyiciye `siginfo_t` + **yazilabilir** `ucontext_t` veriyor ve `sigreturn` baglami oradan geri okuyor. |
 | `futex.rs` | **Adres uzerinde bekleme.** `futex` ve `WaitOnAddress`in ortak govdesi: deger sinamasi, zaman asiminin tik cevrimi, `CLONE_CHILD_CLEARTID` sozunun yerine getirilmesi. Iki ABI'nin ayrisan sozlesmeleri (sayi mi adres mi, `-EAGAIN` mi `TRUE` mi) burada belgeli. |
 | `thread.rs` | **Is parcaciklari.** `clone` ve `CreateThread`in ortak govdesi: yaratanin adres uzayini/grubunu paylasan yeni bir gorev, ayri yigin ve TEB, yiginin tepesine yazilan 13 baytlik cikis trambleni (ELF'te `int 0x80`, PE'de `int 0x2E`). Giris baglami **yaratma aninda** kurulup saklanir; `GetThreadContext`/`SetThreadContext` onu okur ve yazar, giris noktasi yalnizca yukler. |
 
@@ -176,7 +176,7 @@ cevirisi** yapip Level-0a'nin ortak API'sine devreder.
 | `input.rs` | PS/2 fare (IRQ12): konum ve dugme durumu. |
 | `pic.rs` | 8259A yeniden haritalama. Slave denetleyici `0x70`e alindigi icin IRQ12/14 vektorleri 116/118. |
 | `pit.rs` | 8253/8254 zamanlayici, 100 Hz. Nabiz sayaci burada artar. |
-| `exceptions.rs` | Butun 32 CPU istisnasinin ortak govdesi. Kurtarilabilir mi (COW, talep uzerine sayfalama), SEH'e devredilebilir mi, yoksa olumcul mu. |
+| `exceptions.rs` | Butun 32 CPU istisnasinin ortak govdesi ve **dort** sonuc: kurtarilabilir mi (COW, talep uzerine sayfalama), PE'nin SEH isleyicisine mi, POSIX sinyaline mi (`signal::deliver_fault`), yoksa olumcul mu. `fault_info` hatayi `si_code`a ceviriyor -- donanimin PRESENT biti degil, girdinin Ring 3'e acik olup olmadigi olculuyor. |
 | `syscall_msr.rs` | x86_64'un `syscall` komutu icin MSR kurulumu (`STAR`, `LSTAR`, `SFMASK`). |
 | `installer.rs` | Sistemi diske kuran akis (`install` komutu). Yalnizca i386: zincir gercek mod kodudur, x86_64'te komut acikca reddeder. |
 | `messages.rs` | Acilista ekrana yazilan metinler; tek yerde toplanmis. |
@@ -285,6 +285,7 @@ gunluge yazarlar ve olcum bunlardan okunur.
 | `mapped.rs` (4 sinav) | Dosya destekli `mmap`: icerik, hizasiz ofset reddi, dosya sonu sifirlamasi. |
 | `death.rs` (6 sinav) | Cocugun **nasil** oldugu: `WIFEXITED`/`WIFSIGNALED`/`WTERMSIG`, cokmenin `SIGSEGV`e ve sifira bolmenin `SIGFPE`ye eslenmesi, `exit(9)` ile `SIGKILL(9)`un ayirt edilmesi. |
 | `intr.rs` (6 sinav) | `EINTR` ve `SA_RESTART`: bekleyen okuma/yazmanin sinyalle bolunmesi, bolunen cagrinin veriyi tuketmemesi, cerceve geri sarilarak yeniden baslatma, ve yok sayilan sinyalin **bolmemesi**. |
+| `bin/sigfault.rs` (7 sinav) | **Sayfa hatasini yakalayip duzeltmek.** `SIGSEGV` isleyicisi kostu mu ve surec yasiyor mu, `si_addr` erisilmek istenen adresi tasiyor mu, `si_code` sebebi dogru soyluyor mu, `ucontext_t`ye yazilan register **yurudu** mu (komut tekrarlandi ve yazma dogru yere dustu), `SIGFPE` de ayni yoldan geliyor mu, `kill` ile gelen sinyalde gonderenin kimligi var mi, ve isleyici **yokken** hata izolasyonu bozulmamis mi. Hata uretimi cocuk surecte: duzeltme yurumezse sinav asili kalmak yerine rapor ediyor. |
 | `win/context.rs` (7 sinav) | **Baglam okuma/yazma.** Askida dogan akisin `Eip`i giris fonksiyonunu gosteriyor mu, yazilan `Eip` gercekten yuruyor mu (akis BASKA bir yerden basliyor), cagiranin kendi baglami canli cerceveden mi geliyor (okunan `Esp` yerel bir degiskene komsu mu), kosan bir akis icin cagri uydurmak yerine **reddediliyor** mu, ve `CreateThread` cagiranin segment tabanini bozmuyor mu. |
 | `win/suspend.rs` (6 sinav) | Win32'nin **sayilan** askisi: `CREATE_SUSPENDED` ile askida dogan akis, iki `Suspend` + bir `Resume` sonrasi hala duruyor mu (POSIX ikizinde ayni dizi kosan bir surec verir), donus degerleri **onceki** sayiyi veriyor mu, ve `SetThreadPriority` gidip geliyor mu. |
 | `jobs.rs` (6 sinav) | Is denetimi: `SIGSTOP` durduruyor mu (boru uzerinden olculen ilerlemeyle), `waitpid` `WUNTRACED` ile bildiriyor mu, `SIGCONT` kaldiriyor mu, `SIGSTOP` yakalanamiyor mu, `kill(-pgid)` gruptaki iki cocugu da etkiliyor mu, ve durmus cocuk `WIFSIGNALED` gorunmuyor mu. |

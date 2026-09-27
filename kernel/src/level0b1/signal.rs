@@ -169,10 +169,76 @@ pub const SA_RESETHAND: u32 = 0x8000_0000;
 /// `ERESTARTSYS` mekanizmasi da budur.
 pub const SA_RESTART: u32 = 0x1000_0000;
 
+/// Isleyici **uc** arguman alir: `(signo, siginfo_t*, ucontext_t*)`.
+///
+/// Tek argumanli yuz yalnizca "hangi sinyal" der. Uc argumanli yuz iki
+/// soruya daha cevap veriyor:
+///
+/// ```text
+///   siginfo_t  NEDEN geldi  -- si_code, si_addr, si_pid
+///   ucontext_t NEREDE kesildi -- butun registerlar
+/// ```
+///
+/// Ikincisi bir okuma yuzeyi degil: `ucontext_t` **yazilabilir**.
+/// Isleyici bir registeri duzeltip donerse cekirdek duzeltilmis baglami
+/// geri yukler ve hatali komut tekrarlanir. Windows'ta bunun adi
+/// `EXCEPTION_CONTINUE_EXECUTION`; POSIX'te ayri bir adi yok, cunku
+/// mekanizma zaten donusun kendisidir (bkz. `sigreturn`).
+pub const SA_SIGINFO: u32 = 0x0000_0004;
+
 /// Cekirdegin tanidigi bayraklar. Digerleri sessizce yok sayilir --
 /// `SA_RESTART` gibi, karsiligi olmayan bir bayragi kabul ediyormus gibi
 /// yapmak yaniltici olurdu (bkz. README).
-pub const SUPPORTED_FLAGS: u32 = SA_NODEFER | SA_RESETHAND | SA_RESTART;
+pub const SUPPORTED_FLAGS: u32 = SA_NODEFER | SA_RESETHAND | SA_RESTART | SA_SIGINFO;
+
+// --- `si_code`: sinyalin **kaynagi** (Linux ile ayni sayilar) ---------
+//
+// Sinyal numarasi ne oldugunu, `si_code` nereden geldigini soyler. Ayrim
+// gercek programlarda onemli: `SIGSEGV`i yakalayan bir kod, hatanin
+// eslenmemis bir sayfadan mi yoksa izin ihlalinden mi geldigine gore
+// farkli davranir (birincisi tembel bir ayirici icin normal, ikincisi
+// degil).
+
+/// Bir surec `kill` ile gonderdi. `si_pid` gonderenin kimligidir.
+pub const SI_USER: i32 = 0;
+/// Cekirdek gonderdi (ornegin `SIGPIPE`).
+pub const SI_KERNEL: i32 = 0x80;
+/// `SIGSEGV`: adres **eslenmemis**.
+pub const SEGV_MAPERR: i32 = 1;
+/// `SIGSEGV`: adres eslenmis ama erisim izni yok.
+pub const SEGV_ACCERR: i32 = 2;
+/// `SIGFPE`: tam sayi sifira bolme.
+pub const FPE_INTDIV: i32 = 1;
+/// `SIGILL`: gecersiz islem.
+pub const ILL_ILLOPN: i32 = 2;
+
+/// Bir sinyalin **neden** geldigi.
+///
+/// `sigaction`in `SA_SIGINFO` yuzunde Ring 3'e `siginfo_t` olarak
+/// gidiyor. Cekirdek icinde ayri bir tip olmasi kasitli: `siginfo_t`nin
+/// ikili duzeni mimariye gore degisiyor (bkz. `usermode.rs`), oysa
+/// tasidigi anlam degismiyor.
+#[derive(Clone, Copy)]
+pub struct SigInfo {
+    /// `si_code` -- sinyalin kaynagi.
+    pub code: i32,
+    /// `si_addr` -- `SIGSEGV`/`SIGBUS`/`SIGFPE`/`SIGILL`'de hataya yol
+    /// acan adres. Digerlerinde sifir.
+    pub addr: usize,
+    /// `si_pid` -- `kill` ile gelenlerde **gonderenin** kimligi.
+    pub pid: usize,
+}
+
+impl SigInfo {
+    /// Bilgi tasimayan kayit: `si_code` disinda her sey sifir.
+    pub const fn from_kernel() -> Self {
+        SigInfo {
+            code: SI_KERNEL,
+            addr: 0,
+            pid: 0,
+        }
+    }
+}
 
 /// Surec basina yerlestirmeler. Gorev kimligiyle indekslenir; `fork`
 /// bunlari kopyalar (`clone_into`), `execve`/cikis sifirlar (`reset`).
@@ -213,6 +279,27 @@ static mut SAVED: [[UserContext; NEST_DEPTH]; scheduler::MAX_TASKS] =
 /// (`sa_mask` + sinyalin kendisi) yalnizca isleyici suresince gecerlidir.
 static mut SAVED_MASK: [[u32; NEST_DEPTH]; scheduler::MAX_TASKS] =
     [[0; NEST_DEPTH]; scheduler::MAX_TASKS];
+
+/// Her katmanda Ring 3'teki `ucontext_t`nin adresi; 0 = yok.
+///
+/// Yalnizca `SA_SIGINFO` isleyicileri icin dolu. `sigreturn` buraya
+/// bakiyor: kayit varsa baglam **oradan** okunuyor, yani isleyicinin
+/// yaptigi degisiklikler yurumus oluyor. Yoksa `SAVED`den, yani
+/// isleyici hicbir sey degistirememis gibi.
+static UCONTEXT_AT: [[core::sync::atomic::AtomicUsize; NEST_DEPTH]; scheduler::MAX_TASKS] =
+    [const { [const { core::sync::atomic::AtomicUsize::new(0) }; NEST_DEPTH] };
+        scheduler::MAX_TASKS];
+
+/// Bekleyen sinyalin **neden** geldigi -- gorev basina, sinyal basina.
+///
+/// `PENDING` yalnizca bir bit tasiyor; bu tablo o bitin yanindaki
+/// hikayedir. Sinyal basina tek yuva olmasi `PENDING`in kendi
+/// sinirindan geliyor: ayni sinyal iki kez gonderilirse bir kez teslim
+/// edilir, yani saklanacak tek bir neden vardir. Gercek Linux'un
+/// gercek-zamanli sinyalleri bu yuzden kuyrukludur -- TCMK'de onlar da
+/// yok (bkz. README).
+static mut INFO: [[SigInfo; MAX_SIGNAL as usize + 1]; scheduler::MAX_TASKS] =
+    [[SigInfo::from_kernel(); MAX_SIGNAL as usize + 1]; scheduler::MAX_TASKS];
 
 /// Kac isleyici ic ice suruyor (0 = normal akis).
 static DEPTH: [core::sync::atomic::AtomicUsize; scheduler::MAX_TASKS] =
@@ -309,6 +396,30 @@ pub fn uncatchable(signo: u32) -> bool {
 /// bekleyenler maskesine yazilir ve hedef Ring 3'e donerken teslim edilir.
 /// Sinyali kuyruga koyar; bekleyen bir `pause`/`sigsuspend` varsa uyandirir.
 pub fn raise(target: usize, signo: u32) -> Result<(), SignalError> {
+    // `kill`in sozlesmesi: kaynak **bir surectir** ve kim oldugu
+    // soylenir. `SA_SIGINFO` isleyicisi bunu `si_pid`de goruyor.
+    raise_with(
+        target,
+        signo,
+        SigInfo {
+            code: SI_USER,
+            addr: 0,
+            pid: scheduler::current_id(),
+        },
+    )
+}
+
+/// Cekirdegin kendi gonderdigi sinyal (`SIGPIPE` gibi).
+///
+/// `raise`ten tek farki `si_code`: gonderen bir surec degil. Ayrimi
+/// yapmamak, `SIGPIPE`i yakalayan bir isleyiciye "bunu sana 3 numarali
+/// surec gonderdi" demek olurdu.
+pub fn raise_kernel(target: usize, signo: u32) -> Result<(), SignalError> {
+    raise_with(target, signo, SigInfo::from_kernel())
+}
+
+/// `raise`in govdesi: sinyali **nedeniyle birlikte** kuyruga koyar.
+pub fn raise_with(target: usize, signo: u32, info: SigInfo) -> Result<(), SignalError> {
     if !valid(signo) {
         return Err(SignalError::InvalidSignal);
     }
@@ -353,6 +464,15 @@ pub fn raise(target: usize, signo: u32) -> Result<(), SignalError> {
         scheduler::continue_task(target);
     }
 
+    // Neden, bitten **once** yaziliyor: ters sirada olsaydi hedef
+    // sinyali eski nedeniyle teslim alabilirdi.
+    //
+    // SAFETY: yuva gorev ve sinyal numarasina ozel.
+    unsafe {
+        (core::ptr::addr_of_mut!(INFO) as *mut SigInfo)
+            .add(target * (MAX_SIGNAL as usize + 1) + signo as usize)
+            .write(info)
+    };
     PENDING[target].fetch_or(1 << signo, Ordering::SeqCst);
 
     // `pause`/`sigsuspend` ile uyuyan bir gorev varsa kaldirilir. Tek
@@ -908,7 +1028,7 @@ pub unsafe fn deliver_pending(frame: &mut SyscallFrame, from_interrupt: bool) {
                 // gerekiyordu: isleyici kurulmussa o calismali.
                 DefaultAction::Continue => continue,
             },
-            handler => {
+            _ => {
                 let depth = DEPTH[task].load(Ordering::SeqCst);
                 let mut context = frame.user_context_via(from_interrupt);
 
@@ -920,9 +1040,7 @@ pub unsafe fn deliver_pending(frame: &mut SyscallFrame, from_interrupt: bool) {
                 saved_mask
                     .add(task * NEST_DEPTH + depth)
                     .write(blocked);
-                if usermode::build_signal_frame(&mut context, signo, handler, d.restorer)
-                    .is_none()
-                {
+                if enter_handler(task, depth, &mut context, signo, &d).is_none() {
                     // Yigin gecerli degil: sinyali teslim etmeye calisirken
                     // sureci bozmaktansa varsayilan davranisa dusulur.
                     crate::println!(
@@ -955,6 +1073,147 @@ pub unsafe fn deliver_pending(frame: &mut SyscallFrame, from_interrupt: bool) {
     }
 }
 
+/// Baglami isleyiciye cevirir; `ucontext_t` adresini de kaydeder.
+///
+/// Iki yuz arasindaki tek fark burada secilir:
+///
+/// ```text
+///   SA_SIGINFO yok  ->  handler(signo)
+///   SA_SIGINFO var  ->  handler(signo, &siginfo, &ucontext)
+/// ```
+///
+/// Ikincisi ayrica bir **geri yol** aciyor: kurulan `ucontext_t`nin
+/// adresi saklaniyor ve `sigreturn` baglami oradan okuyor. Yani
+/// isleyicinin registerlarda yaptigi degisiklik yururlukte kaliyor.
+///
+/// Doner: `None` ise yigin gecersiz, cerceve kurulamadi.
+///
+/// # Safety
+/// Cagiran gorevin adres uzayi etkin olmalidir.
+unsafe fn enter_handler(
+    task: usize,
+    depth: usize,
+    context: &mut UserContext,
+    signo: u32,
+    d: &Disposition,
+) -> Option<()> {
+    if d.flags & SA_SIGINFO == 0 {
+        UCONTEXT_AT[task][depth].store(0, Ordering::SeqCst);
+        return usermode::build_signal_frame(context, signo, d.handler, d.restorer);
+    }
+
+    let info = (core::ptr::addr_of!(INFO) as *const SigInfo)
+        .add(task * (MAX_SIGNAL as usize + 1) + signo as usize)
+        .read();
+    let ucontext_at =
+        usermode::build_siginfo_frame(context, signo, d.handler, d.restorer, &info)?;
+    UCONTEXT_AT[task][depth].store(ucontext_at, Ordering::SeqCst);
+    Some(())
+}
+
+/// Bir CPU hatasini POSIX sinyali olarak teslim eder.
+///
+/// Bu, `deliver_pending`in kardesi ve ayrilmalarinin sebebi **cerceve
+/// turu**: sinyaller normalde bir sistem cagrisinin donus yolunda
+/// teslim edilir (`SyscallFrame`), ama bir sayfa hatasi sistem cagrisi
+/// degil -- kesme kapisindan gelir ve cercevesi `ExceptionFrame`tir.
+///
+/// Yapilan is ayni: kullanici yigininin ustune bir cerceve kurulur ve
+/// baglam isleyiciye cevrilir. Buradan `true` donulunce istisna
+/// isleyicisi `iret` eder ve CPU hatali komuta degil, **isleyiciye**
+/// doner. Windows tarafindaki ikizi `seh::dispatch` (bkz. orada).
+///
+/// Doner: teslim edildi mi. `false` ise cagiran olumcul yola devam
+/// eder -- yani surec sonlanir ve izolasyon korunur.
+///
+/// Uc durumda bilerek `false` donuyor ve ucu de ayni sebebe cikiyor:
+/// **senkron** bir hata yok sayilamaz, cunku donuldugunde ayni komut
+/// ayni hatayi verir ve surec sonsuz donguye girer.
+///
+/// ```text
+///   isleyici yok (SIG_DFL)  -> varsayilan davranis: sonlan
+///   isleyici SIG_IGN        -> yok saymak mumkun degil: sonlan
+///   sinyal engellenmis      -> ertelemek mumkun degil: sonlan
+/// ```
+///
+/// Ucuncusu bir yan fayda daha veriyor: sinyal kendi isleyicisi
+/// suresince engellendigi icin (`SA_NODEFER` yoksa), `SIGSEGV`
+/// isleyicisinin **kendi** urettigi bir sayfa hatasi burada `false`
+/// donuyor ve surec sonlaniyor. Gercek Linux de aynisini yapar; aksi
+/// halde hatali bir isleyici sistemi sonsuz teslim dongusune sokardi.
+///
+/// # Safety
+/// `frame` Ring 3'ten gelen gecerli bir istisna cercevesi olmalidir ve
+/// cagiran gorevin adres uzayi etkin olmalidir.
+pub unsafe fn deliver_fault(
+    frame: &mut crate::arch::cpu::regs::ExceptionFrame,
+    signo: u32,
+    info: SigInfo,
+) -> bool {
+    let task = scheduler::current_id();
+    if task >= scheduler::MAX_TASKS || !valid(signo) {
+        return false;
+    }
+    if BLOCKED[task].load(Ordering::SeqCst) & (1 << signo) != 0 {
+        return false;
+    }
+    let depth = DEPTH[task].load(Ordering::SeqCst);
+    if depth >= NEST_DEPTH {
+        return false;
+    }
+
+    let width = MAX_SIGNAL as usize + 1;
+    let entry =
+        (core::ptr::addr_of_mut!(DISPOSITIONS) as *mut Disposition).add(task * width + signo as usize);
+    let d = entry.read();
+    if d.handler == SIG_DFL || d.handler == SIG_IGN {
+        return false;
+    }
+    if d.flags & SA_RESETHAND != 0 {
+        entry.write(Disposition::DEFAULT);
+    }
+
+    // Neden yaziliyor: `enter_handler` onu buradan okuyacak.
+    (core::ptr::addr_of_mut!(INFO) as *mut SigInfo)
+        .add(task * width + signo as usize)
+        .write(info);
+
+    let blocked = BLOCKED[task].load(Ordering::SeqCst);
+    let mut context = frame.user_context();
+
+    let saved = core::ptr::addr_of_mut!(SAVED) as *mut UserContext;
+    saved.add(task * NEST_DEPTH + depth).write(context);
+    let saved_mask = core::ptr::addr_of_mut!(SAVED_MASK) as *mut u32;
+    saved_mask.add(task * NEST_DEPTH + depth).write(blocked);
+
+    if enter_handler(task, depth, &mut context, signo, &d).is_none() {
+        // Yigin yazilamiyor. Sinyali teslim etmeye calisirken sureci
+        // bozmaktansa olumcul yola birakiliyor.
+        return false;
+    }
+
+    let mut extra = d.mask;
+    if d.flags & SA_NODEFER == 0 {
+        extra |= 1 << signo;
+    }
+    BLOCKED[task].store((blocked | extra) & !UNBLOCKABLE, Ordering::SeqCst);
+
+    DEPTH[task].store(depth + 1, Ordering::SeqCst);
+    MAX_NESTED.fetch_max(depth as u32 + 1, Ordering::Relaxed);
+
+    frame.set_user_context(&context);
+    DELIVERED.fetch_add(1, Ordering::Relaxed);
+    FAULTS_CAUGHT.fetch_add(1, Ordering::Relaxed);
+    true
+}
+
+/// Sinyale cevrilip **yakalanan** CPU hatasi sayisi (kabuk raporu).
+static FAULTS_CAUGHT: AtomicU32 = AtomicU32::new(0);
+
+pub fn faults_caught() -> u32 {
+    FAULTS_CAUGHT.load(Ordering::Relaxed)
+}
+
 /// `sigreturn`: isleyiciden donusu tamamlar, saklanan baglami geri koyar.
 ///
 /// Donus degeri diye bir sey yoktur -- kullanici bu cagriyi kendi yazmaz,
@@ -977,9 +1236,23 @@ pub unsafe fn sigreturn(frame: &mut SyscallFrame, from_interrupt: bool) -> bool 
     let depth = depth - 1;
     DEPTH[task].store(depth, Ordering::SeqCst);
 
-    let context = (core::ptr::addr_of!(SAVED) as *const UserContext)
+    let mut context = (core::ptr::addr_of!(SAVED) as *const UserContext)
         .add(task * NEST_DEPTH + depth)
         .read();
+
+    // `SA_SIGINFO` isleyicisinin gordugu `ucontext_t` **yazilabilirdi**.
+    // Saklanan baglam yerine onu okumak, isleyicinin yaptigi
+    // duzeltmenin yurumesi demek: hatali bir komutu duzeltip donmek
+    // ancak boyle bir sey ifade eder.
+    //
+    // Kaydin kendisi kullanici yigininda duruyor, yani icerigi
+    // guvenilmez. `read_ucontext` bunu bilerek yaziyor: yalnizca genel
+    // registerlar aliniyor ve bayraklarin sistem bitleri cekirdegin
+    // degeriyle kaliyor (bkz. `usermode.rs`).
+    let ucontext_at = UCONTEXT_AT[task][depth].swap(0, Ordering::SeqCst);
+    if ucontext_at != 0 && mmu::is_user_accessible(ucontext_at) {
+        usermode::read_ucontext(ucontext_at, &mut context);
+    }
     frame.set_user_context_via(from_interrupt, &context);
 
     // Isleyicinin ek engelleri yalnizca isleyici suresince gecerliydi.

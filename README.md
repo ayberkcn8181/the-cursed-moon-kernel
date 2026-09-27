@@ -26,9 +26,9 @@ masaustu sunuyor.
 |---|---|
 | Mimariler | i386 (Multiboot1, `int 0x80`) · x86_64 (Multiboot2, `syscall`) |
 | Ikili bicimleri | ELF32/ELF64 · PE32/PE32+ (ithal tablosu cozulur) |
-| POSIX cagrilari | 71 (+ ELF yardimci vektoru, dosya destekli `mmap`, `clone`, `futex`, `SIGPIPE`, `EINTR`/`SA_RESTART`, is denetimi) |
+| POSIX cagrilari | 71 (+ ELF yardimci vektoru, dosya destekli `mmap`, `clone`, `futex`, `SIGPIPE`, `EINTR`/`SA_RESTART`, is denetimi, `SA_SIGINFO`) |
 | NT/Win32 cagrilari | 85 (`KERNEL32.dll` 63 ihracat + `TCMKGUI.dll`) |
-| Ring 3 uygulamalari | 37 ELF + 15 PE |
+| Ring 3 uygulamalari | 38 ELF + 15 PE |
 | Kalici depolama | ATA PIO + MBR + TCMKFS (yazilabilir, iki mimari) + takas |
 | Kod | ~30 bin satir cekirdek + ~17 bin satir userland |
 
@@ -54,10 +54,13 @@ da (`SIGSTOP`/`SIGCONT`, surec gruplari) -- is denetiminin temeli.
 Duran bir akisin **registerlari** da okunup yazilabiliyor
 (`GetThreadContext`/`SetThreadContext`): bir akis, giris noktasina hic
 girmeden baska bir yerden baslatilabiliyor -- POSIX'te karsiligi
-olmayan bir kalip.
+olmayan bir kalip. Ters yonde de bir gedik kapandi: bir sayfa hatasi
+artik POSIX yuzunde de **yakalanip duzeltilebiliyor**
+(`SA_SIGINFO` + `ucontext_t`), yani iki ABI ayni donanim olayina ayni
+gucte cevap veriyor.
 
 Her yetenek QEMU'da **olculerek** dogrulanmistir: `probe` (16 sinav),
-`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (5), `bigfile` (6), `heap` (5), `swapx` (6), `jobs` (6), `winsusp` (6), `winctx` (7), `bequest`
+`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (5), `bigfile` (6), `heap` (5), `swapx` (6), `jobs` (6), `winsusp` (6), `winctx` (7), `sigfault` (7), `bequest`
 (6), `nested` (4), `winenv` (4) gibi programlar sonucu hem ekrana hem
 seri gunluge yaziyor. Olcumler yol boyunca gercek hatalar buldu -- dolan
 VFS tablosu, `CreateFileA`'nin cevrilmeyen Windows yollari, `GDT`
@@ -67,7 +70,8 @@ siniri, x86_64'te segment secicisinin taban MSR'sini silmesi, kesme ve
 her zaman acik olan `stdin`e `EBADF` diyen `fcntl`, yuvasini hic
 birakmayan bitmis is parcaciklari, yuvasi geri verilmis bir gorevi
 bekleyenin bir daha uyanmamasi, yeni bir akis yaratanin cocugunun
-TEB'ine bakmaya baslamasi -- ve her biri README'de kendi
+TEB'ine bakmaya baslamasi, `sysret`in yedigi iki register yuzunden
+x86_64'te hic yurumeyen sinyal duzeltmesi -- ve her biri README'de kendi
 bolumunde yazili. Olcum bir de sunu gosterdi: bir tavani kaldirmak,
 altinda duran daha sikisik bir tavani (VFS dugum tablosu) gormeden
 anlamsiz. Ve birkac kez, hata cekirdekte degil **sinavin kendisinde** cikti --
@@ -2220,10 +2224,13 @@ degistikten sonra ayni sekilde calisiyor (regresyon kosusu).
   ardindan `SA_RESTART` da geldi -- bkz. [Sinyal bekleyen bir cagriyi
   boler mi?](#sinyal-bekleyen-bir-cagriyi-boler-mi). Gerekce dogruydu;
   sirasi da oyle.
-* **`SA_SIGINFO` yok** ve **kabul de edilmiyor**: taninmayan bayraklar
-  `set_handler`da atiliyor. Saklamak, karsiligi olmayan bir bayragin
-  calistigi izlenimini verirdi. `pause`/`sigsuspend` ise POSIX'te
-  zaten hicbir kosulda yeniden baslatilmaz.
+* ~~**`SA_SIGINFO` yok.**~~ Geldi -- bkz. [Ayni hata, iki
+  yuz](#ayni-hata-iki-yuz-posix-da-artik-yakalayip-duzeltiyor). Isleyici
+  artik `(signo, siginfo_t*, ucontext_t*)` alabiliyor ve ikinci kayit
+  **yazilabilir**. Taninmayan bayraklar hala atiliyor: saklamak,
+  karsiligi olmayan bir bayragin calistigi izlenimini verirdi.
+  `pause`/`sigsuspend` ise POSIX'te zaten hicbir kosulda yeniden
+  baslatilmaz.
 * **Dort katman siniri.** Gercek programlarda ikiden derin ic ice
   sinyal patolojiktir; sinira dayanildiginda teslim ertelenir.
 
@@ -6539,6 +6546,157 @@ IOPL'unu ya da kesme bayragini bu kapidan degistiremez.
 * **`SetThreadContext` kendine yazamiyor.** Teknik olarak mumkun --
   SEH'in `NtContinue` yolu tam olarak bunu yapiyor -- ama bir cagrinin
   nereye donecegi tek anlamli olmali.
+
+## Ayni hata, iki yuz: POSIX da artik yakalayip duzeltiyor
+
+TCMK'nin Windows yuzu uzun suredir bir sayfa hatasini yakalayip
+**duzeltebiliyordu**: `winseh` bilerek gecersiz bir adrese yaziyor,
+isleyici hatali isaretciyi tutan registeri duzeltiyor ve komut
+tekrarlaniyor. POSIX yuzunde ayni hata surecin sonuydu -- `SIGSEGV`
+yalnizca bir **olum sebebi** olarak kaydediliyor, hic teslim
+edilmiyordu.
+
+Projenin tezinde acik bir gedikti: iki ABI esit vatandas olacaksa ayni
+donanim olayina ayni gucte cevap verebilmeliler.
+
+```
+[sigfault] A yakalandi:      gecti (SIGSEGV yakalandi, surec yasiyor)
+[sigfault] B si_addr:        gecti (her iki olayda da erisilen adres geldi)
+[sigfault] C si_code:        gecti (iki eslenmemis adres de SEGV_MAPERR)
+[sigfault] D DUZELTILDI:     gecti (register duzeltildi, yazma dogru yere dustu)
+[sigfault] E sifira bolme:   gecti (bolen 4 yapildi, 100/4 = 25)
+[sigfault] F kill'in kimligi:gecti (SI_USER ve si_pid gonderen surec)
+[sigfault] G izolasyon:      gecti (isleyicisiz cocuk SIGSEGV ile oldu)
+```
+
+![sigfault](docs/screenshot-sigfault.png)
+
+### Ayni is, iki bicim
+
+```text
+  Windows  EXCEPTION_RECORD + CONTEXT   -> isleyici(&pointers)
+           duzeltme: CONTEXT'e yaz, EXCEPTION_CONTINUE_EXECUTION don
+
+  POSIX    siginfo_t + ucontext_t       -> isleyici(signo, &si, &uc)
+           duzeltme: ucontext_t'ye yaz, ISLEYICIDEN DON
+```
+
+Sag sutunun ikinci satiri POSIX'in daha yalin oldugu yer: "devam et"
+demek icin ayri bir donus degeri yok, **donusun kendisi** o anlama
+geliyor. Cekirdek `sigreturn`da baglami `ucontext_t`den geri okuyor;
+isleyici orada ne birakmissa o yuruyor.
+
+Cekirdek icinde iki yol ayni desendir ve artik yan yana duruyorlar
+(`exceptions::dispatch`): once PE'nin SEH isleyicisi denenir -- o
+surecin kendi dunyasinin cevabi odur -- sahiplenmezse POSIX yuzu.
+Sirali olmalari, bir PE'nin de `sigaction` cagirabilmesi demek.
+
+### `SA_SIGINFO`: sinyalin iki sorusu daha
+
+```text
+  tek argumanli  handler(signo)                       "hangi sinyal"
+  uc argumanli   handler(signo, &siginfo, &ucontext)  "+ neden, + nerede"
+```
+
+`si_code` sinyalin **kaynagini** tasiyor ve ayrim uydurma degil: tembel
+bir ayirici icin eslenmemis sayfa beklenen bir olaydir, `kill` ile gelen
+bir `SIGUSR1` ise bambaska bir sey. `si_addr` ise hataya yol acan adres.
+
+`siginfo_t`nin birlesimi ikili duzeyde tek bir alandir: `si_addr` ile
+`si_pid` **ayni ofsette** durur. Hangisinin gecerli oldugunu sinyal ve
+`si_code` soyler -- bu bir sadelestirme degil, Linux ABI'sinin kendisi.
+
+### Olcumun buldugu hata: yanlis soruyu soran siniflandirici
+
+`si_code`u ilk yazan hali donanimin `PRESENT` bitine bakiyordu ve iki
+mimaride **iki ayri** cevap verdi. Sebep, iki sorunun ayni olmamasi:
+
+```text
+  donanim  "bu adres icin bir tablo girdisi var mi"
+  surec    "bu adres BANA eslenmis mi"
+```
+
+TCMK'de ikisi ayrisiyor, cunku cekirdek dusuk bellegi her adres uzayina
+esliyor (kendisi orada kosuyor). Ring 3'un hic goremedigi bir adres
+donanima **var** gorunuyor, ve siniflandirici ona "izin ihlali"
+(`SEGV_ACCERR`) diyordu -- oysa dogru cevap "esleme yok"
+(`SEGV_MAPERR`). Duzeltilmis olcu girdinin Ring 3'e acik olup
+olmadigina bakiyor:
+
+```text
+  girdi yok                  -> MAPERR
+  girdi var, Ring 3'e kapali -> MAPERR  (surec acisindan yok)
+  girdi var, Ring 3'e acik   -> ACCERR  (var ama izin yetmedi)
+```
+
+Hatayi bulan sey, ayni sinavi **iki mimaride** kosmakti: i386 ile
+x86_64 ayni adrese ayri cevaplar verdi ve ikisinin birden dogru
+olabilmesinin yolu yoktu.
+
+### Olcumun buldugu ikinci hata: `sysret`in yedigi iki register
+
+x86_64'te duzeltme **hic yurumedi**: surec sonsuz donguye girdi. Sebep
+POSIX'te degil, komut setinde. `syscall` komutu donus adresini `RCX`e,
+bayraklari `R11`e koyar -- yani o yoldan donen bir cagri **o iki
+registeri geri yukleyemez**, ikisi donus bilgisinin kendisini tasir.
+
+Siradan bir cagri icin sorun degil (ABI zaten ikisini "cagri tarafindan
+bozulur" sayar), ama `sigreturn` siradan bir cagri degil: isleyicinin
+`ucontext_t`de yaptigi duzeltmeyi geri yuklemesi gerekiyor ve
+duzeltilen sey `RCX` olabilir -- sinavdaki hatali isaretci tam olarak
+orada duruyordu.
+
+Cozum, donus yolunu degistirmek: x86_64'te `sigreturn` artik
+`int 0x80` ile, yani bir **kesme kapisindan** doner. `iretq` butun
+cerceveyi geri yukler. Cekirdek o vektoru zaten bagli tutuyordu ve
+Windows yuzu ayni sebeple `int 0x2E` kullaniyordu; POSIX yuzu artik
+esit.
+
+### Olcumun temizligi: asili kalmak bir cevap degil
+
+Ilk yazilisinda sinav, duzeltme yurumeyen bir cekirdekte **asili
+kaliyordu**: bir sayfa hatasi isleyicisinden duzeltmeden donmek ayni
+komutu yeniden calistirir, yani sonsuz dongu. Daha once iki kez
+ogrenilmis bir ders (bkz. `bigfile`, `jobs`) burada ucuncu kez cikti.
+
+Hata uretimi **cocuk surece** tasindi ve ebeveyn onu sinirli bir sure
+bekliyor. Cocuk cevabini tek bir bayta, cikis koduna sigdiriyor; hic
+donmezse ebeveyn onu oldurup sebebi soyluyor:
+
+```
+[sigfault] D DUZELTILDI: KALDI (isleyici donguye girdi -- duzeltme YURUMEDI)
+```
+
+Isleyicinin kendi icinde de bir fren var: ayni hataya sekiz kez girerse
+pes edip cikiyor. Ikisi birlikte, bozuk bir cekirdekte sinavin
+**konusmasini** sagliyor.
+
+### Bilerek yapilmayanlar
+
+* **`SEGV_ACCERR` bugun uretilemiyor.** Kod yerinde ve dogru, ama TCMK'de
+  Ring 3'e acik **salt okunur** bir sayfa yok: `mprotect` yok, ve
+  copy-on-write sayfalari sinyal yoluna hic gelmeden duzeltiliyor.
+  Kosul saglandiginda ayrim kendiliginden gorunur olacak.
+* **`ucontext_t`nin yalnizca genel registerlari dolduruluyor.** Kayan
+  nokta durumu (`uc_mcontext.fpregs`), `uc_stack` ve `uc_sigmask` sifir.
+  Ayrilan yer glibc olcusunde, yani kaydi o duzenle okuyan bir kod
+  yigin disina tasmiyor.
+* **Bayraklarin sistem bitleri alinmiyor.** Isleyici `uc_mcontext`e ne
+  yazarsa yazsin IOPL ve kesme bayragi cekirdegin degeriyle kaliyor --
+  Win32 yuzunde de ayni kural var.
+* **Segment secicileri sabit.** Ring 3 degerleri yaziliyor; bir program
+  kendi CS/SS'ini bu kapidan degistirememeli.
+* **Ayri sinyal yigini (`sigaltstack`) yok.** Cerceve her zaman kesilen
+  yiginin ustune kuruluyor. Yigin tasmasini (`SIGSEGV` on the stack)
+  yakalamak bu yuzden mumkun degil -- cerceveyi yazacak yer kalmaz ve
+  teslim olumcul yola duser.
+* **`si_code` kumesi dar.** `SI_USER`, `SI_KERNEL`, `SEGV_MAPERR`,
+  `SEGV_ACCERR`, `FPE_INTDIV`, `ILL_ILLOPN` var; `BUS_*`, `TRAP_*` ve
+  `CLD_*` yok (son kume icin once `SIGCHLD` gerekir, o da yok).
+* **Sinyal basina tek neden saklaniyor.** `PENDING` bir bit oldugu icin
+  ayni sinyal iki kez gonderilirse bir kez teslim edilir ve neden de
+  tektir. Gercek Linux'un gercek-zamanli sinyalleri bu yuzden
+  kuyrukludur; TCMK'de onlar da yok.
 
 ## Alfa'nin bilinen sinirlari
 

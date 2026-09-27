@@ -733,7 +733,7 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
                 // Sinyal **once** gonderiliyor: teslim Ring 3'e donerken
                 // olacak, yani cagirana yazilan errno da gorunmeyecek --
                 // tipki gercek Linux'ta oldugu gibi.
-                let _ = crate::level0b1::signal::raise(task, crate::level0b1::signal::SIGPIPE);
+                let _ = crate::level0b1::signal::raise_kernel(task, crate::level0b1::signal::SIGPIPE);
                 -EPIPE
             }
             // Bekleyen yazma sinyalle bolundu.

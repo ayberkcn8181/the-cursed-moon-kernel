@@ -1592,9 +1592,13 @@ fn execute(line: &str) {
                 }
                 None => write_line("yok"),
             }
-            // Windows tarafi: dagitilan istisnalar sonlandirilan
-            // sureclerin **disindadir** -- isleyici sahiplendiyse surec
-            // yasamaya devam eder.
+            // Yakalanan hatalar sonlandirilan sureclerin **disindadir**:
+            // isleyici sahiplendiyse surec yasamaya devam eder. Iki yuz
+            // ayri sayiliyor, cunku ayri yollar -- ama ikisi de ayni
+            // istisnadan dogar.
+            write_str("sinyale cevrilen hata: ");
+            write_num(crate::level0b1::signal::faults_caught() as usize);
+            newline();
             write_str("is parcacigi yaratildi: ");
             write_num(crate::level0b1::thread::created());
             newline();

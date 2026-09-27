@@ -61,6 +61,10 @@ name = "jobs"
 path = "src/bin/jobs.rs"
 
 [[bin]]
+name = "sigfault"
+path = "src/bin/sigfault.rs"
+
+[[bin]]
 name = "swapx"
 path = "src/bin/swapx.rs"
 

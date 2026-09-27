@@ -149,6 +149,33 @@ pub unsafe fn dispatch(frame: &mut crate::arch::cpu::regs::ExceptionFrame, fault
         return;
     }
 
+    // --- 2b. POSIX sinyal teslimi ---
+    //
+    // Ustteki dalin **ikizi** ve uzun sure eksikti: bir PE, sayfa
+    // hatasini yakalayip duzeltebiliyordu; bir ELF ise ayni hatada
+    // olurdu. Oysa POSIX'in cevabi da aynidir -- hata bir **sinyale**
+    // cevrilir ve surecin isleyicisi calisir.
+    //
+    // Iki yol ayni isi yapiyor, yalnizca cercevenin bicimi farkli:
+    //
+    // ```text
+    //   Windows  EXCEPTION_RECORD + CONTEXT  -> isleyici(&pointers)
+    //   POSIX    siginfo_t + ucontext_t      -> isleyici(signo, &si, &uc)
+    // ```
+    //
+    // Sira da anlamli: bir PE'nin SEH isleyicisi once denenir, cunku o
+    // surecin kendi dunyasinin cevabidir. Sahiplenmezse POSIX yuzu
+    // denenir -- TCMK'de bir PE de `sigaction` cagirabilir.
+    if frame.from_user()
+        && crate::level0b1::signal::deliver_fault(
+            frame,
+            signal_of_vector(vector),
+            fault_info(vector, error_code, fault_addr),
+        )
+    {
+        return;
+    }
+
     // --- 3. Olumcul ---
     report_and_die(vector, error_code, frame.instruction_pointer(), frame.from_user(), fault_addr)
 }
@@ -175,6 +202,68 @@ fn signal_of_vector(vector: usize) -> u32 {
         3 => signal::SIGILL,
         // #GP ve #PF: gecersiz bellek erisimi.
         _ => signal::SIGSEGV,
+    }
+}
+
+/// CPU istisnasini `siginfo_t`nin tasiyacagi **nedene** cevirir.
+///
+/// Sinyal numarasi ne oldugunu soyler, `si_code` nereden geldigini.
+/// Ayrim gercek programlarda kullanilir: eslenmemis bir sayfa (tembel
+/// bir ayirici icin beklenen bir olay) ile izin ihlali (beklenmeyen)
+/// ayni sinyalle gelir ama ayni sey degildir.
+fn fault_info(
+    vector: usize,
+    error_code: usize,
+    fault_addr: usize,
+) -> crate::level0b1::signal::SigInfo {
+    use crate::level0b1::signal::{self, SigInfo};
+    const PRESENT: usize = 1 << 0;
+
+    let code = match vector {
+        // #PF: iki soru var ve **ayni soru degiller**.
+        //
+        // Donanimin PRESENT biti "bu adres icin bir tablo girdisi var
+        // mi" der. Surecin sordugu ise "bu adres BANA eslenmis mi".
+        // TCMK'de ikisi ayrisiyor: cekirdek dusuk bellegi her adres
+        // uzayina esliyor (kendisi orada kosuyor), yani Ring 3'un hic
+        // goremedigi bir adres donanima **var** gorunuyor.
+        //
+        // Yalnizca PRESENT'e bakmak bu yuzden yanlis cevap veriyordu:
+        // surecin hic eslemedigi bir adres "izin ihlali" olarak
+        // raporlaniyordu. Dogru olcu, girdinin Ring 3'e acik olup
+        // olmadigi.
+        //
+        // ```text
+        //   girdi yok                  -> MAPERR
+        //   girdi var, Ring 3'e kapali -> MAPERR  (surec acisindan yok)
+        //   girdi var, Ring 3'e acik   -> ACCERR  (var ama izin yetmedi)
+        // ```
+        14 => {
+            if error_code & PRESENT == 0
+                || !crate::level0a::core::mmu::is_user_accessible(fault_addr)
+            {
+                signal::SEGV_MAPERR
+            } else {
+                signal::SEGV_ACCERR
+            }
+        }
+        // #GP: bir esleme sorusu degil -- gecersiz secici ya da ayricalikli
+        // komut. Gosterilecek bir adres de yok.
+        13 => signal::SI_KERNEL,
+        // #DE sifira bolme.
+        0 => signal::FPE_INTDIV,
+        // #UD gecersiz komut, #BP kesme noktasi.
+        6 | 3 => signal::ILL_ILLOPN,
+        _ => signal::SI_KERNEL,
+    };
+
+    SigInfo {
+        // `si_addr`in anlami sinyale gore degisir: bellek hatalarinda
+        // **erisilen** adres, digerlerinde hatali komutun adresi. Burada
+        // yalnizca ilki biliniyor; ikincisi `ucontext_t`de zaten var.
+        addr: if vector == 14 { fault_addr } else { 0 },
+        code,
+        pid: 0,
     }
 }
 

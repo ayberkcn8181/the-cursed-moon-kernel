@@ -228,3 +228,219 @@ pub unsafe fn build_signal_frame(
     context.redirect(handler, sp);
     Some(())
 }
+
+// --- `SA_SIGINFO` cercevesi (i386) ------------------------------------
+//
+// Asagidaki sayilar Linux ABI'sinin parcasidir: derlenmis bir program
+// `info->si_addr` ya da `uc->uc_mcontext.gregs[REG_EIP]` yazdiginda tam
+// bu ofsetlere gider. Uydurulmus bir duzen, kaydi okuyan her kodu
+// bozardi.
+
+/// `siginfo_t` -- her mimaride 128 bayt.
+const SIGINFO_SIZE: usize = 128;
+
+/// `siginfo_t` alan ofsetleri (i386).
+mod si {
+    pub const SIGNO: usize = 0x00;
+    pub const ERRNO: usize = 0x04;
+    pub const CODE: usize = 0x08;
+    /// Birlesimin (union) basi. `SIGSEGV`/`SIGFPE`/`SIGILL`'de
+    /// `si_addr`, `kill` ile gelenlerde `si_pid`.
+    pub const ADDR: usize = 0x0C;
+    pub const PID: usize = 0x0C;
+    pub const UID: usize = 0x10;
+}
+
+/// `ucontext_t` icin ayrilan yer.
+///
+/// Cekirdegin doldurdugu alanlar 236 bayta kadar uzaniyor; glibc'nin
+/// yapisi kayan nokta bolgesiyle birlikte 348. Buyuk olani ayirmak,
+/// kaydi glibc duzeniyle okuyan bir kodun yigin disina tasmamasi icin.
+/// Doldurulmayan bolge **sifirlaniyor**.
+const UCONTEXT_SIZE: usize = 348;
+
+/// `ucontext_t` alan ofsetleri (i386).
+///
+/// `uc_mcontext` 0x14'te bir `struct sigcontext`tir; asagidaki register
+/// ofsetleri ona degil, `ucontext_t`nin **basina** goredir.
+mod uc {
+    pub const FLAGS: usize = 0x00;
+    pub const LINK: usize = 0x04;
+    pub const STACK: usize = 0x08;
+    /// `uc_mcontext` burada basliyor.
+    pub const MCONTEXT: usize = 0x14;
+
+    pub const GS: usize = MCONTEXT;
+    pub const FS: usize = MCONTEXT + 4;
+    pub const ES: usize = MCONTEXT + 8;
+    pub const DS: usize = MCONTEXT + 12;
+    pub const EDI: usize = MCONTEXT + 16;
+    pub const ESI: usize = MCONTEXT + 20;
+    pub const EBP: usize = MCONTEXT + 24;
+    pub const ESP: usize = MCONTEXT + 28;
+    pub const EBX: usize = MCONTEXT + 32;
+    pub const EDX: usize = MCONTEXT + 36;
+    pub const ECX: usize = MCONTEXT + 40;
+    pub const EAX: usize = MCONTEXT + 44;
+    pub const TRAPNO: usize = MCONTEXT + 48;
+    pub const ERR: usize = MCONTEXT + 52;
+    pub const EIP: usize = MCONTEXT + 56;
+    pub const CS: usize = MCONTEXT + 60;
+    pub const EFLAGS: usize = MCONTEXT + 64;
+    pub const ESP_AT_SIGNAL: usize = MCONTEXT + 68;
+    pub const SS: usize = MCONTEXT + 72;
+    /// `cr2` -- sayfa hatasinin adresi. `si_addr` ile ayni bilgi, ama
+    /// gercek Linux ikisini de dolduruyor.
+    pub const CR2: usize = MCONTEXT + 84;
+    pub const SIGMASK: usize = 0x6C;
+}
+
+/// Bayraklarin **kullaniciya birakilan** bitleri (CF, PF, AF, ZF, SF,
+/// OF ve yon bayragi).
+///
+/// Geri kalanlar cekirdegin degeriyle kaliyor: bir program bu kapidan
+/// kendi IOPL'unu ya da kesme bayragini degistirememeli. Win32 yuzunde
+/// de ayni kural var (bkz. `seh::read_context`).
+const USER_FLAGS: u32 = 0x0000_0CD5;
+
+/// Ring 3 yigininin ustune bir **`SA_SIGINFO` cercevesi** kurar.
+///
+/// Duzen, tek argumanli yuzun genisletilmis hali:
+///
+/// ```text
+///   [esp]    = restorer   (donus adresi)
+///   [esp+4]  = signo      (arg1)
+///   [esp+8]  = siginfo_t* (arg2)
+///   [esp+12] = ucontext_t*(arg3)
+///
+///   ... yukarida, yigin tepesine yakin:
+///   [siginfo_t]   128 bayt
+///   [ucontext_t]  348 bayt
+/// ```
+///
+/// Kayitlarin cerceveden **yukarida** olmasi sart: isleyici kendi yerel
+/// degiskenlerini `esp`nin altina koyacak ve kayitlari ezmemeli.
+///
+/// Doner: Ring 3'teki `ucontext_t`nin adresi -- `sigreturn` baglami
+/// oradan geri okuyor (bkz. `read_ucontext`).
+///
+/// # Safety
+/// `build_signal_frame` ile ayni kosul.
+pub unsafe fn build_siginfo_frame(
+    context: &mut UserContext,
+    signo: u32,
+    handler: usize,
+    restorer: usize,
+    info: &crate::level0b1::signal::SigInfo,
+) -> Option<usize> {
+    use crate::level0a::core::mmu;
+
+    const RECORDS: usize = SIGINFO_SIZE + UCONTEXT_SIZE;
+    let sp = context.stack_pointer();
+    if sp < RECORDS + 64 {
+        return None;
+    }
+    let base = (sp - RECORDS) & !0xF;
+    // Kayitlar iki ucundan dogrulaniyor; arada sayfa sinirlari olabilir,
+    // o yuzden her sayfa ayri ayri.
+    let mut probe = base;
+    while probe < base + RECORDS {
+        if !mmu::is_user_accessible(probe) {
+            return None;
+        }
+        probe += 4096;
+    }
+    if !mmu::is_user_accessible(base + RECORDS - 1) {
+        return None;
+    }
+
+    let siginfo_at = base;
+    let ucontext_at = base + SIGINFO_SIZE;
+
+    // cdecl: dort kelime, ve girisde `esp + 4` 16'ya bolunmeli.
+    let call = ((base - 16) & !0xF) - 4;
+    if !mmu::is_user_accessible(call) || !mmu::is_user_accessible(call + 15) {
+        return None;
+    }
+
+    core::ptr::write_bytes(siginfo_at as *mut u8, 0, RECORDS);
+    let put = |at: usize, value: u32| (at as *mut u32).write_unaligned(value);
+
+    put(siginfo_at + si::SIGNO, signo);
+    put(siginfo_at + si::ERRNO, 0);
+    put(siginfo_at + si::CODE, info.code as u32);
+    // Birlesim: hata sinyallerinde adres, `kill` ile gelenlerde kimlik.
+    // Ikisi ayni ofsette durdugu icin **secmek** zorunlu.
+    if info.addr != 0 {
+        put(siginfo_at + si::ADDR, info.addr as u32);
+    } else {
+        put(siginfo_at + si::PID, info.pid as u32);
+        put(siginfo_at + si::UID, 0);
+    }
+
+    write_ucontext(ucontext_at, context, info);
+
+    put(call, restorer as u32);
+    put(call + 4, signo);
+    put(call + 8, siginfo_at as u32);
+    put(call + 12, ucontext_at as u32);
+
+    context.redirect(handler, call);
+    Some(ucontext_at)
+}
+
+/// Kesilen baglami `ucontext_t`ye doker.
+unsafe fn write_ucontext(
+    at: usize,
+    context: &UserContext,
+    info: &crate::level0b1::signal::SigInfo,
+) {
+    let put = |offset: usize, value: u32| ((at + offset) as *mut u32).write_unaligned(value);
+    put(uc::FLAGS, 0);
+    put(uc::LINK, 0);
+    // `uc_stack`: ayri bir sinyal yigini yok, o yuzden bos birakiliyor.
+    put(uc::STACK, 0);
+    put(uc::EDI, context.edi);
+    put(uc::ESI, context.esi);
+    put(uc::EBP, context.ebp);
+    put(uc::ESP, context.esp);
+    put(uc::EBX, context.ebx);
+    put(uc::EDX, context.edx);
+    put(uc::ECX, context.ecx);
+    put(uc::EAX, context.eax);
+    put(uc::EIP, context.eip);
+    put(uc::EFLAGS, context.eflags);
+    put(uc::ESP_AT_SIGNAL, context.esp);
+    put(uc::CR2, info.addr as u32);
+    // Segment secicileri: Ring 3 degerleri (bkz. `gdt::i386`).
+    put(uc::CS, 0x1B);
+    put(uc::SS, 0x23);
+    put(uc::DS, 0x23);
+    put(uc::ES, 0x23);
+    put(uc::FS, 0x33);
+    put(uc::GS, 0x3B);
+    put(uc::TRAPNO, 0);
+    put(uc::ERR, 0);
+    let _ = uc::SIGMASK;
+}
+
+/// Tersi: isleyicinin (belki degistirdigi) `ucontext_t`sini okur.
+///
+/// Segment secicileri ve `cr2` **alinmaz**: ikisi de cekirdegin isi.
+/// Bayraklarin yalnizca durum bitleri aliniyor (bkz. `USER_FLAGS`).
+///
+/// # Safety
+/// `at` Ring 3'e ait, okunabilir bir `ucontext_t` olmalidir.
+pub unsafe fn read_ucontext(at: usize, context: &mut UserContext) {
+    let get = |offset: usize| ((at + offset) as *const u32).read_unaligned();
+    context.edi = get(uc::EDI);
+    context.esi = get(uc::ESI);
+    context.ebp = get(uc::EBP);
+    context.esp = get(uc::ESP);
+    context.ebx = get(uc::EBX);
+    context.edx = get(uc::EDX);
+    context.ecx = get(uc::ECX);
+    context.eax = get(uc::EAX);
+    context.eip = get(uc::EIP);
+    context.eflags = (get(uc::EFLAGS) & USER_FLAGS) | 0x202;
+}
