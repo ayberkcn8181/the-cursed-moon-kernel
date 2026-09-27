@@ -212,6 +212,32 @@ pub unsafe fn protect_user_range(start: usize, len: usize) {
     flush_tlb();
 }
 
+
+/// Adres surecin **kendi bolgesi** mi -- talep uzerine eslenecek ve
+/// takasa gitmis sayfalar dahil.
+///
+/// `is_user_accessible` "su an dokunulabilir mi" diye sorar; bu ise
+/// "bu adres surecin mi" diye. Ayrim, cekirdek bir kullanici yigininin
+/// ustune cerceve kuracagi zaman onemli: henuz dokunulmamis bir sayfaya
+/// yazmak hata uretir, ama o hata **kurtarilabilir** (talep uzerine
+/// sayfalama ya da takastan geri okuma). Kati denetim orada yanlis
+/// cevap veriyordu: dagitilabilecek bir istisna "yigin yazilamaz"
+/// diye reddediliyordu.
+///
+/// Koruma sayfasi bu tanimin **disinda** kalir: eslenmis ama Ring 3'e
+/// kapali, ve ne talep ne takas isareti tasiyor.
+pub fn is_user_or_demand(addr: usize) -> bool {
+    if is_user_accessible(addr) {
+        return true;
+    }
+    unsafe {
+        user_pte((read_cr3() & ADDR_MASK) as usize, addr).map_or(false, |e| {
+            let value = e.read();
+            value & PTE_DEMAND != 0 || swap_slot_of(value).is_some()
+        })
+    }
+}
+
 /// Bir sayfayi Ring 3'e **kapatir** -- koruma sayfasi.
 ///
 /// Sayfa eslenmis kalir; yalnizca User biti dusurulur. Yani cekirdek ona

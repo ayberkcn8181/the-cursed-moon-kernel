@@ -28,7 +28,7 @@ masaustu sunuyor.
 | Ikili bicimleri | ELF32/ELF64 · PE32/PE32+ (ithal tablosu cozulur) |
 | POSIX cagrilari | 72 (+ ELF yardimci vektoru, dosya destekli `mmap`, `clone`, `futex`, `SIGPIPE`, `EINTR`/`SA_RESTART`, is denetimi, `SA_SIGINFO`, `sigaltstack`) |
 | NT/Win32 cagrilari | 86 (`KERNEL32.dll` 64 ihracat + `TCMKGUI.dll`) |
-| Ring 3 uygulamalari | 39 ELF + 16 PE |
+| Ring 3 uygulamalari | 39 ELF + 17 PE |
 | Kalici depolama | ATA PIO + MBR + TCMKFS (yazilabilir, iki mimari) + takas |
 | Kod | ~30 bin satir cekirdek + ~17 bin satir userland |
 
@@ -60,7 +60,7 @@ artik POSIX yuzunde de **yakalanip duzeltilebiliyor**
 gucte cevap veriyor.
 
 Her yetenek QEMU'da **olculerek** dogrulanmistir: `probe` (16 sinav),
-`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (5), `bigfile` (6), `heap` (5), `swapx` (6), `jobs` (6), `winsusp` (6), `winctx` (7), `sigfault` (7), `winunwind` (7), `altstack` (7), `bequest`
+`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (5), `bigfile` (6), `heap` (5), `swapx` (6), `jobs` (6), `winsusp` (6), `winctx` (7), `sigfault` (7), `winunwind` (7), `altstack` (7), `winnest` (6), `bequest`
 (6), `nested` (4), `winenv` (4) gibi programlar sonucu hem ekrana hem
 seri gunluge yaziyor. Olcumler yol boyunca gercek hatalar buldu -- dolan
 VFS tablosu, `CreateFileA`'nin cevrilmeyen Windows yollari, `GDT`
@@ -4697,9 +4697,10 @@ komutunu kullandigi icin hic gorunmemisti. Simdi ikisi de dogru.
   kosuyor.
 * **x86_64'te tablo tabanli SEH yok** (yukari bkz.). `.pdata`
   ayristirmak ve unwind kodlarini yorumlamak ayri bir is.
-* **Ic ice dagitim yok.** Bir isleyicinin kendisi cokerse Windows
-  `ExceptionNestedException` uretir; TCMK daha muhafazakar davranip
-  sureci sonlandirir -- ama tanida "ic ice" diye acikca yazar.
+* ~~**Ic ice dagitim yok.**~~ Geldi -- bkz. [Ya hatayi inceleyen kodun
+  kendisi cokerse?](#ya-hatayi-inceleyen-kodun-kendisi-cokerse).
+  Coken bir isleyici artik sureci goturmuyor: dagitim siradakiyle
+  suruyor ve ic dagitim cozulunce dis kayit geri geliyor.
 * **Surec basina dort vektorlu isleyici.** Gercek Windows'ta liste
   sinirsiz; burada sabit dizi, cunku cekirdekte surec basina dinamik
   tahsis yapmamak genel tercih.
@@ -6949,6 +6950,140 @@ olcmesi gereken seyi olctugunu kendiliginden gostermez.
 * **Koruma sayfasi tek.** Bir cerceve 4 KiB'den buyukse (cok buyuk
   yerel diziler) tasma koruma sayfasini atlayabilir. Gercek cekirdekler
   de bu yuzden derleyiciden yigin sondasi (`stack probe`) bekler.
+
+## Ya hatayi inceleyen kodun **kendisi** cokerse?
+
+`winseh` istisna dagitiminin calistigini gosterdi, `winunwind` onun
+ikinci yarisini. Geriye dagiticinin en tuhaf sorusu kalmisti: bir
+isleyici kendi patlarsa ne olur?
+
+TCMK'nin cevabi "surec biter" idi -- muhafazakar ama pahali: tek bir
+hatali isleyici butun sureci goturuyordu. Windows'un cevabi baska ve
+daha kullanisli: dagitim **siradaki** isleyiciyle surer.
+
+```text
+  h1 cagrilir  ->  h1'in kendisi coker
+                     -> IC ICE dagitim baslar
+                     -> h2 cagrilir, bayraginda EXCEPTION_NESTED_CALL
+                     -> h2 h1'in hatasini duzeltir, "devam et" der
+                   h1 kaldigi yerden surer ve doner
+  h3 cagrilir  ->  ama ASIL hatayi gorur, h1'inkini degil
+```
+
+```
+[winnest] A isleyici coktu:    gecti (isleyici coktu, surec yasadi, ikisi de duzeldi)
+[winnest] B siradaki kostu:    gecti (ikinci isleyici cagrildi)
+[winnest] C NESTED_CALL:       gecti (ic kayitta EXCEPTION_NESTED_CALL var)
+[winnest] D zincir isaretcisi: gecti (alan dis kaydi gosteriyor, kodu da dogru)
+[winnest] E bastan baslamadi:  gecti (coken isleyici bir kez cagrildi)
+[winnest] F dis kayit dondu:   gecti (ucuncu isleyici asil hatayi gordu)
+```
+
+![winnest](docs/screenshot-winnest.png)
+
+### Iki kural, ikisi de zorunlu
+
+**Yurume bastan baslamaz.** Baslasaydi coken isleyici (h1) yeniden
+cagrilir, yeniden coker ve dagitim sonsuz donguye girerdi. Ic dagitim
+bu yuzden dis dagitimin kaldigi yerden -- h2'den -- devam ediyor.
+
+**Ic dagitim cozulunce dis kayit geri gelir.** Gelmeseydi kalan
+isleyiciler (h3) h1'in hatasini "asil hata" sanardi. Kayit iki ayri
+olay anlatiyor ve karistirilmalari, bir cokme raporlayicisinin yanlis
+adresi gunluge yazmasi demek.
+
+Cekirdekte bu, `ACTIVE` ile `NESTED_DEPTH`in ayri tutulmasi ve ic ice
+girilirken dis dagitimin kayitlarinin saklanmasi demek. Ic dagitim
+"devam et" ile bittiginde `ACTIVE` **dusmuyor** -- dis dagitim hala
+acik.
+
+### `ExceptionRecord` alani nicin var
+
+`EXCEPTION_RECORD`un icinde bir `ExceptionRecord` isaretcisi vardir ve
+cogu zaman `NULL`dur. Dolu oldugu tek yer burasi: ic ice bir kayitta o
+alan **dis** kaydi gosterir. "Bu hata su hatayi incelerken olustu"
+zinciri, veri yapisinin kendisinde duruyor.
+
+### POSIX'in ayni soruya cevabi
+
+```text
+  Win32  isleyici icinde yeni istisna -> SIRADAKI isleyiciye gider
+  POSIX  isleyici icinde ayni sinyal  -> ENGELLI -> surec oler
+```
+
+POSIX'te bir sinyal kendi isleyicisi suresince maskelidir
+(`SA_NODEFER` yoksa), yani `SIGSEGV` isleyicisinin kendi urettigi bir
+sayfa hatasi teslim edilemez. TCMK'nin POSIX yuzu de boyle davraniyor
+(bkz. `sigfault`) ve bu bilincli.
+
+Ikisi de savunulabilir: Windows hatali isleyiciye ikinci bir sans
+veriyor, POSIX donguye girme ihtimalini bastan kesiyor. Ayni donanim
+olayina iki ayri **sozlesme**.
+
+### Olcumun buldugu iki hata
+
+**1. Dagitici, dokunulmamis bir yigin sayfasina cerceve kurmayi
+reddediyordu.** `seh::begin` cerceveyi `is_user_accessible` ile
+denetliyordu; o denetim "su an dokunulabilir mi" diye soruyor ve talep
+uzerine eslenecek (henuz dokunulmamis) bir sayfa icin **hayir** diyor.
+Oysa cekirdegin oraya yazmasi hata uretir ama o hata kurtarilabilir.
+
+Sonuc: x86_64'te ic ice dagitim hic baslamiyordu -- ikinci cerceve
+yigindan biraz daha asagi dusuyor ve orasi henuz dokunulmamis oluyordu.
+i386'da ayni sinav geciyordu, cunku cerceve daha kucuk ve o sayfa zaten
+dokunulmustu. **Ayni sinavi iki mimaride kosmak** yine ayirt etti.
+
+Yeni olcu `is_user_or_demand`: "bu adres surecin mi" diye soruyor.
+Koruma sayfasi tanimin disinda kaliyor (eslenmis ama Ring 3'e kapali,
+ve ne talep ne takas isareti tasiyor). Ayni duzeltme sinyal cercevesi
+kuran yola da uygulandi -- orada da ayni sessiz ret vardi.
+
+**2. Ayni olum, iki ayri cikis kodu.** Yakalanmayan bir istisnada
+cekirdek `STATUS_ACCESS_VIOLATION & 0xFF` yaziyordu, yani **5**.
+Dagitim hic denenmemisse (isleyici yoksa) ayni olum 0xC0000005
+veriyordu. `GetExitCodeProcess` soran bir Windows programi icin ikincisi
+anlamli, birincisi degil. Artik iki yol da olum **sebebini** kaydediyor
+ve tek bir kod uretiyor.
+
+Bu, sinavin kendi kurgusunu bozarak ortaya cikti: ebeveyn "cocuk coktu
+mu" sorusunu cikis kodunun buyuklugunden anliyordu ve 5, gecerli bir
+bit maskesiyle carpisti. Cevap artik sonucun **buyuklugunden** degil,
+cocugun koydugu bir isaret bitinden okunuyor.
+
+### Sinavin kurgusu: yine cocuk surecte
+
+Coken kisim ayri bir surecte kosuyor. Ic ice dagitim calismiyorsa o
+surec olur ve sinavin hic ciktisi olmazdi -- daha once uc kez ogrenilmis
+bir ders (`bigfile`, `jobs`, `sigfault`), burada dorduncu kez cikti.
+Ebeveyn cocugu `CreateProcessA` ile ayni ikiliden, `child` argumaniyla
+baslatiyor ve cevabi cikis kodundan okuyor.
+
+Bir ayrinti daha bilincli: ikinci isleyicinin karari **bayraga
+bakmiyor**, cagri sayisina bakiyor. Akis bayraga baglansaydi, bayragi
+kaldiran bir cekirdekte butun sinavlar birden duser ve hangisinin
+bozuldugu anlasilmazdi.
+
+### Sinav neyi ayirt ediyor, neyi etmiyor
+
+Durustce: alti olcunun ikisi (C ve D) tek baslarina dusuruluyor --
+bayragi ya da zincir isaretcisini kaldirmak yalnizca onlari bozuyor.
+Digerleri (A, B, E, F) **yuk tasiyor** ama bozulduklarinda cocuk
+coktugu icin sinav "cocuk COKTU" diyor, hangisinin bozuldugunu degil.
+Her bozmada gurultulu ve dogru bir basarisizlik aliniyor; ayirt
+edicilik o dorduncude yok.
+
+### Bilerek yapilmayanlar
+
+* **Iki katman sinir.** `MAX_NESTED_DISPATCH` 2; ust uste coken
+  isleyiciler zinciri orada kesiliyor ve surec sonlaniyor. Sinir
+  olmasaydi her katman yiginda bir cerceve daha tuketirdi. Sinirin
+  kendisi sinavla olculmedi -- olcmek icin sureci oldurmek gerekiyor.
+* **`ExceptionCollidedUnwind` yok.** Geri sarma sirasinda cikan bir
+  istisna ayri bir durumdur ve ayri bir donus degeri ister; geri sarma
+  zaten ic ice cagriyi reddediyor (bkz. `RtlUnwind`).
+* **Ic dagitimda "devam et" ic baglami surdurur.** Yani coken
+  isleyicinin kendi hatasi duzeltilir ve o isleyici devam eder. Dis
+  istisnanin ne olacagi, isleyicinin donus degerine kalmis.
 
 ## Alfa'nin bilinen sinirlari
 

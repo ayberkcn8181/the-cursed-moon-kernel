@@ -154,7 +154,7 @@ cevirisi** yapip Level-0a'nin ortak API'sine devreder.
 | `nt_syscalls.rs` | `int 0x2E` ile gelen cagrilar. Uc aralik: `0x1000` (ham NT), `0x2000` (win32k), `0x3000` (Win32 API, yigin argumanli). Deponun en uzun kaynak dosyasi. |
 | `dll.rs` | **Gomulu DLL tablosu.** Diskte `KERNEL32.dll` yok; bu tablo adi bir NT servis numarasina cevirir ve `emit_thunk` surecin adres uzayina cagri stub'i yazar. |
 | `teb.rs` | Is Parcacigi Ortam Blogu. `fs:[0x18]` / `gs:[0x30]`den ulasilan yapi; SEH zinciri, son hata kodu, yigin sinirlari. PEB ve modul listesi de bu blokta kurulur. |
-| `seh.rs` | **Windows istisna dagitimi.** VEH listesi, `fs:[0]` zinciri, `UnhandledExceptionFilter`. Cekirdek kullanici yiginina `EXCEPTION_RECORD` + `CONTEXT` yazip cerceveyi isleyiciye cevirir. `CONTEXT` cevirici (`store_context`/`load_context`) burada duruyor ve `Get`/`SetThreadContext` da onu kullanir -- ikinci bir kopya, iki yerde ayrisabilen bir ABI birakirdi. Dagitimin **ikinci yarisi** de burada: `unwind` (`RtlUnwind`) zinciri hedefe kadar cozup yoldaki isleyicileri `EXCEPTION_UNWINDING` ile cagiriyor, yani `__finally` bloklarini kosturan yol. `ACTIVE` ile `UNWINDING` ayri bayraklar, cunku geri sarma bir dagitimin icinden baslatilabiliyor. |
+| `seh.rs` | **Windows istisna dagitimi.** VEH listesi, `fs:[0]` zinciri, `UnhandledExceptionFilter`. Cekirdek kullanici yiginina `EXCEPTION_RECORD` + `CONTEXT` yazip cerceveyi isleyiciye cevirir. `CONTEXT` cevirici (`store_context`/`load_context`) burada duruyor ve `Get`/`SetThreadContext` da onu kullanir -- ikinci bir kopya, iki yerde ayrisabilen bir ABI birakirdi. Dagitimin **ikinci yarisi** de burada: `unwind` (`RtlUnwind`) zinciri hedefe kadar cozup yoldaki isleyicileri `EXCEPTION_UNWINDING` ile cagiriyor, yani `__finally` bloklarini kosturan yol. `ACTIVE` ile `UNWINDING` ayri bayraklar, cunku geri sarma bir dagitimin icinden baslatilabiliyor. **Ic ice dagitim** de burada: bir isleyici cokerse dagitim siradakiyle suruyor (`NESTED_DEPTH`, `pop_nested`), yurume bastan baslamiyor ve ic dagitim cozulunce dis kayit geri geliyor. |
 | `modules.rs` | Modul tablosu: `GetModuleHandleA`, `GetProcAddress`, `LoadLibraryA`. Ithal edilmemis bir fonksiyon istendiginde thunk'i **o anda** uretir. |
 | `mapping.rs` | Dosya esleme nesneleri: `CreateFileMapping` + `MapViewOfFile`. POSIX'in tek cagrisina karsilik iki adim; gorunum uzunlugu cekirdekte tutulur. |
 | `mod.rs` | Modul agaci. |
@@ -197,6 +197,7 @@ cevirisi** yapip Level-0a'nin ortak API'sine devreder.
 | Dosya | Amaci |
 |---|---|
 | `scheduler.rs` | Gorev tablosu, oncelikli round-robin, preemption, uyku/bekleme durumlari, `waitpid` destegi. Deponun en yogun dosyalarindan. |
+| `mmu_*.rs` (not) | `is_user_accessible` "su an dokunulabilir mi", `is_user_or_demand` "bu adres surecin mi" diye sorar. Ikincisi talep uzerine eslenecek ve takasa gitmis sayfalari da sayar; cekirdek kullanici yiginina cerceve kuracagi zaman dogru olcu odur. `guard_user_page` ikisinin de disinda kalir. |
 | `mmu_i386.rs` | Iki seviyeli sayfalama, surec basina adres uzayi, copy-on-write, talep uzerine sayfalama, `mmap` penceresi. |
 | `mmu_x86_64.rs` | Dort seviyeli karsiligi. |
 | `frames.rs` | Fiziksel cerceve havuzu + **basvuru sayaci** (COW icin sart). |
@@ -287,6 +288,7 @@ gunluge yazarlar ve olcum bunlardan okunur.
 | `intr.rs` (6 sinav) | `EINTR` ve `SA_RESTART`: bekleyen okuma/yazmanin sinyalle bolunmesi, bolunen cagrinin veriyi tuketmemesi, cerceve geri sarilarak yeniden baslatma, ve yok sayilan sinyalin **bolmemesi**. |
 | `bin/altstack.rs` (7 sinav) | **Yigin tasmasini yakalamak.** `sigaltstack` kuruldu mu ve geri okunan ayni mi, `SA_ONSTACK` isleyicisi gercekten ayri bolgede mi kosuyor, isleyici icinde `SS_ONSTACK` gorunuyor mu, **tasma yakalanip rapor edilebiliyor mu**, tasma yiginin hemen altinda mi duruyor (koruma sayfasi), bayraksiz isleyici normal yiginda mi kaliyor, ve `MINSIGSTKSZ` altindaki bir yigin reddediliyor mu. Tasma cocuk surecte uretiliyor: yakalayan bir isleyici kaldigi yerden devam edemez. |
 | `bin/sigfault.rs` (7 sinav) | **Sayfa hatasini yakalayip duzeltmek.** `SIGSEGV` isleyicisi kostu mu ve surec yasiyor mu, `si_addr` erisilmek istenen adresi tasiyor mu, `si_code` sebebi dogru soyluyor mu, `ucontext_t`ye yazilan register **yurudu** mu (komut tekrarlandi ve yazma dogru yere dustu), `SIGFPE` de ayni yoldan geliyor mu, `kill` ile gelen sinyalde gonderenin kimligi var mi, ve isleyici **yokken** hata izolasyonu bozulmamis mi. Hata uretimi cocuk surecte: duzeltme yurumezse sinav asili kalmak yerine rapor ediyor. |
+| `win/nested.rs` (6 sinav) | **Isleyicinin kendi hatasi.** Coken bir isleyici sureci goturuyor mu yoksa dagitim siradakiyle suruyor mu, ic kayitta `EXCEPTION_NESTED_CALL` var mi, `ExceptionRecord` alani dis kaydi gosteriyor mu, yurume bastan baslamiyor mu (dongu yok), ve ic dagitim cozulunce kalan isleyiciler **asil** hatayi goruyor mu. Coken kisim cocuk surecte: calismazsa o surec olur ve sinavin hic ciktisi olmazdi. |
 | `win/unwind.rs` (7 sinav) | **Dagitimin ikinci yarisi.** `RtlUnwind` zinciri hedefe kadar cozuyor mu, yoldaki isleyiciler `EXCEPTION_UNWINDING` ile cagriliyor mu (`__finally`), hedef kaydin kendisi ayakta kaliyor mu, `fs:[0]` hedefe cekiliyor mu, hedefsiz kip cagirana donuyor mu, hedefli kip oraya atlayip `EAX`i tasiyor mu, ve zincirde olmayan bir hedef reddediliyor mu. F sinavi ucunu birden gercek bir sayfa hatasinda birlestiriyor. x86_64'te hepsi atlanir: orada zincir yoktur. |
 | `win/context.rs` (7 sinav) | **Baglam okuma/yazma.** Askida dogan akisin `Eip`i giris fonksiyonunu gosteriyor mu, yazilan `Eip` gercekten yuruyor mu (akis BASKA bir yerden basliyor), cagiranin kendi baglami canli cerceveden mi geliyor (okunan `Esp` yerel bir degiskene komsu mu), kosan bir akis icin cagri uydurmak yerine **reddediliyor** mu, ve `CreateThread` cagiranin segment tabanini bozmuyor mu. |
 | `win/suspend.rs` (6 sinav) | Win32'nin **sayilan** askisi: `CREATE_SUSPENDED` ile askida dogan akis, iki `Suspend` + bir `Resume` sonrasi hala duruyor mu (POSIX ikizinde ayni dizi kosan bir surec verir), donus degerleri **onceki** sayiyi veriyor mu, ve `SetThreadPriority` gidip geliyor mu. |
@@ -348,7 +350,7 @@ almazlar.
 |---|---|
 | Acilis | `boot/x86_64.rs`, `main.rs` |
 | Bir sistem cagrisi eklemek | `posix_syscalls.rs` ya da `nt_syscalls.rs`, sonra `kernel_api.rs` |
-| Bellek yonetimi | `mmu_i386.rs`, `frames.rs` |
+| Bellek yonetimi | `mmu_i386.rs`, `mmu_x86_64.rs`, `frames.rs` |
 | Zamanlama | `scheduler.rs`, `pit.rs` |
 | Is parcaciklari | `thread.rs`, `scheduler.rs` (`Task.group`) |
 | Kilit / bekleme | `futex.rs`, `scheduler.rs` (`wait_on_address`) |

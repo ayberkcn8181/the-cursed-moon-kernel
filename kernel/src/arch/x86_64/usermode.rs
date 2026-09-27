@@ -219,7 +219,7 @@ pub unsafe fn build_signal_frame(
     use crate::level0a::core::mmu;
 
     let sp = ((stack - 128) & !0xF) - 8;
-    if !mmu::is_user_accessible(sp) || !mmu::is_user_accessible(sp + 7) {
+    if !mmu::is_user_or_demand(sp) || !mmu::is_user_or_demand(sp + 7) {
         return None;
     }
     (sp as *mut u64).write_unaligned(restorer as u64);
@@ -324,6 +324,11 @@ pub unsafe fn build_siginfo_frame(
 ) -> Option<usize> {
     use crate::level0a::core::mmu;
 
+    // Talep uzerine eslenecek sayfalar da kabul ediliyor: cekirdegin
+    // oraya yazmasi hata uretir ama o hata kurtarilabilir. Kati denetim
+    // burada yanlis cevap verirdi -- henuz dokunulmamis bir yigin
+    // sayfasi yuzunden teslim edilemeyen bir sinyal (bkz. `seh.rs`teki
+    // ayni duzeltme).
     const RECORDS: usize = SIGINFO_SIZE + UCONTEXT_SIZE;
     let sp = stack;
     if sp < RECORDS + 256 {
@@ -332,12 +337,12 @@ pub unsafe fn build_siginfo_frame(
     let base = (sp - 128 - RECORDS) & !0xF;
     let mut probe = base;
     while probe < base + RECORDS {
-        if !mmu::is_user_accessible(probe) {
+        if !mmu::is_user_or_demand(probe) {
             return None;
         }
         probe += 4096;
     }
-    if !mmu::is_user_accessible(base + RECORDS - 1) {
+    if !mmu::is_user_or_demand(base + RECORDS - 1) {
         return None;
     }
 
@@ -345,7 +350,7 @@ pub unsafe fn build_siginfo_frame(
     let ucontext_at = base + SIGINFO_SIZE;
 
     let call = (base & !0xF) - 8;
-    if !mmu::is_user_accessible(call) || !mmu::is_user_accessible(call + 7) {
+    if !mmu::is_user_or_demand(call) || !mmu::is_user_or_demand(call + 7) {
         return None;
     }
 

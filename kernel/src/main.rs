@@ -174,6 +174,9 @@ static WINCTX_EXE: &[u8] = include_bytes!("../../userland/winctx.exe");
 /// Dagitimin ikinci yarisi: RtlUnwind ve __finally.
 #[cfg(target_arch = "x86")]
 static WINUNWIND_EXE: &[u8] = include_bytes!("../../userland/winunwind.exe");
+/// Isleyicinin kendi hatasi: ic ice istisna dagitimi.
+#[cfg(target_arch = "x86")]
+static WINNEST_EXE: &[u8] = include_bytes!("../../userland/winnest.exe");
 /// FindFirstFileA gosterimi -- ayni dizinler, Win32 yuzu.
 #[cfg(target_arch = "x86")]
 static WINFILES_EXE: &[u8] = include_bytes!("../../userland/winfiles.exe");
@@ -327,6 +330,8 @@ static WINSUSP_EXE64: &[u8] = include_bytes!("../../userland/winsusp.exe64");
 static WINCTX_EXE64: &[u8] = include_bytes!("../../userland/winctx.exe64");
 #[cfg(target_arch = "x86_64")]
 static WINUNWIND_EXE64: &[u8] = include_bytes!("../../userland/winunwind.exe64");
+#[cfg(target_arch = "x86_64")]
+static WINNEST_EXE64: &[u8] = include_bytes!("../../userland/winnest.exe64");
 
 /// Kullanici programlarinin VFS uzerinden okudugu test dosyasi.
 static BOOT_MSG: &[u8] = b"/boot/msg.txt: VFS uzerinden okundu (RAMFS).\n";
@@ -390,6 +395,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/winsusp.exe", WINSUSP_EXE),
     ("/bin/winctx.exe", WINCTX_EXE),
     ("/bin/winunwind.exe", WINUNWIND_EXE),
+    ("/bin/winnest.exe", WINNEST_EXE),
     ("/boot/msg.txt", BOOT_MSG),
 ];
 
@@ -449,6 +455,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/winsusp.exe", WINSUSP_EXE64),
     ("/bin/winctx.exe", WINCTX_EXE64),
     ("/bin/winunwind.exe", WINUNWIND_EXE64),
+    ("/bin/winnest.exe", WINNEST_EXE64),
     ("/boot/msg.txt", BOOT_MSG),
 ];
 

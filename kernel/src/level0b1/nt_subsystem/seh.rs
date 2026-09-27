@@ -92,6 +92,14 @@ pub const EXCEPTION_UNWINDING: u32 = 0x2;
 #[cfg(target_arch = "x86")]
 pub const EXCEPTION_EXIT_UNWIND: u32 = 0x4;
 
+/// Bir isleyicinin **kendisi** cokerse olusan istisna bu bayrakla gelir.
+///
+/// Windows'un bu bayragi tasimasinin sebebi somut: siradaki isleyici,
+/// bakacagi kaydin "asil hata" mi yoksa "hatayi inceleyen kodun kendi
+/// hatasi" mi oldugunu bilmek zorunda. Ikisi ayni sekilde ele
+/// alinamaz -- ikincisinde zaten bir dagitim suruyor.
+pub const EXCEPTION_NESTED_CALL: u32 = 0x10;
+
 /// Geri sarmanin kendi istisna kodu (`STATUS_UNWIND`).
 #[cfg(target_arch = "x86")]
 const STATUS_UNWIND: u32 = 0xC000_0027;
@@ -258,6 +266,48 @@ static VEH: [[AtomicUsize; MAX_VEH]; scheduler::MAX_TASKS] =
 static ACTIVE: [AtomicUsize; scheduler::MAX_TASKS] =
     [const { AtomicUsize::new(0) }; scheduler::MAX_TASKS];
 
+// --- Ic ice dagitim --------------------------------------------------
+//
+// Bir istisna dagitilirken **isleyicinin kendisi** cokerse ne olur?
+// Uzun sure TCMK'nin cevabi "surec biter" idi ve bu, muhafazakar ama
+// pahali bir cevapti: tek bir hatali isleyici butun sureci goturuyordu.
+// Windows'un cevabi baska -- dagitim siradaki isleyiciyle **surer**.
+//
+// Iki kural ayrimi tasiyor:
+//
+//   * Yurume bastan baslamaz. Baslasaydi coken isleyici yeniden
+//     cagrilir ve sonsuz donguye girilirdi.
+//   * Ic dagitim cozuldugunde **dis** kayit geri gelir: kalan
+//     isleyiciler asil hatayi gormeli, isleyicinin hatasini degil.
+
+/// En fazla kac katman ic ice dagitim.
+///
+/// Ikiden derini pratikte hatali isleyicilerin zinciri demek; sinir
+/// olmasaydi her katman yiginda bir cerceve daha tuketir ve sonunda
+/// yigin tasardi. Sinira dayanilinca surec sonlaniyor (eski davranis).
+const MAX_NESTED_DISPATCH: usize = 2;
+
+/// Kac katman ic ice (0 = ic ice degil).
+static NESTED_DEPTH: [AtomicUsize; scheduler::MAX_TASKS] =
+    [const { AtomicUsize::new(0) }; scheduler::MAX_TASKS];
+
+/// Ic ice girilirken saklanan **dis** dagitimin kayitlari.
+static OUTER_RECORD: [[AtomicUsize; MAX_NESTED_DISPATCH]; scheduler::MAX_TASKS] =
+    [const { [const { AtomicUsize::new(0) }; MAX_NESTED_DISPATCH] }; scheduler::MAX_TASKS];
+static OUTER_CONTEXT: [[AtomicUsize; MAX_NESTED_DISPATCH]; scheduler::MAX_TASKS] =
+    [const { [const { AtomicUsize::new(0) }; MAX_NESTED_DISPATCH] }; scheduler::MAX_TASKS];
+static OUTER_POINTERS: [[AtomicUsize; MAX_NESTED_DISPATCH]; scheduler::MAX_TASKS] =
+    [const { [const { AtomicUsize::new(0) }; MAX_NESTED_DISPATCH] }; scheduler::MAX_TASKS];
+static OUTER_FLAGS: [[AtomicUsize; MAX_NESTED_DISPATCH]; scheduler::MAX_TASKS] =
+    [const { [const { AtomicUsize::new(0) }; MAX_NESTED_DISPATCH] }; scheduler::MAX_TASKS];
+
+/// Olcum: kac ic ice dagitim oldu.
+static NESTED_DISPATCHES: AtomicUsize = AtomicUsize::new(0);
+
+pub fn nested_dispatches() -> usize {
+    NESTED_DISPATCHES.load(Ordering::Relaxed)
+}
+
 // --- Geri sarma (`RtlUnwind`) durumu ----------------------------------
 //
 // Dagitimdan **ayri** bir evre ve ayri tutulmasi sart: geri sarma bir
@@ -352,6 +402,7 @@ pub fn reset(task: usize) {
         slot.store(0, Ordering::Relaxed);
     }
     ACTIVE[task].store(0, Ordering::Relaxed);
+    NESTED_DEPTH[task].store(0, Ordering::Relaxed);
     PHASE[task].store(PHASE_VECTORED, Ordering::Relaxed);
     FILTER[task].store(0, Ordering::Relaxed);
     FILTER_RAN[task].store(0, Ordering::Relaxed);
@@ -457,7 +508,7 @@ fn writable(from: usize, len: usize) -> bool {
     let mut page = from & !0xFFF;
     let last = (from + len - 1) & !0xFFF;
     loop {
-        if !mmu::is_user_accessible(page) {
+        if !mmu::is_user_or_demand(page) {
             return false;
         }
         if page == last {
@@ -548,10 +599,15 @@ unsafe fn begin(
     if teb_at == 0 {
         return None;
     }
-    // Dagitim sirasinda cikan istisna, dagiticinin kendisini bozar.
-    // Windows bunu `ExceptionNestedException` ile ele alir; TCMK daha
-    // muhafazakar davranip sureci sonlandirir.
-    if ACTIVE[task].load(Ordering::Relaxed) != 0 {
+    // Dagitim sirasinda cikan istisna: **isleyicinin kendisi** cokmus.
+    // Yurume bastan baslamiyor, siradaki isleyiciyle suruyor -- bastan
+    // baslasaydi coken isleyici yeniden cagrilir ve dongu olusurdu.
+    let nested = ACTIVE[task].load(Ordering::Relaxed) != 0;
+    let depth = NESTED_DEPTH[task].load(Ordering::Relaxed);
+    if nested && depth >= MAX_NESTED_DISPATCH {
+        // Ust uste coken isleyiciler: her katman yiginda bir cerceve
+        // daha tuketiyor. Burada durup sureci sonlandirmak, yigini
+        // tuketip tanisiz colmekten iyidir.
         return None;
     }
 
@@ -569,10 +625,22 @@ unsafe fn begin(
     let context_at = (record_at + sizes::RECORD + 0xF) & !0xF;
     let pointers_at = context_at + sizes::CONTEXT;
 
+    // Ic ice ise kayit iki sey daha tasiyor: bayrakta
+    // `EXCEPTION_NESTED_CALL` ve `ExceptionRecord` alaninda **dis**
+    // kaydin adresi. Ikincisi alanin varlik sebebi: siradaki isleyici
+    // "asil hata neydi" sorusunu oradan cevapliyor.
+    let outer_record = RECORD_AT[task].load(Ordering::Relaxed);
+    let flags = if nested {
+        flags | EXCEPTION_NESTED_CALL
+    } else {
+        flags
+    };
+
     core::ptr::write_bytes(record_at as *mut u8, 0, sizes::RECORD);
     ((record_at + rec::CODE) as *mut u32).write_unaligned(code);
     ((record_at + rec::FLAGS) as *mut u32).write_unaligned(flags);
-    ((record_at + rec::NESTED) as *mut usize).write_unaligned(0);
+    ((record_at + rec::NESTED) as *mut usize)
+        .write_unaligned(if nested { outer_record } else { 0 });
     ((record_at + rec::ADDRESS) as *mut usize).write_unaligned(address);
     let count = params.len().min(15);
     ((record_at + rec::PARAM_COUNT) as *mut u32).write_unaligned(count as u32);
@@ -588,15 +656,31 @@ unsafe fn begin(
     (pointers_at as *mut usize).write_unaligned(record_at);
     ((pointers_at + core::mem::size_of::<usize>()) as *mut usize).write_unaligned(context_at);
 
+    // Ic ice girilirken dis dagitimin kayitlari saklaniyor: ic dagitim
+    // cozuldugunde geri gelecekler (bkz. `continue_dispatch`). Kalan
+    // isleyicilerin asil hatayi gormesi buna bagli.
+    if nested {
+        OUTER_RECORD[task][depth].store(outer_record, Ordering::Relaxed);
+        OUTER_CONTEXT[task][depth].store(CONTEXT_AT[task].load(Ordering::Relaxed), Ordering::Relaxed);
+        OUTER_POINTERS[task][depth].store(POINTERS_AT[task].load(Ordering::Relaxed), Ordering::Relaxed);
+        OUTER_FLAGS[task][depth].store(FLAGS[task].load(Ordering::Relaxed), Ordering::Relaxed);
+        NESTED_DEPTH[task].store(depth + 1, Ordering::Relaxed);
+        NESTED_DISPATCHES.fetch_add(1, Ordering::Relaxed);
+    }
+
     RECORD_AT[task].store(record_at, Ordering::Relaxed);
     CONTEXT_AT[task].store(context_at, Ordering::Relaxed);
     POINTERS_AT[task].store(pointers_at, Ordering::Relaxed);
-    PHASE[task].store(PHASE_VECTORED, Ordering::Relaxed);
-    FILTER_RAN[task].store(0, Ordering::Relaxed);
     FLAGS[task].store(flags as usize, Ordering::Relaxed);
-    NEXT_VEH[task].store(0, Ordering::Relaxed);
-    NEXT_RECORD[task].store(chain_head(teb_at), Ordering::Relaxed);
-    CHAIN_STEPS[task].store(0, Ordering::Relaxed);
+    // Yurume durumu **ic ice degilse** sifirlaniyor. Ic ice ise oldugu
+    // gibi kaliyor ve dagitim siradaki isleyiciyle suruyor.
+    if !nested {
+        PHASE[task].store(PHASE_VECTORED, Ordering::Relaxed);
+        FILTER_RAN[task].store(0, Ordering::Relaxed);
+        NEXT_VEH[task].store(0, Ordering::Relaxed);
+        NEXT_RECORD[task].store(chain_head(teb_at), Ordering::Relaxed);
+        CHAIN_STEPS[task].store(0, Ordering::Relaxed);
+    }
     ACTIVE[task].store(1, Ordering::Relaxed);
 
     match advance(task, base) {
@@ -606,9 +690,27 @@ unsafe fn begin(
         }
         None => {
             ACTIVE[task].store(0, Ordering::Relaxed);
+            NESTED_DEPTH[task].store(0, Ordering::Relaxed);
             None
         }
     }
+}
+
+/// Ic dagitim cozuldu: **dis** dagitimin kayitlari geri geliyor.
+///
+/// Doner: geri donulecek bir dis dagitim var miydi.
+fn pop_nested(task: usize) -> bool {
+    let depth = NESTED_DEPTH[task].load(Ordering::Relaxed);
+    if depth == 0 {
+        return false;
+    }
+    let depth = depth - 1;
+    RECORD_AT[task].store(OUTER_RECORD[task][depth].load(Ordering::Relaxed), Ordering::Relaxed);
+    CONTEXT_AT[task].store(OUTER_CONTEXT[task][depth].load(Ordering::Relaxed), Ordering::Relaxed);
+    POINTERS_AT[task].store(OUTER_POINTERS[task][depth].load(Ordering::Relaxed), Ordering::Relaxed);
+    FLAGS[task].store(OUTER_FLAGS[task][depth].load(Ordering::Relaxed), Ordering::Relaxed);
+    NESTED_DEPTH[task].store(depth, Ordering::Relaxed);
+    true
 }
 
 /// SEH zincirinin basi: `fs:[0]` (i386) -- x86_64'te zincir yok.
@@ -1083,6 +1185,7 @@ pub unsafe fn continue_dispatch(
     if phase == PHASE_FILTER && !continue_execution {
         let _ = EXCEPTION_EXECUTE_HANDLER;
         ACTIVE[task].store(0, Ordering::Relaxed);
+        NESTED_DEPTH[task].store(0, Ordering::Relaxed);
         UNHANDLED.fetch_add(1, Ordering::Relaxed);
         return false;
     }
@@ -1099,6 +1202,7 @@ pub unsafe fn continue_dispatch(
             "[LEVEL-0b1] SEH: NONCONTINUABLE istisnada 'devam et' istendi -- reddedildi."
         );
         ACTIVE[task].store(0, Ordering::Relaxed);
+        NESTED_DEPTH[task].store(0, Ordering::Relaxed);
         UNHANDLED.fetch_add(1, Ordering::Relaxed);
         return false;
     }
@@ -1108,7 +1212,13 @@ pub unsafe fn continue_dispatch(
         // mesele bu: hatali registeri duzeltip komutu tekrarlatmak ya da
         // yurutmeyi baska bir noktaya tasimak.
         let resumed = read_context(context_at);
-        ACTIVE[task].store(0, Ordering::Relaxed);
+        // Ic ice bir dagitim cozuldu: yurutme coken **isleyicinin**
+        // icinde surecek, ama dis dagitim hala acik. Kayitlar geri
+        // geliyor, `ACTIVE` dusmuyor -- isleyici dondugunde kalanlar
+        // asil hatayi gormeli.
+        if !pop_nested(task) {
+            ACTIVE[task].store(0, Ordering::Relaxed);
+        }
         CONTINUED.fetch_add(1, Ordering::Relaxed);
         frame.set_user_context_via(from_interrupt, &resumed);
         return true;
@@ -1122,6 +1232,7 @@ pub unsafe fn continue_dispatch(
         }
         None => {
             ACTIVE[task].store(0, Ordering::Relaxed);
+            NESTED_DEPTH[task].store(0, Ordering::Relaxed);
             UNHANDLED.fetch_add(1, Ordering::Relaxed);
             false
         }

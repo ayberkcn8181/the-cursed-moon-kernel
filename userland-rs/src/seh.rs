@@ -63,6 +63,21 @@ pub const EXCEPTION_UNWINDING: u32 = 0x2;
 /// Hedefsiz geri sarma: zincirin tamami cozuluyor.
 pub const EXCEPTION_EXIT_UNWIND: u32 = 0x4;
 
+/// Bir isleyicinin **kendisi** coktu: bu kayit onun hatasini anlatiyor.
+///
+/// Bayrak olmadan siradaki isleyici iki durumu ayirt edemezdi: "asil
+/// hata" ile "hatayi inceleyen kodun kendi hatasi". Ikincisinde zaten
+/// bir dagitim suruyor ve asil kayit `nested` alaninda duruyor.
+pub const EXCEPTION_NESTED_CALL: u32 = 0x10;
+
+/// Bu kayit bir isleyicinin kendi cokmesinden mi dogdu?
+///
+/// # Safety
+/// `record` cekirdegin verdigi gecerli bir kayit olmalidir.
+pub unsafe fn nested_call(record: *const ExceptionRecord) -> bool {
+    (*record).flags & EXCEPTION_NESTED_CALL != 0
+}
+
 /// Isleyici geri sarma icin mi cagrildi?
 ///
 /// # Safety

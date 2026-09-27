@@ -2057,7 +2057,19 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
                 "[LEVEL-0b1] NT: yakalanmayan istisna (IP=0x{:08x}); surec sonlandiriliyor.",
                 seh::fault_address(task)
             );
-            kernel_api::exit_current_task(seh::STATUS_ACCESS_VIOLATION & 0xFF);
+            // Olum **sebebi** kaydediliyor, cikis kodu degil.
+            //
+            // Eskiden buraya `STATUS_ACCESS_VIOLATION & 0xFF` yaziliyordu
+            // ve sonuc 5 oluyordu: ayni mantiksal son (yakalanmayan
+            // erisim ihlali) iki ayri kod veriyordu -- dagitim
+            // denenmisse 5, denenmemisse 0xC0000005. `GetExitCodeProcess`
+            // soran bir Windows programi icin ikincisi anlamli,
+            // birincisi degil. Sebebi kaydetmek ikisini birlestiriyor
+            // (bkz. `win32_exit_code`).
+            crate::level0a::core::scheduler::set_current_exit_signal(
+                crate::level0b1::signal::SIGSEGV,
+            );
+            kernel_api::exit_current_task(0);
         }
 
         // --- Modul tablosu (bkz. `modules.rs`) ---

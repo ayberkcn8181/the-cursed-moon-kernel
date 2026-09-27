@@ -339,12 +339,13 @@ pub fn report_and_die(vector: usize, error_code: usize, instruction_ptr: usize, 
         );
     }
 
-    // Dagitim sirasinda cikan bir istisna ozel bir durumdur: kullanici
-    // isleyicisinin kendisi hatali demektir. Windows buna
-    // `ExceptionNestedException` der; ayirt edilmezse tani yaniltici olur.
+    // Buraya gelinmis olmasi, ic ice dagitimin da **sinira dayandigi**
+    // anlamina gelir: bir isleyicinin cokmesi normalde siradakine
+    // gider (bkz. `seh::begin`). Tani yine de yazilir, cunku sebep
+    // "asil hata" degil "hatayi inceleyen kodun hatasi"dir.
     if crate::level0b1::nt_subsystem::seh::active(task) {
         crate::println!(
-            "            (istisna, SEH isleyicisi calisirken olustu -- ic ice)"
+            "            (istisna, SEH isleyicisi calisirken olustu -- ic ice sinir asildi)"
         );
     }
 

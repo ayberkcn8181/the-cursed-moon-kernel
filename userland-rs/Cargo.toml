@@ -132,6 +132,10 @@ path = "src/win/context.rs"
 name = "winunwind"
 path = "src/win/unwind.rs"
 
+[[bin]]
+name = "winnest"
+path = "src/win/nested.rs"
+
 [profile.dev]
 panic = "abort"
 opt-level = 1

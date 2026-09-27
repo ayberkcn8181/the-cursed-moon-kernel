@@ -1612,6 +1612,9 @@ fn execute(line: &str) {
             newline();
             // Geri sarma ayri sayiliyor: dagitimdan bagimsiz da
             // baslatilabiliyor ve olculen sey "kac __finally kostu".
+            write_str("SEH ic ice: ");
+            write_num(seh::nested_dispatches());
+            newline();
             write_str("SEH geri sarildi: ");
             write_num(seh::unwinds());
             write_str("  cozulen cerceve: ");
