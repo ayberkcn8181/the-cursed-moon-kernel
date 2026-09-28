@@ -154,9 +154,11 @@ mod i386_numbers {
     pub const SYS_ALARM: u32 = 27;
     pub const SYS_PAUSE: u32 = 29;
     /// i386'da `sigsuspend`(72) eski `sigset_t`u alir; `rt_sigsuspend`
-    /// 179'dur ve TCMK'nin 32-bit maskesine dogrudan oturur.
+    /// 179'dur ve maske **isaretciyle** gelir.
     pub const SYS_SIGSUSPEND: u32 = 179;
     pub const SYS_SIGALTSTACK: u32 = 186;
+    /// `rt_sigqueueinfo` -- sinyali **degeriyle** gonderir.
+    pub const SYS_SIGQUEUE: u32 = 178;
     /// i386'da `mmap2` -- eski `mmap`(90) argumanlari bir yapida alirdi.
     pub const SYS_MMAP: u32 = 192;
     pub const SYS_MUNMAP: u32 = 91;
@@ -232,6 +234,8 @@ mod x86_64_numbers {
     /// x86_64'te `rt_sigsuspend`.
     pub const SYS_SIGSUSPEND: u32 = 130;
     pub const SYS_SIGALTSTACK: u32 = 131;
+    /// `rt_sigqueueinfo`.
+    pub const SYS_SIGQUEUE: u32 = 129;
     pub const SYS_MMAP: u32 = 9;
     pub const SYS_MUNMAP: u32 = 11;
     pub const SYS_GETPRIORITY: u32 = 140;
@@ -450,8 +454,64 @@ const CONTINUED_STATUS: u32 = 0xFFFF;
 /// Kullanici alanindan gelen yol adinin en fazla uzunlugu.
 const PATH_MAX: usize = 128;
 
+/// 64 bitlik `sigset_t`in kac **makine kelimesi** ettigi.
+///
+/// Maske `u32`ken bu soru yoktu: her yerde tek kelimeydi. 64 bite
+/// cikinca i386 ile x86_64 ayrisiyor ve ABI'nin bunu soylemesi gerekiyor
+/// -- gercek Linux'un `rt_*` cagrilarina `sigsetsize` argumani
+/// eklemesinin sebebi de aynidir.
+#[cfg(target_arch = "x86")]
+pub const MASK_WORDS: usize = 2;
+#[cfg(target_arch = "x86_64")]
+pub const MASK_WORDS: usize = 1;
+
 /// `sigaction` yapisinin kelime sayisi: isleyici, tramplen, bayrak, maske.
-const SIGACTION_WORDS: usize = 4;
+///
+/// Yapi **kelime kelime** okundugu icin alanlarin hepsi makine kelimesi
+/// genisliginde. Bu bir uslup tercihi degil: bir onceki duzende
+/// `flags: u32` ve `mask: u32` yan yanaydi ve x86_64'te ikisi tek bir
+/// 8-baytlik kelimeye oturuyordu. Okuyucu ise dort kelime istiyordu,
+/// yani yapinin **sonundan sekiz bayt ote** okuyup onu `sa_mask` sayiyordu
+/// -- o bayt bir sonraki sayfaya duserse cagri `EFAULT` de dondurebilirdi.
+/// Butun cagiranlarin maskeyi sifir gecmesi hatayi gorunmez kilmisti.
+const SIGACTION_WORDS: usize = 3 + MASK_WORDS;
+
+/// Kelime parcalarindan 64 bitlik maskeyi toplar.
+fn mask_from_words(words: &[usize]) -> u64 {
+    #[cfg(target_arch = "x86")]
+    {
+        words[0] as u64 | ((words[1] as u64) << 32)
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        words[0] as u64
+    }
+}
+
+/// Kullanici alanindan 64 bitlik bir `sigset_t` okur.
+///
+/// `None` = okunamadi (`EFAULT`). Isaretcinin **her kelimesi** ayri ayri
+/// dogrulaniyor, cunku maske iki sayfaya yayilmis olabilir.
+fn read_user_mask(addr: usize) -> Option<u64> {
+    let mut words = [0usize; MASK_WORDS];
+    if !read_user_words(addr, &mut words) {
+        return None;
+    }
+    Some(mask_from_words(&words))
+}
+
+/// Kullanici alanina 64 bitlik bir `sigset_t` yazar.
+fn write_user_mask(addr: usize, mask: u64) -> bool {
+    #[cfg(target_arch = "x86")]
+    {
+        write_user_word(addr, mask as u32 as usize)
+            && write_user_word(addr + 4, (mask >> 32) as u32 as usize)
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        write_user_word(addr, mask as usize)
+    }
+}
 
 /// Kullanici alanindan ardisik kelimeler okur.
 ///
@@ -1507,19 +1567,41 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
             return;
         }
 
-        // `sigprocmask(how, maske)` -- ESKI maskeyi doner.
+        // `rt_sigprocmask(how, *set, *oldset)` -- engel maskesi.
         //
-        // Gercek POSIX iki `sigset_t` isaretcisi alir; 32 sinyal tek bir
-        // kelimeye sigdigi icin burada maske deger olarak gecirilir
-        // (ayni sadelestirme `pipe`'ta da yapildi).
+        // Maske uzun sure **deger** olarak geciyordu ve o zaman icin
+        // dogruydu: 32 sinyal tek bir registera siginiyordu, yani
+        // isaretci dogrulamak gereksiz bir yol olacakti. Gercek-zamanli
+        // sinyaller geldiginde maske 64 bite cikti ve i386'da tek
+        // registera **sigmiyor**; ustelik eski maskenin donus degeriyle
+        // verilmesi de imkansizlastigi icin gercek Linux'un yolu tek yol
+        // kaldi. Sadelestirmeyi ayakta tutan sey, onu gereksiz kilan
+        // seyle ayni seydi.
+        //
+        // `set` NULL olabilir: o zaman cagri yalnizca **sorgu**dur.
         SYS_SIGPROCMASK => {
             let task = crate::level0a::core::scheduler::current_id();
-            match signal::sigprocmask(task, arg1, arg2 as u32) {
-                Some(old) => {
-                    frame.set_return(old as usize);
-                    return;
+            // Eski maske once okunuyor: `set` ve `oldset` ayni adresi
+            // gosterebilir ve o durumda yazma, okumadan sonra gelmeli.
+            let old = signal::blocked_mask(task);
+            if arg2 != 0 {
+                match read_user_mask(arg2) {
+                    Some(set) => {
+                        if signal::sigprocmask(task, arg1, set).is_none() {
+                            return_errno(frame, -EINVAL);
+                            return;
+                        }
+                    }
+                    None => {
+                        return_errno(frame, -EFAULT);
+                        return;
+                    }
                 }
-                None => -EINVAL,
+            }
+            if arg3 != 0 && !write_user_mask(arg3, old) {
+                -EFAULT
+            } else {
+                0
             }
         }
 
@@ -2046,10 +2128,14 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
         // ayri cagrilarda sinyal tam aradaki pencerede gelirse `pause`
         // onu kacirir ve surec sonsuza kadar uyur.
         //
-        // Gercek Linux maskeyi **isaretciyle** alir; TCMK 32 bitlik
-        // maskeyi dogrudan registerda tasiyor (bkz. `sigprocmask`).
+        // Maske `sigprocmask` ile ayni sebepten isaretciyle geliyor:
+        // 64 bit i386'da tek registera sigmiyor.
         SYS_SIGSUSPEND => {
-            signal::sigsuspend(scheduler::current_id(), arg1 as u32);
+            let Some(mask) = read_user_mask(arg1) else {
+                return_errno(frame, -EFAULT);
+                return;
+            };
+            signal::sigsuspend(scheduler::current_id(), mask);
             -EINTR
         }
 
@@ -2324,6 +2410,31 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
             }
         }
 
+        // `sigqueue(pid, sig, deger)` -- sinyali **degeriyle** gonderir.
+        //
+        // `kill`den farki bir arguman degil, bir **sozlesme**: bu yolla
+        // gonderilen gercek-zamanli sinyaller birlesmez, kuyruga girer.
+        // Uc kez gonderilen sinyal uc kez teslim edilir ve her teslim
+        // kendi degerini tasir. Kuyruk dolarsa cagri `EAGAIN` doner --
+        // yani "yer yok" bir ariza degil, sozlesmenin yazili bir parcasi
+        // (bkz. `signal::SIGQUEUE_LEN`).
+        //
+        // Gercek Linux'ta cagrinin adi `rt_sigqueueinfo` ve ucuncu
+        // arguman tam bir `siginfo_t` isaretcisidir. TCMK yalnizca
+        // **degeri** aliyor: kaydin geri kalanini (kod, gonderen)
+        // cekirdek zaten kendisi dolduruyor, Linux da ayricaliksiz bir
+        // gonderenin yazdigi o alanlari kabul etmiyor. Yani isaretciyle
+        // gelen kismin buyuk bolumu her iki tarafta da yok sayiliyor.
+        SYS_SIGQUEUE => {
+            let signo = arg2 as u32;
+            match signal::sigqueue(arg1, signo, arg3) {
+                Ok(()) => 0,
+                Err(signal::SignalError::NoSuchTask) => -ESRCH,
+                Err(signal::SignalError::QueueFull) => -EAGAIN,
+                Err(_) => -EINVAL,
+            }
+        }
+
         // setpgid(pid, pgid) -- surec grubunu degistirir.
         //
         // Ikisi de sifir olabiliyor ve anlamlari ayri: `pid = 0`
@@ -2360,9 +2471,10 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
         // engellemeyebilir.
         //
         // Yapi kullanici alanindan **isaretciyle** gelir, gercek
-        // `rt_sigaction` gibi: dort kelime (isleyici, tramplen, bayrak,
-        // maske). Registerlere sigdirmak icin sadelestirmek, bayrak
-        // eklendikce yeniden bozulacak bir ABI demek olurdu.
+        // `rt_sigaction` gibi: isleyici, tramplen, bayrak ve maske --
+        // maske i386'da iki kelime, x86_64'te bir (bkz. `MASK_WORDS`).
+        // Registerlere sigdirmak icin sadelestirmek, bayrak eklendikce
+        // yeniden bozulacak bir ABI demek olurdu.
         SYS_SIGACTION => {
             let task = crate::level0a::core::scheduler::current_id();
             let mut act = [0usize; SIGACTION_WORDS];
@@ -2382,7 +2494,7 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
                         act[0],
                         act[1],
                         act[2] as u32,
-                        act[3] as u32,
+                        mask_from_words(&act[3..]),
                     )
                 };
                 match result {
@@ -2406,7 +2518,7 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
             // i386 Linux'un gercek `signal`(48) numarasi oldugu icin
             // duruyor.
             let task = crate::level0a::core::scheduler::current_id();
-            match signal::set_handler(task, arg1 as u32, arg2, arg3, 0, 0) {
+            match signal::set_handler(task, arg1 as u32, arg2, arg3, 0, 0u64) {
                 Ok(previous) => previous as i32,
                 Err(_) => -EINVAL,
             }

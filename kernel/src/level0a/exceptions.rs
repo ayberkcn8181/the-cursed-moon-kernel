@@ -287,6 +287,9 @@ fn fault_info(
         addr: if vector == 14 { fault_addr } else { 0 },
         code,
         pid: 0,
+        // `si_value` yalnizca `sigqueue` yolunda anlamli; bir CPU
+        // hatasinin tasidigi bir deger yok.
+        value: 0,
     }
 }
 

@@ -32,19 +32,41 @@
 //! yapmayan bir surec oldurulemezdi -- yani "her seyi durdurabilen komut"
 //! olma ozelligi kaybolurdu.
 //!
+//! ## Iki sinif sinyal: biri birlesir, oteki kuyruga girer
+//!
+//! POSIX'in en az bilinen ayrimi burada. **Standart** sinyaller (1..=31)
+//! bir **bit maskesinde** bekler, yani bir sinyal iki kez gonderilirse
+//! bir kez teslim edilir -- ikinci gonderim birinciyle *birlesir*.
+//! **Gercek-zamanli** sinyaller (`SIGRTMIN..=SIGRTMAX`) bir **kuyrukta**
+//! bekler: N kez gonderilen sinyal N kez teslim edilir ve her kopya
+//! kendi `si_value`siyla gelir.
+//!
+//! ```text
+//!   kill(pid, SIGUSR1) x3   ->  isleyici 1 kez kosar   (bit birlesti)
+//!   sigqueue(pid, SIGRTMIN) x3 -> isleyici 3 kez kosar (kuyruk)
+//! ```
+//!
+//! Ayrim uydurma degil, bir **kaynak** karari: bit maskesi sabit yer
+//! tutar ve hicbir zaman dolmaz; kuyruk ise sinirli ve dolabilir --
+//! doldugunda `sigqueue` `EAGAIN` doner. Standart sinyaller isletim
+//! sisteminin *bildirim* araci (bir sey oldu), gercek-zamanlilar ise
+//! *mesaj* araci (su oldu, su degerle) oldugu icin ikisinin maliyeti de
+//! farkli olmak zorunda.
+//!
+//! Windows tarafinda en yakin karsilik **APC kuyruklari**dir
+//! (`QueueUserAPC`): onlar *her zaman* kuyruklu ve *her zaman* deger
+//! tasir, yani Windows'ta bu iki sinifin ayrimi hic yoktur.
+//!
 //! ## Bilerek yapilmayanlar
 //!
-//! * **Maskeleme (`sigprocmask`) yok.** Isleyici calisirken yeni sinyal
-//!   teslim edilmez (ic ice cagri yok), ama secmeli bloklama yoktur.
-//! * **`siginfo`/`sigaction` bayraklari yok.** Isleyici yalnizca sinyal
-//!   numarasini alir -- klasik `signal()` semantigi.
-//! * **Sira yok.** Ayni sinyal iki kez gelirse bir kez teslim edilir
-//!   (bit maskesi); gercek POSIX'te standart sinyaller icin de boyledir.
+//! * **`sigwaitinfo`/`sigtimedwait` yok.** Kuyruktan **senkron** okuma
+//!   yuzu; teslim yalnizca isleyici uzerinden oluyor.
+//! * **`si_uid` her zaman 0.** TCMK'de kullanici kimligi yok.
 
 use crate::arch::cpu::regs::{SyscallFrame, UserContext};
 use crate::arch::cpu::usermode;
 use crate::level0a::core::{mmu, scheduler};
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 pub const SIG_DFL: usize = 0;
 pub const SIG_IGN: usize = 1;
@@ -103,9 +125,32 @@ pub const SIGSTOP: u32 = 19;
 /// Ctrl-Z'yi yakalayip once dosyasini kaydedebilsin diye.
 pub const SIGTSTP: u32 = 20;
 
-/// Desteklenen en buyuk sinyal numarasi (1..=31, gercek-zamanli sinyaller
-/// yok).
-pub const MAX_SIGNAL: u32 = 31;
+/// **Standart** sinyallerin en buyugu. Bu sinira kadar olanlar bit
+/// maskesinde birlesir (bkz. modul basi).
+pub const MAX_STANDARD: u32 = 31;
+
+/// Ilk gercek-zamanli sinyal.
+///
+/// Linux'ta 32 ve 33 libc'nin kendi isi (is parcaciklari) oldugu icin
+/// uygulamalara 34'ten baslar; TCMK'de libc yok, o yuzden sinir gercek
+/// sinirin kendisi.
+pub const SIGRTMIN: u32 = 32;
+/// Son gercek-zamanli sinyal.
+pub const SIGRTMAX: u32 = 63;
+
+/// Desteklenen en buyuk sinyal numarasi.
+///
+/// 31 idi ve maske `u32`du: gercek-zamanli sinyaller icin **yer yoktu**.
+/// Simdi 63 ve maske `u64`. Buyume sadece bir sayi degisikligi degil,
+/// bir tasima degisikligi de getirdi: i386'da 64 bitlik maske tek bir
+/// registera sigmiyor, o yuzden `sigprocmask`/`sigsuspend` artik
+/// gercek Linux gibi **isaretciyle** calisiyor (bkz. `posix_syscalls`).
+pub const MAX_SIGNAL: u32 = SIGRTMAX;
+
+/// Sinyal gercek-zamanli mi -- yani kuyruga mi girer?
+pub fn rt(signo: u32) -> bool {
+    signo >= SIGRTMIN && signo <= SIGRTMAX
+}
 
 /// Bir sinyalin bir surecteki karsiligi.
 #[derive(Clone, Copy)]
@@ -118,7 +163,7 @@ struct Disposition {
     flags: u32,
     /// Isleyici kosarken **ek olarak** engellenecek sinyaller
     /// (`sigaction`in `sa_mask` alani).
-    mask: u32,
+    mask: u64,
 }
 
 impl Disposition {
@@ -252,6 +297,13 @@ static USED_ALT: [[core::sync::atomic::AtomicUsize; NEST_DEPTH]; scheduler::MAX_
 pub const SI_USER: i32 = 0;
 /// Cekirdek gonderdi (ornegin `SIGPIPE`).
 pub const SI_KERNEL: i32 = 0x80;
+/// Bir surec `sigqueue` ile gonderdi -- **degeriyle birlikte**.
+///
+/// Negatif olmasi bir kaza degil: POSIX, `si_code`in isaretini bir ayrim
+/// olarak kullanir. Sifir ve pozitif kodlari **cekirdek** uretir (bir
+/// hata olustu, bir zamanlayici doldu), negatifleri ise bir **surec**.
+/// `SI_USER`in 0 olmasi bu kuraldan once kaldigi icin istisnadir.
+pub const SI_QUEUE: i32 = -1;
 /// `SIGSEGV`: adres **eslenmemis**.
 pub const SEGV_MAPERR: i32 = 1;
 /// `SIGSEGV`: adres eslenmis ama erisim izni yok.
@@ -276,6 +328,14 @@ pub struct SigInfo {
     pub addr: usize,
     /// `si_pid` -- `kill` ile gelenlerde **gonderenin** kimligi.
     pub pid: usize,
+    /// `si_value` -- yalnizca `sigqueue` ile gelenlerde (`SI_QUEUE`).
+    ///
+    /// Sinyalin **yuku**: gonderen tarafin isleyiciye ilettigi tek
+    /// kelime. Standart sinyallerde boyle bir alan yok, cunku standart
+    /// sinyaller birlesiyor -- iki gonderim tek teslime dusunce hangi
+    /// degerin tasinacagi cevapsiz kalirdi. Kuyruk, degeri anlamli
+    /// kilan seydir.
+    pub value: usize,
 }
 
 impl SigInfo {
@@ -285,22 +345,31 @@ impl SigInfo {
             code: SI_KERNEL,
             addr: 0,
             pid: 0,
+            value: 0,
         }
     }
 }
 
+/// Yerlestirme tablosunun bir gorevdeki genisligi (0 dahil, 63 dahil).
+const SLOTS: usize = MAX_SIGNAL as usize + 1;
+
 /// Surec basina yerlestirmeler. Gorev kimligiyle indekslenir; `fork`
 /// bunlari kopyalar (`clone_into`), `execve`/cikis sifirlar (`reset`).
-static mut DISPOSITIONS: [[Disposition; MAX_SIGNAL as usize + 1]; scheduler::MAX_TASKS] =
-    [[Disposition::DEFAULT; MAX_SIGNAL as usize + 1]; scheduler::MAX_TASKS];
+static mut DISPOSITIONS: [[Disposition; SLOTS]; scheduler::MAX_TASKS] =
+    [[Disposition::DEFAULT; SLOTS]; scheduler::MAX_TASKS];
 
 /// Bekleyen sinyaller: bit N = sinyal N.
 ///
-/// `AtomicU32`, cunku gonderen baska bir gorevdir; okuma-degistirme-yazma
+/// Atomik, cunku gonderen baska bir gorevdir; okuma-degistirme-yazma
 /// arasinda zamanlayici araya girerse sinyal kaybolurdu.
+///
+/// Gercek-zamanli sinyaller icin bu bit **"kuyrukta en az bir kopya
+/// var"** demektir; kac kopya oldugunu `QUEUE` bilir. Standart
+/// sinyallerde bitin kendisi butun hikayedir -- birlesmenin somut
+/// karsiligi da budur.
 #[allow(clippy::declare_interior_mutable_const)]
-const ZERO_PENDING: AtomicU32 = AtomicU32::new(0);
-static PENDING: [AtomicU32; scheduler::MAX_TASKS] = [ZERO_PENDING; scheduler::MAX_TASKS];
+const ZERO_MASK: AtomicU64 = AtomicU64::new(0);
+static PENDING: [AtomicU64; scheduler::MAX_TASKS] = [ZERO_MASK; scheduler::MAX_TASKS];
 
 /// Ic ice gecebilecek en fazla isleyici sayisi.
 ///
@@ -326,7 +395,7 @@ static mut SAVED: [[UserContext; NEST_DEPTH]; scheduler::MAX_TASKS] =
 ///
 /// `sigreturn` bunu geri koyar: POSIX'te isleyicinin ek engelleri
 /// (`sa_mask` + sinyalin kendisi) yalnizca isleyici suresince gecerlidir.
-static mut SAVED_MASK: [[u32; NEST_DEPTH]; scheduler::MAX_TASKS] =
+static mut SAVED_MASK: [[u64; NEST_DEPTH]; scheduler::MAX_TASKS] =
     [[0; NEST_DEPTH]; scheduler::MAX_TASKS];
 
 /// Her katmanda Ring 3'teki `ucontext_t`nin adresi; 0 = yok.
@@ -339,16 +408,155 @@ static UCONTEXT_AT: [[core::sync::atomic::AtomicUsize; NEST_DEPTH]; scheduler::M
     [const { [const { core::sync::atomic::AtomicUsize::new(0) }; NEST_DEPTH] };
         scheduler::MAX_TASKS];
 
-/// Bekleyen sinyalin **neden** geldigi -- gorev basina, sinyal basina.
+/// Bekleyen **standart** sinyalin neden geldigi -- gorev basina, sinyal
+/// basina tek yuva.
 ///
 /// `PENDING` yalnizca bir bit tasiyor; bu tablo o bitin yanindaki
-/// hikayedir. Sinyal basina tek yuva olmasi `PENDING`in kendi
-/// sinirindan geliyor: ayni sinyal iki kez gonderilirse bir kez teslim
-/// edilir, yani saklanacak tek bir neden vardir. Gercek Linux'un
-/// gercek-zamanli sinyalleri bu yuzden kuyrukludur -- TCMK'de onlar da
-/// yok (bkz. README).
-static mut INFO: [[SigInfo; MAX_SIGNAL as usize + 1]; scheduler::MAX_TASKS] =
-    [[SigInfo::from_kernel(); MAX_SIGNAL as usize + 1]; scheduler::MAX_TASKS];
+/// hikayedir. Sinyal basina **tek** yuva olmasi bir eksiklik degil,
+/// birlesmenin dogal sonucu: ayni standart sinyal iki kez gonderilirse
+/// bir kez teslim edilir, yani saklanacak tek bir neden vardir.
+///
+/// Tablo bu yuzden yalnizca 1..=31'i kapsiyor. Gercek-zamanli sinyaller
+/// birlesmedigi icin nedenlerini burada degil `QUEUE`da tutuyor -- ve
+/// kuyrukta her kopyanin kendi nedeni var.
+const INFO_SLOTS: usize = MAX_STANDARD as usize + 1;
+static mut INFO: [[SigInfo; INFO_SLOTS]; scheduler::MAX_TASKS] =
+    [[SigInfo::from_kernel(); INFO_SLOTS]; scheduler::MAX_TASKS];
+
+// --- Gercek-zamanli sinyal kuyrugu ------------------------------------
+
+/// Bir gorevin kuyruguna sigan en fazla kopya.
+///
+/// Sinir **olmak zorunda**: kuyruk cekirdek bellegidir ve bir surec
+/// baska bir surece sinirsiz sinyal gonderebilseydi, gonderen taraf
+/// cekirdegi tuketirdi. POSIX bu yuzden `sigqueue`a bir hata kodu verir
+/// (`EAGAIN`) -- yani "kuyruk dolu" bir arizanin degil, **sozlesmenin**
+/// parcasi. Gercek Linux'un siniri surec basina `RLIMIT_SIGPENDING`dir;
+/// TCMK'de sabit, cunku kaynak sinirlari (`rlimit`) henuz yok.
+pub const SIGQUEUE_LEN: usize = 8;
+
+/// Kuyruktaki bir kopya: hangi sinyal, hangi nedenle.
+#[derive(Clone, Copy)]
+struct Queued {
+    signo: u32,
+    info: SigInfo,
+}
+
+impl Queued {
+    const EMPTY: Self = Queued {
+        signo: 0,
+        info: SigInfo::from_kernel(),
+    };
+}
+
+/// Gorev basina kuyruk -- **varis sirasinda** dolu bir on ek.
+///
+/// Halka (ring) degil, sikistiran bir dizi. Sebep teslim kurali: teslim
+/// sirasi once **sinyal numarasina** bakar (kucuk olan once), sonra ayni
+/// numara icinde varis sirasina. Yani cikarilan oge her zaman basta
+/// olmaz; halka olsaydi ortadan cikarma yine kaydirma gerektirecekti.
+/// Sekiz ogeyle kaydirmanin maliyeti de olcume girmeyecek kadar kucuk.
+static mut QUEUE: [[Queued; SIGQUEUE_LEN]; scheduler::MAX_TASKS] =
+    [[Queued::EMPTY; SIGQUEUE_LEN]; scheduler::MAX_TASKS];
+
+/// Kuyrukta duran kopya sayisi (gorev basina).
+static QUEUED: [AtomicUsize; scheduler::MAX_TASKS] =
+    [const { AtomicUsize::new(0) }; scheduler::MAX_TASKS];
+
+/// Kuyruk dolu oldugu icin **reddedilen** gonderim sayisi (olcum).
+static QUEUE_DROPPED: AtomicU32 = AtomicU32::new(0);
+/// Kuyrugun gordugu en buyuk derinlik (olcum).
+static QUEUE_PEAK: AtomicU32 = AtomicU32::new(0);
+
+/// Kuyruga bir kopya ekler; yer yoksa `false`.
+///
+/// Kesmeler kapali: `QUEUED` ile `QUEUE` birlikte tutarli olmak zorunda
+/// ve ikisi tek bir atomik islemle guncellenemez.
+fn queue_push(task: usize, signo: u32, info: SigInfo) -> bool {
+    crate::arch::cpu::without_interrupts(|| {
+        let used = QUEUED[task].load(Ordering::SeqCst);
+        if used >= SIGQUEUE_LEN {
+            return false;
+        }
+        // SAFETY: yuva gorev ve indekse ozel, sinir yukarida denetlendi.
+        unsafe {
+            (core::ptr::addr_of_mut!(QUEUE) as *mut Queued)
+                .add(task * SIGQUEUE_LEN + used)
+                .write(Queued { signo, info });
+        }
+        QUEUED[task].store(used + 1, Ordering::SeqCst);
+        QUEUE_PEAK.fetch_max(used as u32 + 1, Ordering::Relaxed);
+        true
+    })
+}
+
+/// Kuyruktan `signo`nun **en eski** kopyasini cikarir.
+fn queue_pop(task: usize, signo: u32) -> Option<SigInfo> {
+    crate::arch::cpu::without_interrupts(|| {
+        let used = QUEUED[task].load(Ordering::SeqCst);
+        // SAFETY: yalnizca 0..used araligi okunuyor.
+        unsafe {
+            let base = core::ptr::addr_of_mut!(QUEUE) as *mut Queued;
+            let row = base.add(task * SIGQUEUE_LEN);
+            for i in 0..used {
+                if row.add(i).read().signo != signo {
+                    continue;
+                }
+                let found = row.add(i).read().info;
+                // Kalanlar bir asagi kayiyor: varis sirasi korunmali.
+                for j in i..used - 1 {
+                    row.add(j).write(row.add(j + 1).read());
+                }
+                row.add(used - 1).write(Queued::EMPTY);
+                QUEUED[task].store(used - 1, Ordering::SeqCst);
+                return Some(found);
+            }
+        }
+        None
+    })
+}
+
+/// Kuyrukta bu sinyalden baska kopya kaldi mi?
+fn queue_has(task: usize, signo: u32) -> bool {
+    crate::arch::cpu::without_interrupts(|| {
+        let used = QUEUED[task].load(Ordering::SeqCst);
+        // SAFETY: yalnizca 0..used araligi okunuyor.
+        unsafe {
+            let row = (core::ptr::addr_of!(QUEUE) as *const Queued).add(task * SIGQUEUE_LEN);
+            (0..used).any(|i| row.add(i).read().signo == signo)
+        }
+    })
+}
+
+/// Kuyrugu bosaltir (`fork` cocugu, `execve`, cikis).
+fn queue_clear(task: usize) {
+    crate::arch::cpu::without_interrupts(|| {
+        QUEUED[task].store(0, Ordering::SeqCst);
+        // SAFETY: butun satir kendi yuvasi.
+        unsafe {
+            let row = (core::ptr::addr_of_mut!(QUEUE) as *mut Queued).add(task * SIGQUEUE_LEN);
+            for i in 0..SIGQUEUE_LEN {
+                row.add(i).write(Queued::EMPTY);
+            }
+        }
+    });
+}
+
+/// Gorevin kuyrugunda bekleyen kopya sayisi (kabuk raporu).
+pub fn queued_count(task: usize) -> usize {
+    if task >= scheduler::MAX_TASKS {
+        return 0;
+    }
+    QUEUED[task].load(Ordering::Relaxed)
+}
+
+/// `(en derin kuyruk, reddedilen gonderim)` -- kabuk raporu.
+pub fn queue_stats() -> (u32, u32) {
+    (
+        QUEUE_PEAK.load(Ordering::Relaxed),
+        QUEUE_DROPPED.load(Ordering::Relaxed),
+    )
+}
 
 /// Kac isleyici ic ice suruyor (0 = normal akis).
 static DEPTH: [core::sync::atomic::AtomicUsize; scheduler::MAX_TASKS] =
@@ -364,10 +572,14 @@ static NEST_DEFERRED: AtomicU32 = AtomicU32::new(0);
 /// Bloke bir sinyal kaybolmaz; `PENDING`'de bekler ve maske acildiginda
 /// teslim edilir. POSIX'in "kritik bolge" araci budur -- uygulama
 /// bolunmemesi gereken isi maskeyi kapatarak yapar.
-static BLOCKED: [AtomicU32; scheduler::MAX_TASKS] = [ZERO_PENDING; scheduler::MAX_TASKS];
+static BLOCKED: [AtomicU64; scheduler::MAX_TASKS] = [ZERO_MASK; scheduler::MAX_TASKS];
 
 /// `alarm` icin uyanma ani (PIT tik'i, mutlak). 0 = kurulu degil.
-static ALARM_AT: [AtomicU32; scheduler::MAX_TASKS] = [ZERO_PENDING; scheduler::MAX_TASKS];
+///
+/// Maskelerle ayni sabiti paylasiyordu; maske 64 bite cikinca ayrildi --
+/// bu bir maske degil, bir **tik sayisi**.
+static ALARM_AT: [AtomicU32; scheduler::MAX_TASKS] =
+    [const { AtomicU32::new(0) }; scheduler::MAX_TASKS];
 
 /// Teslim edilen sinyal sayaci (kabuk `sigs` komutu icin).
 static DELIVERED: AtomicU32 = AtomicU32::new(0);
@@ -386,19 +598,25 @@ pub const SIG_SETMASK: usize = 2;
 ///
 /// Yorum uzun sure `SIGSTOP`tan soz ediyordu ama maskede yalnizca
 /// `SIGKILL` vardi -- cunku `SIGSTOP` henuz yoktu. Artik ikisi de var.
-const UNBLOCKABLE: u32 = (1 << SIGKILL) | (1 << SIGSTOP);
+const UNBLOCKABLE: u64 = (1 << SIGKILL) | (1 << SIGSTOP);
 
 /// PIT tik'i basina saniye (100 Hz).
 const TICKS_PER_SECOND: u32 = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignalError {
-    /// Sinyal numarasi 1..=31 disinda.
+    /// Sinyal numarasi 1..=63 disinda.
     InvalidSignal,
     /// Hedef gorev yok ya da zaten sonlanmis.
     NoSuchTask,
     /// `SIGKILL`/`SIGSTOP` yakalanamaz.
     Uncatchable,
+    /// Gercek-zamanli sinyal kuyrugu dolu (`EAGAIN`).
+    ///
+    /// Yalnizca gercek-zamanli sinyallerde olabilir: standart sinyaller
+    /// bir bite yazildigi icin **hicbir zaman** yer bulamamazlik
+    /// etmiyor. Iki sinifin maliyet farki en somut haliyle burada.
+    QueueFull,
 }
 
 fn valid(signo: u32) -> bool {
@@ -454,6 +672,34 @@ pub fn raise(target: usize, signo: u32) -> Result<(), SignalError> {
             code: SI_USER,
             addr: 0,
             pid: scheduler::current_id(),
+            value: 0,
+        },
+    )
+}
+
+/// POSIX `sigqueue`: sinyali **bir degerle** gonderir.
+///
+/// `kill`den iki farki var ve ikisi birbirine bagli:
+///
+/// ```text
+///   kill      -> yalnizca "hangi sinyal"; ayni sinyal birlesebilir
+///   sigqueue  -> sinyal + bir kelime deger; kopyalar KUYRUKTA durur
+/// ```
+///
+/// Deger ancak kuyruk varsa anlamli: birlesen bir sinyalde iki
+/// gonderimden hangisinin degerinin tasinacagi cevapsiz kalirdi. Bu
+/// yuzden `sigqueue` standart bir sinyale de uygulanabilir ama degeri
+/// yalnizca gercek-zamanlilarda guvenilirdir -- POSIX'in kendi kurali da
+/// budur.
+pub fn sigqueue(target: usize, signo: u32, value: usize) -> Result<(), SignalError> {
+    raise_with(
+        target,
+        signo,
+        SigInfo {
+            code: SI_QUEUE,
+            addr: 0,
+            pid: scheduler::current_id(),
+            value,
         },
     )
 }
@@ -480,6 +726,18 @@ pub fn raise_with(target: usize, signo: u32, info: SigInfo) -> Result<(), Signal
             return Err(SignalError::NoSuchTask)
         }
         _ => {}
+    }
+
+    // Gercek-zamanli sinyal **kuyruga** giriyor ve kuyruk dolabilir.
+    //
+    // Ekleme sayaclardan **once** yapiliyor: yer yoksa gonderim hic
+    // olmamis sayilmali, yoksa `sigs` raporu teslim edilmeyecek bir
+    // sinyali gonderilmis gosterirdi. Asagidaki uc ozel durum
+    // (`SIGKILL`/`SIGSTOP`/`SIGCONT`) hepsi standart oldugu icin buraya
+    // bir kayit birakmis olamaz.
+    if rt(signo) && !queue_push(target, signo, info) {
+        QUEUE_DROPPED.fetch_add(1, Ordering::Relaxed);
+        return Err(SignalError::QueueFull);
     }
 
     SENT.fetch_add(1, Ordering::Relaxed);
@@ -513,16 +771,20 @@ pub fn raise_with(target: usize, signo: u32, info: SigInfo) -> Result<(), Signal
         scheduler::continue_task(target);
     }
 
+    // Standart sinyalin nedeni tek yuvaya yaziliyor; gercek-zamanlinin
+    // nedeni zaten kuyruktaki kopyanin yaninda.
+    //
     // Neden, bitten **once** yaziliyor: ters sirada olsaydi hedef
     // sinyali eski nedeniyle teslim alabilirdi.
-    //
-    // SAFETY: yuva gorev ve sinyal numarasina ozel.
-    unsafe {
-        (core::ptr::addr_of_mut!(INFO) as *mut SigInfo)
-            .add(target * (MAX_SIGNAL as usize + 1) + signo as usize)
-            .write(info)
-    };
-    PENDING[target].fetch_or(1 << signo, Ordering::SeqCst);
+    if !rt(signo) {
+        // SAFETY: yuva gorev ve sinyal numarasina ozel.
+        unsafe {
+            (core::ptr::addr_of_mut!(INFO) as *mut SigInfo)
+                .add(target * INFO_SLOTS + signo as usize)
+                .write(info)
+        };
+    }
+    PENDING[target].fetch_or(1u64 << signo, Ordering::SeqCst);
 
     // `pause`/`sigsuspend` ile uyuyan bir gorev varsa kaldirilir. Tek
     // hedeflidir: yalnizca sinyalin gittigi gorev uyanir. Bloke bir
@@ -573,7 +835,7 @@ pub fn set_handler(
     handler: usize,
     restorer: usize,
     flags: u32,
-    mask: u32,
+    mask: u64,
 ) -> Result<usize, SignalError> {
     if !valid(signo) {
         return Err(SignalError::InvalidSignal);
@@ -599,7 +861,7 @@ pub fn set_handler(
 
     crate::arch::cpu::without_interrupts(|| unsafe {
         let slot = (core::ptr::addr_of_mut!(DISPOSITIONS) as *mut Disposition)
-            .add(task * (MAX_SIGNAL as usize + 1) + signo as usize);
+            .add(task * SLOTS + signo as usize);
         let old = slot.read().handler;
         slot.write(Disposition {
             handler,
@@ -622,7 +884,7 @@ pub fn handler_of(task: usize, signo: u32) -> usize {
     }
     unsafe {
         (core::ptr::addr_of!(DISPOSITIONS) as *const Disposition)
-            .add(task * (MAX_SIGNAL as usize + 1) + signo as usize)
+            .add(task * SLOTS + signo as usize)
             .read()
             .handler
     }
@@ -645,7 +907,7 @@ pub fn nesting_stats() -> (u32, u32) {
 /// dogrudan deger olarak gecirir ve eskisini donus degeriyle verir:
 /// 32 sinyal tek bir kelimeye sigdigi icin isaretci dogrulamak gereksiz
 /// bir yol olurdu (ayni sadelestirme `pipe`'ta da yapildi).
-pub fn sigprocmask(task: usize, how: usize, set: u32) -> Option<u32> {
+pub fn sigprocmask(task: usize, how: usize, set: u64) -> Option<u64> {
     if task >= scheduler::MAX_TASKS {
         return None;
     }
@@ -663,8 +925,7 @@ pub fn sigprocmask(task: usize, how: usize, set: u32) -> Option<u32> {
 }
 
 /// `sigsuspend` sirasinda saklanan **eski** maske.
-static SUSPEND_SAVE: [core::sync::atomic::AtomicU32; scheduler::MAX_TASKS] =
-    [const { core::sync::atomic::AtomicU32::new(0) }; scheduler::MAX_TASKS];
+static SUSPEND_SAVE: [AtomicU64; scheduler::MAX_TASKS] = [ZERO_MASK; scheduler::MAX_TASKS];
 /// `SUSPEND_SAVE` gecerli mi -- yani geri yuklenmeyi bekleyen bir maske
 /// var mi? Ayri bir bayrak sart: sifir da gecerli bir maskedir ("hicbir
 /// sey bloke degil"), yani sentinel deger kullanilamaz.
@@ -700,14 +961,13 @@ pub fn interrupts_call(task: usize) -> bool {
     if mask == 0 {
         return false;
     }
-    let width = MAX_SIGNAL as usize + 1;
     unsafe {
         let table = core::ptr::addr_of!(DISPOSITIONS) as *const Disposition;
         for signo in 0..=MAX_SIGNAL {
-            if mask & (1 << signo) == 0 {
+            if mask & (1u64 << signo) == 0 {
                 continue;
             }
-            if table.add(task * width + signo as usize).read().handler != SIG_IGN {
+            if table.add(task * SLOTS + signo as usize).read().handler != SIG_IGN {
                 return true;
             }
         }
@@ -729,14 +989,13 @@ pub fn restart_after_signal(task: usize) -> bool {
     if mask == 0 {
         return false;
     }
-    let width = MAX_SIGNAL as usize + 1;
     unsafe {
         let table = core::ptr::addr_of!(DISPOSITIONS) as *const Disposition;
         for signo in 0..=MAX_SIGNAL {
-            if mask & (1 << signo) == 0 {
+            if mask & (1u64 << signo) == 0 {
                 continue;
             }
-            let d = table.add(task * width + signo as usize).read();
+            let d = table.add(task * SLOTS + signo as usize).read();
             if d.handler == SIG_IGN {
                 continue;
             }
@@ -778,7 +1037,7 @@ pub fn pause(task: usize) {
 /// donusudur, o yuzden geri yukleme `sigreturn`da yapilir. Isleyici
 /// yoksa (varsayilan davranis / yok sayma) `deliver_pending` sonunda
 /// yapilir -- iki yol da ayni `restore_mask`i cagirir.
-pub fn sigsuspend(task: usize, mask: u32) {
+pub fn sigsuspend(task: usize, mask: u64) {
     if task >= scheduler::MAX_TASKS {
         return;
     }
@@ -806,7 +1065,7 @@ pub fn suspend_count() -> u32 {
     SUSPENDS.load(Ordering::Relaxed)
 }
 
-pub fn blocked_mask(task: usize) -> u32 {
+pub fn blocked_mask(task: usize) -> u64 {
     if task >= scheduler::MAX_TASKS {
         return 0;
     }
@@ -893,15 +1152,17 @@ pub fn clone_into(child: usize) {
     ALT_DEPTH[child].store(0, Ordering::SeqCst);
     crate::arch::cpu::without_interrupts(|| unsafe {
         let base = core::ptr::addr_of_mut!(DISPOSITIONS) as *mut Disposition;
-        let width = MAX_SIGNAL as usize + 1;
         core::ptr::copy_nonoverlapping(
-            base.add(parent * width),
-            base.add(child * width),
-            width,
+            base.add(parent * SLOTS),
+            base.add(child * SLOTS),
+            SLOTS,
         );
         DEPTH[child].store(0, Ordering::SeqCst);
     });
     PENDING[child].store(0, Ordering::SeqCst);
+    // Kuyruk da kopyalanmiyor: POSIX'te cocuk **hicbir** bekleyen sinyal
+    // devralmaz, ve kuyruk tam olarak bekleyen sinyallerin listesidir.
+    queue_clear(child);
     // POSIX: cocuk ebeveynin engel maskesini **devralir**, ama bekleyen
     // sinyalleri ve alarmini almaz.
     BLOCKED[child].store(BLOCKED[parent].load(Ordering::SeqCst), Ordering::SeqCst);
@@ -923,13 +1184,13 @@ pub fn reset(task: usize) {
     forget_alt_stack(task);
     crate::arch::cpu::without_interrupts(|| unsafe {
         let base = core::ptr::addr_of_mut!(DISPOSITIONS) as *mut Disposition;
-        let width = MAX_SIGNAL as usize + 1;
-        for i in 0..width {
-            base.add(task * width + i).write(Disposition::DEFAULT);
+        for i in 0..SLOTS {
+            base.add(task * SLOTS + i).write(Disposition::DEFAULT);
         }
         DEPTH[task].store(0, Ordering::SeqCst);
     });
     PENDING[task].store(0, Ordering::SeqCst);
+    queue_clear(task);
     // Engel maskesi POSIX'te `execve`'yi **asar** (yeni imaj ayni
     // maskeyle baslar); isleyiciler asmaz, cunku adresleri eski imaja
     // aitti. Alarm da korunur -- kurulmus bir zamanlayici, program
@@ -937,7 +1198,7 @@ pub fn reset(task: usize) {
 }
 
 /// Bekleyen sinyal maskesi (kabuk icin).
-pub fn pending_mask(task: usize) -> u32 {
+pub fn pending_mask(task: usize) -> u64 {
     if task >= scheduler::MAX_TASKS {
         return 0;
     }
@@ -945,18 +1206,17 @@ pub fn pending_mask(task: usize) -> u32 {
 }
 
 /// Gorevin kayitli isleyicisi olan sinyallerin maskesi (kabuk icin).
-pub fn handled_mask(task: usize) -> u32 {
+pub fn handled_mask(task: usize) -> u64 {
     if task >= scheduler::MAX_TASKS {
         return 0;
     }
-    let mut mask = 0;
+    let mut mask = 0u64;
     crate::arch::cpu::without_interrupts(|| unsafe {
         let base = core::ptr::addr_of!(DISPOSITIONS) as *const Disposition;
-        let width = MAX_SIGNAL as usize + 1;
         for signo in 1..=MAX_SIGNAL as usize {
-            let d = base.add(task * width + signo).read();
+            let d = base.add(task * SLOTS + signo).read();
             if d.handler != SIG_DFL && d.handler != SIG_IGN {
-                mask |= 1 << signo;
+                mask |= 1u64 << signo;
             }
         }
     });
@@ -990,6 +1250,9 @@ pub fn name_of(signo: u32) -> &'static str {
         SIGCONT => "SIGCONT",
         SIGSTOP => "SIGSTOP",
         SIGTSTP => "SIGTSTP",
+        // Gercek-zamanlilarin tek tek adi yok; POSIX onlari zaten
+        // `SIGRTMIN+n` diye adlandirir, yani ad bir **sayi ifadesi**.
+        _ if rt(signo) => "SIGRT",
         _ => "SIG?",
     }
 }
@@ -1036,12 +1299,43 @@ pub unsafe fn deliver_pending(frame: &mut SyscallFrame, from_interrupt: bool) {
             restore_mask(task);
             return;
         }
+        // En kucuk numara once. Standart sinyaller 1..=31'de durdugu icin
+        // bu, POSIX'in "standart sinyaller gercek-zamanlilardan once"
+        // kuralini kendiliginden veriyor.
         let signo = mask.trailing_zeros();
-        PENDING[task].fetch_and(!(1 << signo), Ordering::SeqCst);
 
-        let width = MAX_SIGNAL as usize + 1;
+        // Bekleyen bitin **ne zaman silindigi** iki sinifi ayiran yer.
+        //
+        //   standart      -> bit hemen silinir; tek yuva, tek teslim
+        //   gercek-zamanli -> kuyruktan bir kopya cikar; kuyrukta
+        //                     baskasi kaldiysa bit DURUR ve sinyal
+        //                     yeniden teslim edilir
+        //
+        // Birlesme ile kuyruklanma arasindaki butun fark bu kosulda.
+        let info = if rt(signo) {
+            match queue_pop(task, signo) {
+                Some(info) => {
+                    if !queue_has(task, signo) {
+                        PENDING[task].fetch_and(!(1u64 << signo), Ordering::SeqCst);
+                    }
+                    info
+                }
+                None => {
+                    // Bit var, kayit yok. Olmamasi gereken bir hal ama
+                    // biti birakmak sonsuz donguye girmek olurdu.
+                    PENDING[task].fetch_and(!(1u64 << signo), Ordering::SeqCst);
+                    continue;
+                }
+            }
+        } else {
+            PENDING[task].fetch_and(!(1u64 << signo), Ordering::SeqCst);
+            (core::ptr::addr_of!(INFO) as *const SigInfo)
+                .add(task * INFO_SLOTS + signo as usize)
+                .read()
+        };
+
         let entry = (core::ptr::addr_of_mut!(DISPOSITIONS) as *mut Disposition)
-            .add(task * width + signo as usize);
+            .add(task * SLOTS + signo as usize);
         let d = entry.read();
 
         // `SA_RESETHAND`: yerlestirme **teslimden once** varsayilana
@@ -1095,11 +1389,11 @@ pub unsafe fn deliver_pending(frame: &mut SyscallFrame, from_interrupt: bool) {
                 // dondugunde ikisi de geri gelmeli.
                 let saved = core::ptr::addr_of_mut!(SAVED) as *mut UserContext;
                 saved.add(task * NEST_DEPTH + depth).write(context);
-                let saved_mask = core::ptr::addr_of_mut!(SAVED_MASK) as *mut u32;
+                let saved_mask = core::ptr::addr_of_mut!(SAVED_MASK) as *mut u64;
                 saved_mask
                     .add(task * NEST_DEPTH + depth)
                     .write(blocked);
-                if enter_handler(task, depth, &mut context, signo, &d).is_none() {
+                if enter_handler(task, depth, &mut context, signo, &d, &info).is_none() {
                     // Yigin gecerli degil: sinyali teslim etmeye calisirken
                     // sureci bozmaktansa varsayilan davranisa dusulur.
                     crate::println!(
@@ -1116,7 +1410,7 @@ pub unsafe fn deliver_pending(frame: &mut SyscallFrame, from_interrupt: bool) {
                 // bu isi "hicbir sinyal teslim edilmez" kurali yapiyordu.
                 let mut extra = d.mask;
                 if d.flags & SA_NODEFER == 0 {
-                    extra |= 1 << signo;
+                    extra |= 1u64 << signo;
                 }
                 BLOCKED[task].store((blocked | extra) & !UNBLOCKABLE, Ordering::SeqCst);
 
@@ -1261,6 +1555,7 @@ unsafe fn enter_handler(
     context: &mut UserContext,
     signo: u32,
     d: &Disposition,
+    info: &SigInfo,
 ) -> Option<()> {
     // `SA_ONSTACK`: cerceve **ayri** yigina kuruluyor.
     //
@@ -1287,11 +1582,13 @@ unsafe fn enter_handler(
         return usermode::build_signal_frame(context, stack, signo, d.handler, d.restorer);
     }
 
-    let info = (core::ptr::addr_of!(INFO) as *const SigInfo)
-        .add(task * (MAX_SIGNAL as usize + 1) + signo as usize)
-        .read();
+    // Neden artik **cagiran** tarafindan veriliyor, tablodan okunmuyor.
+    // Sebep kuyruk: gercek-zamanli bir sinyalin nedeni sinyal basina tek
+    // yuvada degil, teslim edilen **kopyanin** yaninda duruyor. Burada
+    // tabloya bakmak, kuyruktan cekilen kopyanin degerini kaybetmek
+    // olurdu.
     let ucontext_at =
-        usermode::build_siginfo_frame(context, stack, signo, d.handler, d.restorer, &info)?;
+        usermode::build_siginfo_frame(context, stack, signo, d.handler, d.restorer, info)?;
     UCONTEXT_AT[task][depth].store(ucontext_at, Ordering::SeqCst);
     Some(())
 }
@@ -1339,7 +1636,7 @@ pub unsafe fn deliver_fault(
     if task >= scheduler::MAX_TASKS || !valid(signo) {
         return false;
     }
-    if BLOCKED[task].load(Ordering::SeqCst) & (1 << signo) != 0 {
+    if BLOCKED[task].load(Ordering::SeqCst) & (1u64 << signo) != 0 {
         return false;
     }
     let depth = DEPTH[task].load(Ordering::SeqCst);
@@ -1347,9 +1644,8 @@ pub unsafe fn deliver_fault(
         return false;
     }
 
-    let width = MAX_SIGNAL as usize + 1;
-    let entry =
-        (core::ptr::addr_of_mut!(DISPOSITIONS) as *mut Disposition).add(task * width + signo as usize);
+    let entry = (core::ptr::addr_of_mut!(DISPOSITIONS) as *mut Disposition)
+        .add(task * SLOTS + signo as usize);
     let d = entry.read();
     if d.handler == SIG_DFL || d.handler == SIG_IGN {
         return false;
@@ -1358,20 +1654,15 @@ pub unsafe fn deliver_fault(
         entry.write(Disposition::DEFAULT);
     }
 
-    // Neden yaziliyor: `enter_handler` onu buradan okuyacak.
-    (core::ptr::addr_of_mut!(INFO) as *mut SigInfo)
-        .add(task * width + signo as usize)
-        .write(info);
-
     let blocked = BLOCKED[task].load(Ordering::SeqCst);
     let mut context = frame.user_context();
 
     let saved = core::ptr::addr_of_mut!(SAVED) as *mut UserContext;
     saved.add(task * NEST_DEPTH + depth).write(context);
-    let saved_mask = core::ptr::addr_of_mut!(SAVED_MASK) as *mut u32;
+    let saved_mask = core::ptr::addr_of_mut!(SAVED_MASK) as *mut u64;
     saved_mask.add(task * NEST_DEPTH + depth).write(blocked);
 
-    if enter_handler(task, depth, &mut context, signo, &d).is_none() {
+    if enter_handler(task, depth, &mut context, signo, &d, &info).is_none() {
         // Yigin yazilamiyor. Sinyali teslim etmeye calisirken sureci
         // bozmaktansa olumcul yola birakiliyor.
         return false;
@@ -1379,7 +1670,7 @@ pub unsafe fn deliver_fault(
 
     let mut extra = d.mask;
     if d.flags & SA_NODEFER == 0 {
-        extra |= 1 << signo;
+        extra |= 1u64 << signo;
     }
     BLOCKED[task].store((blocked | extra) & !UNBLOCKABLE, Ordering::SeqCst);
 
@@ -1448,7 +1739,7 @@ pub unsafe fn sigreturn(frame: &mut SyscallFrame, from_interrupt: bool) -> bool 
     frame.set_user_context_via(from_interrupt, &context);
 
     // Isleyicinin ek engelleri yalnizca isleyici suresince gecerliydi.
-    let saved_mask = (core::ptr::addr_of!(SAVED_MASK) as *const u32)
+    let saved_mask = (core::ptr::addr_of!(SAVED_MASK) as *const u64)
         .add(task * NEST_DEPTH + depth)
         .read();
     BLOCKED[task].store(saved_mask, Ordering::SeqCst);

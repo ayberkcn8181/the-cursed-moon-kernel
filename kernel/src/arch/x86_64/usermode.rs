@@ -246,6 +246,9 @@ mod si {
     pub const ADDR: usize = 0x10;
     pub const PID: usize = 0x10;
     pub const UID: usize = 0x14;
+    /// `si_value` -- `sigqueue`in tasidigi kelime; birlesim 8'e hizali
+    /// oldugu icin `si_uid`den sonra 0x18'e dusuyor.
+    pub const VALUE: usize = 0x18;
 }
 
 /// `ucontext_t` icin ayrilan yer (glibc olcusu; bkz. i386 ikizi).
@@ -360,7 +363,12 @@ pub unsafe fn build_siginfo_frame(
     put32(siginfo_at + si::SIGNO, signo);
     put32(siginfo_at + si::ERRNO, 0);
     put32(siginfo_at + si::CODE, info.code as u32);
-    if info.addr != 0 {
+    if info.code == crate::level0b1::signal::SI_QUEUE {
+        // `sigqueue` yolu: gonderen + **deger**.
+        put32(siginfo_at + si::PID, info.pid as u32);
+        put32(siginfo_at + si::UID, 0);
+        ((siginfo_at + si::VALUE) as *mut u64).write_unaligned(info.value as u64);
+    } else if info.addr != 0 {
         ((siginfo_at + si::ADDR) as *mut u64).write_unaligned(info.addr as u64);
     } else {
         put32(siginfo_at + si::PID, info.pid as u32);

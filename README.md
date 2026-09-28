@@ -26,9 +26,9 @@ masaustu sunuyor.
 |---|---|
 | Mimariler | i386 (Multiboot1, `int 0x80`) · x86_64 (Multiboot2, `syscall`) |
 | Ikili bicimleri | ELF32/ELF64 · PE32/PE32+ (ithal tablosu cozulur) |
-| POSIX cagrilari | 72 (+ ELF yardimci vektoru, dosya destekli `mmap`, `clone`, `futex`, `SIGPIPE`, `EINTR`/`SA_RESTART`, is denetimi, `SA_SIGINFO`, `sigaltstack`) |
+| POSIX cagrilari | 73 (+ ELF yardimci vektoru, dosya destekli `mmap`, `clone`, `futex`, `SIGPIPE`, `EINTR`/`SA_RESTART`, is denetimi, `SA_SIGINFO`, `sigaltstack`, gercek-zamanli sinyaller) |
 | NT/Win32 cagrilari | 86 (`KERNEL32.dll` 64 ihracat + `TCMKGUI.dll`) |
-| Ring 3 uygulamalari | 39 ELF + 17 PE |
+| Ring 3 uygulamalari | 40 ELF + 17 PE |
 | Kalici depolama | ATA PIO + MBR + TCMKFS (yazilabilir, iki mimari) + takas |
 | Kod | ~30 bin satir cekirdek + ~17 bin satir userland |
 
@@ -60,7 +60,7 @@ artik POSIX yuzunde de **yakalanip duzeltilebiliyor**
 gucte cevap veriyor.
 
 Her yetenek QEMU'da **olculerek** dogrulanmistir: `probe` (16 sinav),
-`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (5), `bigfile` (6), `heap` (5), `swapx` (6), `jobs` (6), `winsusp` (6), `winctx` (7), `sigfault` (7), `winunwind` (7), `altstack` (7), `winnest` (6), `bequest`
+`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (5), `bigfile` (6), `heap` (5), `swapx` (6), `jobs` (6), `winsusp` (6), `winctx` (7), `sigfault` (7), `winunwind` (7), `altstack` (7), `winnest` (6), `rtsig` (7), `bequest`
 (6), `nested` (4), `winenv` (4) gibi programlar sonucu hem ekrana hem
 seri gunluge yaziyor. Olcumler yol boyunca gercek hatalar buldu -- dolan
 VFS tablosu, `CreateFileA`'nin cevrilmeyen Windows yollari, `GDT`
@@ -6696,10 +6696,12 @@ pes edip cikiyor. Ikisi birlikte, bozuk bir cekirdekte sinavin
 * **`si_code` kumesi dar.** `SI_USER`, `SI_KERNEL`, `SEGV_MAPERR`,
   `SEGV_ACCERR`, `FPE_INTDIV`, `ILL_ILLOPN` var; `BUS_*`, `TRAP_*` ve
   `CLD_*` yok (son kume icin once `SIGCHLD` gerekir, o da yok).
-* **Sinyal basina tek neden saklaniyor.** `PENDING` bir bit oldugu icin
-  ayni sinyal iki kez gonderilirse bir kez teslim edilir ve neden de
-  tektir. Gercek Linux'un gercek-zamanli sinyalleri bu yuzden
-  kuyrukludur; TCMK'de onlar da yok.
+* **Standart sinyalde neden tektir.** `PENDING` bir bit oldugu icin
+  ayni standart sinyal iki kez gonderilirse bir kez teslim edilir ve
+  neden de tektir. Bu bir eksiklik degil, birlesmenin dogal sonucu --
+  ve birlesmeyen yuz artik var: gercek-zamanli sinyaller kuyruklu ve her
+  kopya kendi nedenini tasiyor (bkz.
+  [Birlesen sinyal, kuyruklanan sinyal](#birlesen-sinyal-kuyruklanan-sinyal)).
 
 ## Dagitimin ikinci yarisi: `__finally` nasil kosar
 
@@ -7085,6 +7087,189 @@ edicilik o dorduncude yok.
   isleyicinin kendi hatasi duzeltilir ve o isleyici devam eder. Dis
   istisnanin ne olacagi, isleyicinin donus degerine kalmis.
 
+## Birlesen sinyal, kuyruklanan sinyal
+
+Bir onceki bati Windows tarafinda "hatayi inceleyen kodun kendisi
+cokerse" sorusunu kapatti. POSIX tarafinda bekleyen soru daha eskiydi ve
+bu belgede uc ayri yerde **bilerek yapilmayan** diye yaziliydi:
+
+```text
+  "Sira yok. Ayni sinyal iki kez gelirse bir kez teslim edilir."
+  "Sinyal basina tek neden saklaniyor."
+  "Gercek-zamanli sinyaller yok."
+```
+
+Ucu de ayni seyi soyluyordu. Simdi ucu de kalkti.
+
+### Iki sinif sinyal
+
+POSIX'in en az bilinen ayrimlarindan biri, sinyallerin **iki ayri
+bekleme bicimi** olmasidir:
+
+```text
+  standart (1..=31)         bir BIT MASKESINDE bekler  -> birlesir
+  gercek-zamanli (32..=63)  bir KUYRUKTA bekler        -> birikmez, sirlanir
+```
+
+Fark tek bir olcumle gorunur -- ayni kalip, farkli sinyal:
+
+```text
+  engelle; kill(SIGUSR1) x3;      engeli kaldir  ->  isleyici 1 kez kosar
+  engelle; sigqueue(SIGRTMIN) x3; engeli kaldir  ->  isleyici 3 kez kosar
+```
+
+Ikinci satirdaki her teslim ayrica **kendi degerini** tasiyor
+(`si_value`). Birlesen bir sinyalde degerin bir anlami olamazdi: uc
+gonderim tek teslime dusunce hangi degerin tasinacagi cevapsiz kalirdi.
+Yani "kuyruk" ile "deger" ayri iki ozellik degil, birbirinin kosulu.
+
+### Neden bedava degil
+
+Bit maskesi sabit yer tutar ve **hicbir zaman dolmaz** -- bir surec baska
+bir surece kac sinyal gonderirse gondersin cekirdekte tek bir bit
+degisir. Kuyruk ise cekirdek bellegidir. Sinirsiz olsaydi gonderen taraf
+hedefin adina bellek ayirtabilirdi; POSIX bu yuzden `sigqueue`a bir hata
+kodu verir:
+
+```text
+  sigqueue(...)  ->  0        kuyruga girdi
+  sigqueue(...)  ->  -EAGAIN  kuyruk DOLU
+```
+
+"Kuyruk dolu" bir ariza degil, **sozlesmenin yazili parcasi**. TCMK'de
+sinir gorev basina sabit sekiz kopya (`signal::SIGQUEUE_LEN`); gercek
+Linux'ta `RLIMIT_SIGPENDING`dir, ama TCMK'de kaynak sinirlari henuz yok.
+
+### Maske 64 bite cikti -- ve bir tasima bicimi degisti
+
+Gercek-zamanli sinyallerin 32'den basliyor olmasi bir ayrinti degil,
+dogrudan bir engeldi: TCMK'nin bekleyen/engelli maskeleri `u32`du, yani
+`SIGRTMIN` icin **yer yoktu**. Maske `u64` oldu, `MAX_SIGNAL` 31'den
+63'e cikti.
+
+Bunun bir yan sonucu vardi ve isin en ogretici kismi orasi. Maske
+`sigprocmask`a uzun sure **deger olarak** gecirilip eskisi donus
+degeriyle aliniyordu, ve o zaman icin dogruydu:
+
+> "32 sinyal tek bir kelimeye sigdigi icin isaretci dogrulamak gereksiz
+> bir yol olurdu."
+
+64 bit i386'da tek registera sigmiyor; ustelik eski maskenin donus
+degeriyle verilmesi de imkansiz. Yani sadelestirmeyi ayakta tutan sey,
+onu gereksiz kilan seyle ayni seydi. `sigprocmask` ve `sigsuspend` artik
+gercek `rt_*` cagrilari gibi **isaretci** aliyor:
+
+```text
+  eski   sigprocmask(how, maske)        -> eski maske
+  yeni   sigprocmask(how, *set, *old)   -> 0 / -errno
+```
+
+`sigaction` yapisi zaten isaretciyle geliyordu; oradaki degisiklik maske
+alaninin i386'da **iki kelime** olmasi (`MASK_WORDS`). Gercek Linux'un
+`rt_*` cagrilarina `sigsetsize` argumani eklemesinin sebebi de tam olarak
+bu sorudur.
+
+### Yol boyunca cikan bir hata
+
+Yapiyi kelime kelime okumak, duran bir hatayi da gorunur kildi. Eski
+`SigAction` sunu diyordu:
+
+```rust
+struct SigAction { handler: usize, restorer: usize, flags: u32, mask: u32 }
+```
+
+x86_64'te `flags` ve `mask` **tek bir** 8-baytlik kelimeye oturuyor, yani
+yapi 24 bayt. Cekirdek ise dort kelime (32 bayt) okuyup dorduncusunu
+`sa_mask` sayiyordu: yapinin bittigi yerden sekiz bayt ote. O baytlar bir
+sonraki sayfaya duserse cagri `EFAULT` bile dondurebilirdi. Hata hic
+gorulmemisti cunku butun cagiranlar maskeyi sifir geciyordu -- yani
+"calisiyor" olmasi, kimsenin o alani kullanmamasindandi. Simdi butun
+alanlar makine kelimesi genisliginde.
+
+### Yedi sinav
+
+`rtsig` (hem ELF hem x86_64) iki sinifi yan yana koyuyor:
+
+```text
+[rtsig] A standart birlesir: gecti (3 gonderim -> 1 teslim (bit birlesti))
+[rtsig] B rt kuyruklanir:    gecti (3 gonderim -> 3 teslim, hepsi engel kalkinca)
+[rtsig] C deger + FIFO:      gecti (11,22,33 gonderildi, 11,22,33 geldi)
+[rtsig] D si_code=SI_QUEUE:  gecti (si_code=SI_QUEUE, si_pid gonderen)
+[rtsig] E kuyruk dolar:      gecti (8 kabul, sonrasi EAGAIN, 8 teslim)
+[rtsig] F numara sirasi:     gecti (kucuk numara once, gec gelmis olsa bile)
+[rtsig] G maske 64 bit:      gecti (63 numarali bit maskeye girdi ve geri okundu)
+```
+
+![rtsig](docs/screenshot-rtsig.png)
+
+A ile B ayni kalibi iki sinyal sinifina uyguluyor; aradaki tek fark
+teslim sayisi. F ayri bir sey olcuyor: iki sinyal de kuyruktayken teslim
+once **numaraya** bakiyor, varis sirasina degil. Kucuk numarali sinyal,
+sonra gonderilmis olsa bile once geliyor -- POSIX gercek-zamanli
+sinyallerde numarayi bir **oncelik** olarak tanimlar ve adlarindaki
+"gercek-zamanli" kisminin karsiligi da budur.
+
+### B'nin ikinci yarisi bos bir ayrinti degil
+
+"3 gonderim -> 3 teslim" tek basina kuyrugu **olcmuyor**. Maske 32 bitte
+kalmis olsaydi `1 << 32` sifira duser, hicbir sey engellenmez ve uc
+sinyal gonderildigi anda teslim edilirdi; sayac yine 3 olurdu. Olcen
+sey, teslimlerin **ne zaman** oldugu: sinav engel kalkmadan once kosan
+isleyicileri ayri sayiyor.
+
+Bu bir varsayim degil, bozma sinavinda goruldu. `sigprocmask`in maskesi
+32 bite kirpildiginda:
+
+```text
+[rtsig] B rt kuyruklanir: KALDI (teslimler engel KALKMADAN oldu: maske 32 bitte kalmis)
+[rtsig] E kuyruk dolar:   KALDI (kuyruk hic dolmadi: sinir yok)
+[rtsig] F numara sirasi:  KALDI (varis sirasi numarayi ezdi)
+[rtsig] G maske 64 bit:   KALDI (63 numarali bit maskede DURMADI: maske 32 bit)
+[rtsig] rt teslim: 3 (erken 3)
+```
+
+Teslim sayisi **degismedi**; degisen yalnizca "erken" sayaci. Bozmayi
+yakalayan olcu oydu.
+
+Diger uc bozma her birini tek tek yalitti:
+
+```text
+kuyrukta kopya kalsa da bit siliniyor  ->  B "kuyruk YOK", C, E, F kaldi
+si_value yazilmiyor                    ->  yalnizca C kaldi
+                                           ("degerler sifir geldi")
+SIGQUEUE_LEN 8 yerine 64               ->  yalnizca E kaldi
+                                           ("kuyruk hic dolmadi: sinir yok")
+```
+
+### Windows'ta bu ayrim yok
+
+En yakin karsilik **APC kuyruklari**dir (`QueueUserAPC`) ve onlar *her
+zaman* kuyruklu, *her zaman* bir deger tasir. Yani Windows'ta "ucuz ve
+birlesen" bir bildirim yolu hic olmadi -- her bildirim yer tutar ve her
+kuyruk dolabilir. POSIX ikisini de tutuyor ve secimi uygulamaya
+birakiyor: bir olayin *oldugunu* haber vermek icin bit, *neyin* oldugunu
+haber vermek icin kuyruk.
+
+TCMK'nin iki yuzu de artik bu ayrimi dogru tasiyor, ve tasidiklari sey
+ayni degil.
+
+### Bilerek yapilmayanlar
+
+* **`sigwaitinfo`/`sigtimedwait` yok.** Kuyruktan **senkron** okuma yuzu.
+  Teslim yalnizca isleyici uzerinden oluyor; bir surec kuyrugu bekleyip
+  kendisi cekemiyor.
+* **`si_uid` her zaman 0.** TCMK'de kullanici kimligi yok.
+* **`rt_sigqueueinfo` tam `siginfo_t` almiyor.** Cagri yalnizca
+  **degeri** aliyor; kaydin geri kalanini cekirdek dolduruyor. Gercek
+  Linux da ayricaliksiz bir gonderenin yazdigi `si_code`/`si_pid`
+  alanlarini kabul etmiyor, yani isaretciyle gelen kismin buyuk bolumu
+  iki tarafta da yok sayiliyor.
+* **Kuyruk siniri sabit.** `RLIMIT_SIGPENDING` yok, cunku kaynak
+  sinirlari (`rlimit` ailesi) henuz yok.
+* **`SIGRTMIN` gercekten 32.** Gercek Linux'ta libc ilk iki numarayi
+  kendi kullanir (is parcacigi altyapisi) ve uygulamalara 34'ten baslar;
+  TCMK'de libc olmadigi icin sinir gercek sinirin kendisi.
+
 ## Alfa'nin bilinen sinirlari
 
 Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
@@ -7122,12 +7307,12 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
   "konsol" oldugunu secme yolu yok.
 - **Sinyal teslimi syscall donusune baglidir.** Hicbir syscall yapmayan
   saf hesap dongusu sinyali gormez (`spin` boyle); `SIGKILL` ise
-  isbirligi gerektirmedigi icin her zaman calisir. Ayrica maskeleme
-  `siginfo`/`sigaction` bayraklari ve
-  gercek-zamanli sinyaller yok. Maskeleme (`sigprocmask`), `alarm` ve
-  `sigsuspend` var; `SA_RESTART` bu batiyla geldi (yukari bkz.).
-  `SA_SIGINFO` ve `sigwait` yok. `SIGSTOP` ve `SIGKILL` yakalanamaz ve
-  maskelenemez (yukari bkz.).
+  isbirligi gerektirmedigi icin her zaman calisir. Maskeleme
+  (`sigprocmask`), `alarm`, `sigsuspend`, `SA_RESTART`, `SA_SIGINFO`,
+  `sigaltstack` ve gercek-zamanli (kuyruklu) sinyaller var; maske 64
+  bit. Eksik olan `sigwait`/`sigtimedwait` -- yani kuyrugu **senkron**
+  okuma yuzu. `SIGSTOP` ve `SIGKILL` yakalanamaz ve maskelenemez
+  (yukari bkz.).
 - ~~**Surec gruplari yok**~~ -- var (yukari bkz.): `setpgid`/`getpgid`,
   `kill(-pgid)`, `waitpid(-pgid)`, `WUNTRACED`/`WCONTINUED` ve
   `SIGSTOP`/`SIGCONT`/`SIGTSTP` calisiyor. Eksik olan **terminal**

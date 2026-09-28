@@ -250,6 +250,9 @@ mod si {
     pub const ADDR: usize = 0x0C;
     pub const PID: usize = 0x0C;
     pub const UID: usize = 0x10;
+    /// `si_value` -- `sigqueue`in tasidigi kelime. Yalnizca `si_pid`
+    /// yolunda gecerli: ayni birlesimin ucuncu alani.
+    pub const VALUE: usize = 0x14;
 }
 
 /// `ucontext_t` icin ayrilan yer.
@@ -378,7 +381,13 @@ pub unsafe fn build_siginfo_frame(
     put(siginfo_at + si::CODE, info.code as u32);
     // Birlesim: hata sinyallerinde adres, `kill` ile gelenlerde kimlik.
     // Ikisi ayni ofsette durdugu icin **secmek** zorunlu.
-    if info.addr != 0 {
+    if info.code == crate::level0b1::signal::SI_QUEUE {
+        // `sigqueue` yolu: gonderen + **deger**. Ucu de ayni birlesimin
+        // ardisik alanlari, o yuzden hepsi birlikte yaziliyor.
+        put(siginfo_at + si::PID, info.pid as u32);
+        put(siginfo_at + si::UID, 0);
+        put(siginfo_at + si::VALUE, info.value as u32);
+    } else if info.addr != 0 {
         put(siginfo_at + si::ADDR, info.addr as u32);
     } else {
         put(siginfo_at + si::PID, info.pid as u32);

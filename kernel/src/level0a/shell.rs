@@ -380,21 +380,29 @@ impl ParseUsize for str {
 }
 
 /// Bir sinyal maskesini "SIGUSR1 SIGTERM" gibi yazar; bos maskede "-".
-fn write_sig_list(mask: u32, width: usize) {
+///
+/// Gercek-zamanli sinyallerin tek tek adi olmadigi icin onlar
+/// `SIGRTMIN+n` diye yaziliyor -- POSIX'in kendi adlandirmasi da budur.
+fn write_sig_list(mask: u64, width: usize) {
     let start = COL.load(Ordering::Relaxed);
     if mask == 0 {
         put(b'-');
     } else {
         let mut first = true;
         for signo in 1..=signal::MAX_SIGNAL {
-            if mask & (1 << signo) == 0 {
+            if mask & (1u64 << signo) == 0 {
                 continue;
             }
             if !first {
                 put(b',');
             }
             first = false;
-            write_str(signal::name_of(signo));
+            if signal::rt(signo) {
+                write_str("SIGRTMIN+");
+                write_num((signo - signal::SIGRTMIN) as usize);
+            } else {
+                write_str(signal::name_of(signo));
+            }
         }
     }
     let written = COL.load(Ordering::Relaxed).saturating_sub(start);
@@ -870,9 +878,16 @@ fn execute(line: &str) {
                         write_line(" (teslim, surec bir sonraki syscall'da Ring 3'e donerken)");
                     }
                     Err(signal::SignalError::InvalidSignal) => {
-                        write_line("gecersiz sinyal (1..31)")
+                        write_line("gecersiz sinyal (1..63)")
                     }
                     Err(signal::SignalError::Uncatchable) => write_line("bu sinyal yakalanamaz"),
+                    // `signal` komutu `kill` gibi davranir, `sigqueue`
+                    // gibi degil: gercek-zamanli bir sinyalde de tek bir
+                    // kopya gonderir, o yuzden kuyrugun dolmasi ancak
+                    // hedef onu teslim almamissa olur.
+                    Err(signal::SignalError::QueueFull) => {
+                        write_line("gercek-zamanli kuyruk dolu ('sigs' ile bakin)")
+                    }
                     Err(signal::SignalError::NoSuchTask) => {
                         write_line("boyle bir gorev yok ('ps' ile listeleyin)")
                     }
@@ -908,6 +923,18 @@ fn execute(line: &str) {
             write_num(deferred as usize);
             write_str(")");
             newline();
+            // Gercek-zamanli kuyruk: gordugu en buyuk derinlik ve yer
+            // olmadigi icin **reddedilen** gonderim sayisi. Ikincisi
+            // sifirdan buyukse bir `sigqueue` `EAGAIN` almis demektir --
+            // standart sinyallerde karsiligi olmayan bir hal.
+            let (peak, dropped) = signal::queue_stats();
+            write_str("rt kuyrugu: en derin ");
+            write_num(peak as usize);
+            write_str("/");
+            write_num(signal::SIGQUEUE_LEN);
+            write_str("   reddedilen: ");
+            write_num(dropped as usize);
+            newline();
             write_line("  id  gorev        isleyicili       bekleyen        engelli");
             for i in 0..scheduler::MAX_TASKS {
                 if scheduler::state_of(i) == scheduler::TaskState::Unused {
@@ -926,6 +953,14 @@ fn execute(line: &str) {
                 write_sig_list(handled, 16);
                 write_sig_list(pending, 16);
                 write_sig_list(blocked, 0);
+                // Kuyrukta bekleyen kopya varsa sayisi da gorunsun:
+                // "bekleyen" sutunundaki bit yalnizca **en az bir**
+                // kopya oldugunu soyluyor, kacini degil.
+                let queued = signal::queued_count(i);
+                if queued > 0 {
+                    write_str("  kuyruk:");
+                    write_num(queued);
+                }
                 // Kurulu bir alarm varsa kalan sure de gorunsun.
                 let remaining = signal::alarm_remaining(i);
                 if remaining > 0 {

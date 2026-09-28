@@ -73,9 +73,11 @@ mod i386_numbers {
     pub const SYS_SIGPROCMASK: usize = 126;
     pub const SYS_ALARM: usize = 27;
     pub const SYS_PAUSE: usize = 29;
-    /// `rt_sigsuspend` -- 32 bitlik maskeye dogrudan oturur.
+    /// `rt_sigsuspend` -- maskeyi **isaretciyle** alir.
     pub const SYS_SIGSUSPEND: usize = 179;
     pub const SYS_SIGALTSTACK: usize = 186;
+    /// `rt_sigqueueinfo` -- sinyali degeriyle gonderir.
+    pub const SYS_SIGQUEUE: usize = 178;
     pub const SYS_MMAP: usize = 192;
     pub const SYS_MUNMAP: usize = 91;
     pub const SYS_GETPRIORITY: usize = 96;
@@ -135,6 +137,8 @@ mod x86_64_numbers {
     pub const SYS_PAUSE: usize = 34;
     pub const SYS_SIGSUSPEND: usize = 130;
     pub const SYS_SIGALTSTACK: usize = 131;
+    /// `rt_sigqueueinfo`.
+    pub const SYS_SIGQUEUE: usize = 129;
     pub const SYS_MMAP: usize = 9;
     pub const SYS_MUNMAP: usize = 11;
     pub const SYS_GETPRIORITY: usize = 140;
@@ -899,8 +903,12 @@ pub fn pause() -> isize {
 /// ve surec sonsuza kadar uyur; `sigsuspend`in varlik sebebi budur.
 ///
 /// Maske isleyici dondukten sonra eski haline doner.
-pub fn sigsuspend(mask: u32) -> isize {
-    unsafe { syscall1(SYS_SIGSUSPEND, mask as usize) as isize }
+///
+/// Maske **isaretciyle** geciyor: 64 sinyal (gercek-zamanlilar dahil)
+/// i386'da tek bir registera sigmiyor. Yuksek yuzu `signal::sigsuspend`
+/// bu ayrintiyi sakliyor.
+pub fn sigsuspend(mask: &crate::signal::SigSet) -> isize {
+    unsafe { syscall1(SYS_SIGSUSPEND, mask as *const _ as usize) as isize }
 }
 
 /// Yeni bir dizin olusturur. `path` NUL ile sonlanmalidir.

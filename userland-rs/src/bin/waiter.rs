@@ -89,8 +89,8 @@ struct Report {
     text: &'static str,
     color: u32,
     /// `sigsuspend` oncesi ve sonrasi maske (sinav icin).
-    before: u32,
-    after: u32,
+    before: u64,
+    after: u64,
 }
 
 /// Kip: uyuyarak mi, yoklayarak mi bekleniyor?

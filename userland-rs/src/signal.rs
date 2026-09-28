@@ -63,6 +63,86 @@ pub const SIGSTOP: u32 = 19;
 /// Terminalden gelen durdurma istegi (Ctrl-Z) -- **yakalanabilir**.
 pub const SIGTSTP: u32 = 20;
 
+// --- Gercek-zamanli sinyaller -----------------------------------------
+
+/// Ilk gercek-zamanli sinyal.
+///
+/// Buradan itibaren sinyaller **kuyruga** girer: uc kez gonderilen sinyal
+/// uc kez teslim edilir ve her teslim kendi `si_value`siyla gelir.
+/// 1..=31 arasindakiler ise bir bit maskesinde **birlesir** -- uc gonderim
+/// tek teslime duser.
+///
+/// Ayrim POSIX'in en az bilinen kurallarindan biri ve kaynak temelli: bit
+/// maskesi sabit yer tutar ve dolamaz, kuyruk dolabilir ve doldugunda
+/// `sigqueue` `EAGAIN` doner.
+pub const SIGRTMIN: u32 = 32;
+/// Son gercek-zamanli sinyal.
+pub const SIGRTMAX: u32 = 63;
+
+/// Sinyal gercek-zamanli mi -- yani kuyruga mi girer?
+pub const fn is_rt(signo: u32) -> bool {
+    signo >= SIGRTMIN && signo <= SIGRTMAX
+}
+
+/// 64 bitlik `sigset_t`, makine kelimeleri halinde.
+///
+/// Neden bir `u64` degil: yapi cekirdege **isaretciyle** gidiyor ve
+/// cekirdek onu kelime kelime okuyor. `u64`un hizalamasi iki mimaride
+/// ayni degil (Rust i386'da da 8'e hizalar), yani araya dolgu girip
+/// girmedigi hedefe gore degisirdi -- bir ABI'nin tasiyamayacagi tur bir
+/// belirsizlik. Kelime dizisi bu soruyu ortadan kaldiriyor.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct SigSet {
+    #[cfg(target_arch = "x86")]
+    words: [usize; 2],
+    #[cfg(target_arch = "x86_64")]
+    words: [usize; 1],
+}
+
+impl SigSet {
+    /// Hicbir sinyal iceren bos kume.
+    pub const EMPTY: Self = SigSet::from_bits(0);
+
+    /// 64 bitlik maskeyi kelimelere boler.
+    pub const fn from_bits(bits: u64) -> Self {
+        #[cfg(target_arch = "x86")]
+        {
+            SigSet {
+                words: [bits as u32 as usize, (bits >> 32) as u32 as usize],
+            }
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            SigSet {
+                words: [bits as usize],
+            }
+        }
+    }
+
+    /// Kelimeleri 64 bitlik maskede birlestirir.
+    pub const fn bits(&self) -> u64 {
+        #[cfg(target_arch = "x86")]
+        {
+            self.words[0] as u64 | ((self.words[1] as u64) << 32)
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.words[0] as u64
+        }
+    }
+
+    /// Tek bir sinyalden olusan kume.
+    pub const fn of(signo: u32) -> Self {
+        SigSet::from_bits(1u64 << signo)
+    }
+
+    /// Bu sinyal kumede var mi?
+    pub const fn has(&self, signo: u32) -> bool {
+        self.bits() & (1u64 << signo) != 0
+    }
+}
+
 /// Varsayilan davranis (TCMK'de: sureci sonlandir).
 pub const SIG_DFL: usize = 0;
 /// Sinyali yok say.
@@ -138,19 +218,27 @@ pub const SA_RESETHAND: u32 = 0x8000_0000;
 /// bozuldugunun tarihsel sebebi.
 pub const SA_RESTART: u32 = 0x1000_0000;
 
-/// `sigaction`in cekirdege verdigi yapi -- dort kelime.
+/// `sigaction`in cekirdege verdigi yapi.
 ///
 /// Gercek `struct sigaction`in sadelestirilmisi: `sa_handler`,
 /// `sa_restorer`, `sa_flags`, `sa_mask`. Registerlere sigdirmak yerine
 /// **isaretciyle** gecirilir, tipki `rt_sigaction` gibi; bayrak
 /// eklendikce bozulmayan tek tasima bicimi budur.
+///
+/// Butun alanlar makine kelimesi genisliginde, cunku cekirdek yapiyi
+/// kelime kelime okuyor. Bir onceki duzende `flags: u32` ve `mask: u32`
+/// yan yanaydi ve x86_64'te ikisi **tek bir** 8-baytlik kelimeye
+/// oturuyordu; cekirdek ise dort kelime bekliyordu, yani yapinin
+/// bittigi yerin otesini okuyup `sa_mask` sayiyordu. Butun cagiranlarin
+/// maskeyi sifir gecmesi hatayi gorunmez kilmisti.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct SigAction {
     pub handler: usize,
     pub restorer: usize,
-    pub flags: u32,
-    pub mask: u32,
+    /// `SA_*` bayraklari; yalnizca alt 32 bit anlamli.
+    pub flags: usize,
+    pub mask: SigSet,
 }
 
 /// Ham `sigaction` cagrisi. `old` NULL olabilir.
@@ -169,12 +257,12 @@ fn sigaction_raw(signo: u32, act: *const SigAction, old: *mut usize) -> isize {
 ///
 /// `install` bunun bayraksiz halidir; libc'de `signal()`in `sigaction()`
 /// uzerine kurulmus olmasiyla ayni iliski.
-pub fn action(signo: u32, handler: extern "C" fn(u32), flags: u32, mask: u32) -> isize {
+pub fn action(signo: u32, handler: extern "C" fn(u32), flags: u32, mask: u64) -> isize {
     let act = SigAction {
         handler: handler as usize,
         restorer: __tcmk_sigreturn as *const () as usize,
-        flags,
-        mask,
+        flags: flags as usize,
+        mask: SigSet::from_bits(mask),
     };
     sigaction_raw(signo, &act, core::ptr::null_mut())
 }
@@ -261,12 +349,12 @@ pub type SigActionHandler = extern "C" fn(u32, *const SigInfo, *mut UContext);
 /// konmasi. Ayri bir fonksiyon olmasi bilincli: iki imza ikili duzeyde
 /// uyumsuz, yani bayragi yanlislikla unutmak ya da fazladan koymak
 /// isleyiciyi cop argumanlarla cagirirdi.
-pub fn action_info(signo: u32, handler: SigActionHandler, flags: u32, mask: u32) -> isize {
+pub fn action_info(signo: u32, handler: SigActionHandler, flags: u32, mask: u64) -> isize {
     let act = SigAction {
         handler: handler as *const () as usize,
         restorer: __tcmk_sigreturn as *const () as usize,
-        flags: flags | SA_SIGINFO,
-        mask,
+        flags: (flags | SA_SIGINFO) as usize,
+        mask: SigSet::from_bits(mask),
     };
     sigaction_raw(signo, &act, core::ptr::null_mut())
 }
@@ -274,6 +362,13 @@ pub fn action_info(signo: u32, handler: SigActionHandler, flags: u32, mask: u32)
 // --- `si_code`: sinyalin kaynagi (Linux ile ayni sayilar) ------------
 pub const SI_USER: i32 = 0;
 pub const SI_KERNEL: i32 = 0x80;
+/// `sigqueue` ile geldi -- `si_value` gecerli.
+///
+/// Negatif olmasi bir kaza degil: POSIX `si_code`in **isaretini** bir
+/// ayrim olarak kullanir. Sifir ve pozitif kodlari cekirdek uretir,
+/// negatifleri bir surec. (`SI_USER`in 0 olmasi kuraldan once kaldigi
+/// icin istisnadir.)
+pub const SI_QUEUE: i32 = -1;
 /// `SIGSEGV`: adres **eslenmemis**.
 pub const SEGV_MAPERR: i32 = 1;
 /// `SIGSEGV`: adres eslenmis ama erisim izni yok.
@@ -305,6 +400,17 @@ pub struct SigInfo {
     _pad: i32,
     /// Birlesimin ilk kelimesi.
     field: usize,
+    /// Birlesimin ikinci kelimesi.
+    ///
+    /// i386'da `si_uid` (0x10), x86_64'te `si_value` (0x18). Ayni
+    /// kelimenin iki mimaride iki ayri alan olmasi, birlesimin
+    /// hizalanmasinin bir sonucu: x86_64'te `si_pid`+`si_uid` (4+4)
+    /// **tek** bir 8-baytlik kelimeye oturuyor, i386'da iki ayri
+    /// kelimeye.
+    second: usize,
+    /// i386'da `si_value` (0x14); x86_64'te birlesimin bir sonraki
+    /// kelimesi ve okunmuyor.
+    third: usize,
 }
 
 impl SigInfo {
@@ -313,9 +419,29 @@ impl SigInfo {
         self.field
     }
 
-    /// Gonderenin kimligi (`si_code == SI_USER`).
+    /// Gonderenin kimligi (`si_code == SI_USER` ya da `SI_QUEUE`).
     pub fn pid(&self) -> usize {
         self.field & 0xFFFF_FFFF
+    }
+
+    /// `sigqueue`in tasidigi deger -- yalnizca `si_code == SI_QUEUE`de.
+    ///
+    /// Ofset mimariye gore ayri kelimelere dusuyor: i386'da birlesimin
+    /// uc alani (pid, uid, value) 4+4+4 bayt oldugu icin `value`
+    /// **ucuncu** kelimedir; x86_64'te pid ile uid tek bir 8-baytlik
+    /// kelimeye oturdugu icin `value` **ikinci** kelimeye kayar.
+    pub fn value(&self) -> usize {
+        #[cfg(target_arch = "x86")]
+        {
+            // { pid, uid, value } = 4+4+4 bayt: value ucuncu kelime.
+            self.third
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            // Birlesim 8'e hizali basliyor ve pid+uid tek kelimede;
+            // value o yuzden ikinci kelime.
+            self.second
+        }
     }
 }
 
@@ -432,8 +558,8 @@ pub fn install_with(signo: u32, handler: extern "C" fn(u32), flags: u32) -> isiz
     let act = SigAction {
         handler: handler as usize,
         restorer: __tcmk_sigreturn as *const () as usize,
-        flags,
-        mask: 0,
+        flags: flags as usize,
+        mask: SigSet::EMPTY,
     };
     let result = sigaction_raw(signo, &act, &mut previous);
     if result < 0 {
@@ -458,7 +584,7 @@ pub fn ignore(signo: u32) -> isize {
         handler: SIG_IGN,
         restorer: 0,
         flags: 0,
-        mask: 0,
+        mask: SigSet::EMPTY,
     };
     sigaction_raw(signo, &act, core::ptr::null_mut())
 }
@@ -469,7 +595,7 @@ pub fn default(signo: u32) -> isize {
         handler: SIG_DFL,
         restorer: 0,
         flags: 0,
-        mask: 0,
+        mask: SigSet::EMPTY,
     };
     sigaction_raw(signo, &act, core::ptr::null_mut())
 }
@@ -518,8 +644,11 @@ pub const SIG_UNBLOCK: usize = 1;
 pub const SIG_SETMASK: usize = 2;
 
 /// Sinyal numarasini maske bitine cevirir.
-pub const fn mask_of(signo: u32) -> u32 {
-    1 << signo
+///
+/// `u64` doner: gercek-zamanli sinyaller 32..=63 arasinda ve `u32`ye
+/// sigmiyorlar. Maskenin genislemesinin en gorunur izi bu imza.
+pub const fn mask_of(signo: u32) -> u64 {
+    1u64 << signo
 }
 
 /// POSIX `sigprocmask`: engel maskesini degistirir, **eskisini** doner.
@@ -527,15 +656,41 @@ pub const fn mask_of(signo: u32) -> u32 {
 /// Bloke bir sinyal kaybolmaz -- bekler ve maske acilinca teslim edilir.
 /// Kritik bolge kalibi budur: maskele, isi yap, maskeyi ac.
 ///
-/// Tasima farki: gercek POSIX iki `sigset_t` isaretcisi alir; burada
-/// maske deger olarak gecer (32 sinyal tek kelimeye sigiyor).
-pub fn sigprocmask(how: usize, set: u32) -> u32 {
-    unsafe { sys::syscall2(sys::SYS_SIGPROCMASK, how, set as usize) as u32 }
+/// Cekirdege iki `sigset_t` **isaretcisi** gidiyor, tipki gercek
+/// `rt_sigprocmask` gibi. Maske uzun sure deger olarak geciyordu ve o
+/// zaman icin dogruydu -- 32 sinyal tek bir registera siginiyordu.
+/// Gercek-zamanli sinyaller maskeyi 64 bite cikarinca i386'da tek
+/// registera sigmadi ve eski maskenin donus degeriyle verilmesi de
+/// imkansizlasti.
+pub fn sigprocmask(how: usize, set: u64) -> u64 {
+    let new = SigSet::from_bits(set);
+    let mut old = SigSet::EMPTY;
+    unsafe {
+        sys::syscall3(
+            sys::SYS_SIGPROCMASK,
+            how,
+            &new as *const SigSet as usize,
+            &mut old as *mut SigSet as usize,
+        );
+    }
+    old.bits()
 }
 
 /// Mevcut engel maskesini okur (hicbir seyi degistirmeden).
-pub fn current_mask() -> u32 {
-    sigprocmask(SIG_BLOCK, 0)
+///
+/// `set` NULL geciliyor: "hicbir sey ekleme" ile "hicbir sey degistirme"
+/// ayni sonucu verse de ikincisi cagrinin **niyetini** soyluyor.
+pub fn current_mask() -> u64 {
+    let mut old = SigSet::EMPTY;
+    unsafe {
+        sys::syscall3(
+            sys::SYS_SIGPROCMASK,
+            SIG_BLOCK,
+            0,
+            &mut old as *mut SigSet as usize,
+        );
+    }
+    old.bits()
 }
 
 /// POSIX `pause`: teslim edilebilir bir sinyal gelene kadar **uyur**.
@@ -554,8 +709,29 @@ pub fn pause() -> isize {
 /// cagrilarda sinyal tam aradaki pencerede gelirse `pause` onu kacirir
 /// ve surec sonsuza kadar uyar. Maske, isleyici dondukten sonra eski
 /// haline doner.
-pub fn sigsuspend(mask: u32) -> isize {
-    crate::sys::sigsuspend(mask)
+pub fn sigsuspend(mask: u64) -> isize {
+    crate::sys::sigsuspend(&SigSet::from_bits(mask))
+}
+
+/// POSIX `sigqueue`: sinyali **bir degerle** gonderir.
+///
+/// `kill`den farki bir arguman degil, bir sozlesme:
+///
+/// ```text
+///   kill(pid, SIGRTMIN) x3      ->  3 kopya kuyrukta, 3 teslim
+///   kill(pid, SIGUSR1)  x3      ->  1 bit, 1 teslim
+///   sigqueue(pid, SIGRTMIN, v)  ->  kopya + DEGER
+/// ```
+///
+/// Kuyruk sinirli: dolduysa `-EAGAIN` doner. Bu bir ariza degil,
+/// POSIX'in yazili sozlesmesi -- kuyruk cekirdek bellegi oldugu icin
+/// gonderen taraf sinirsiz yer isteyemez.
+///
+/// Deger, isleyicide `SigInfo::value()` ile okunur ve isleyicinin
+/// `SA_SIGINFO` ile kurulmus olmasi gerekir: tek argumanli yuz yalnizca
+/// sinyal numarasini gorur, yani degeri **hic** gormez.
+pub fn sigqueue(pid: usize, signo: u32, value: usize) -> isize {
+    unsafe { sys::syscall3(sys::SYS_SIGQUEUE, pid, signo as usize, value) as isize }
 }
 
 /// POSIX `alarm`: `seconds` sonra kendine `SIGALRM` gonderir.
