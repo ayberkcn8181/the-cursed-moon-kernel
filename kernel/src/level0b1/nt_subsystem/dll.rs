@@ -457,6 +457,30 @@ static KERNEL32: &[Export] = &[
         // TargetFrame, TargetIp, ExceptionRecord, ReturnValue
         stack_bytes: 16,
     },
+    // APC kuyruklari. Sinyalin Windows'taki en yakin akrabasi, ama
+    // teslim ani farkli: APC yalnizca **uyarilabilir** bir bekleme
+    // noktasinda calisir (bkz. `apc.rs`).
+    Export {
+        name: "QueueUserAPC",
+        ordinal: 65,
+        service: nt::NT_QUEUE_USER_APC,
+        // pfnAPC, hThread, dwData
+        stack_bytes: 12,
+    },
+    Export {
+        name: "SleepEx",
+        ordinal: 66,
+        service: nt::NT_SLEEP_EX,
+        // dwMilliseconds, bAlertable
+        stack_bytes: 8,
+    },
+    Export {
+        name: "WaitForSingleObjectEx",
+        ordinal: 67,
+        service: nt::NT_WAIT_FOR_SINGLE_OBJECT_EX,
+        // hHandle, dwMilliseconds, bAlertable
+        stack_bytes: 12,
+    },
     Export {
         name: "GetExitCodeThread",
         ordinal: 50,

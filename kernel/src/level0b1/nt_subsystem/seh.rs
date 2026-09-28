@@ -1070,6 +1070,26 @@ unsafe fn build_frame(
     if trampoline == 0 {
         return None;
     }
+    build_call_frame(base, handler, trampoline, args)
+}
+
+/// Bir Ring 3 fonksiyonunu **Windows cagri geleneginde** cagiracak
+/// baglami kurar.
+///
+/// SEH dagitimindan ayri bir fonksiyon olmasinin sebebi ikinci bir
+/// musteri: APC teslimi de tam olarak ayni seyi yapiyor -- kullanici
+/// yiginina bir cagri cercevesi kurmak ve donus adresine bir tramplen
+/// koymak. Degisen yalnizca hangi tramplen (bkz. `apc.rs`).
+///
+/// Cerceve `base`in **altina** kuruluyor; `ret_addr` yordam `ret`
+/// ettiginde dusecegi yerdir ve oradan geri donus yoktur.
+pub(super) unsafe fn build_call_frame(
+    base: usize,
+    handler: usize,
+    ret_addr: usize,
+    args: &[usize],
+) -> Option<UserContext> {
+    let trampoline = ret_addr;
     let word = core::mem::size_of::<usize>();
 
     #[cfg(target_arch = "x86")]
@@ -1129,7 +1149,6 @@ unsafe fn build_frame(
     {
         next.rflags = 0x202;
     }
-    let _ = task;
     Some(next)
 }
 

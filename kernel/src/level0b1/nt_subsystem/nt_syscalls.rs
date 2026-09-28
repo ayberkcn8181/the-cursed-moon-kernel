@@ -32,6 +32,7 @@ use crate::level0a::core::mmu;
 use crate::level0a::kernel_api::{self, KernelError};
 use crate::level0a::{gui_api, wm};
 
+use super::apc;
 use super::mapping;
 use super::modules;
 use super::seh;
@@ -94,6 +95,14 @@ pub const NT_GET_THREAD_CONTEXT: u32 = 0x3045;
 pub const NT_SET_THREAD_CONTEXT: u32 = 0x3046;
 /// `RtlUnwind(TargetFrame, TargetIp, ExceptionRecord, ReturnValue)`.
 pub const NT_RTL_UNWIND: u32 = 0x3047;
+/// `QueueUserAPC(pfnAPC, hThread, dwData)` -- akisin kuyruguna APC koyar.
+pub const NT_QUEUE_USER_APC: u32 = 0x3048;
+/// `SleepEx(dwMilliseconds, bAlertable)` -- **uyarilabilir** uyku.
+pub const NT_SLEEP_EX: u32 = 0x3049;
+/// `WaitForSingleObjectEx(h, dwMilliseconds, bAlertable)`.
+pub const NT_WAIT_FOR_SINGLE_OBJECT_EX: u32 = 0x304A;
+/// APC yordami dondu; tramplen buradan cekirdege giriyor.
+pub const NT_CONTINUE_APC: u32 = 0x304B;
 pub const NT_SLEEP_MS: u32 = 0x3001;
 pub const NT_GET_TICK_COUNT: u32 = 0x3002;
 pub const NT_WIN32_CLOSE_HANDLE: u32 = 0x3003;
@@ -905,6 +914,89 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
             } else {
                 crate::level0a::core::scheduler::yield_now();
             }
+            WIN32_FALSE
+        }
+
+        // SleepEx(dwMilliseconds, bAlertable) -> DWORD
+        //
+        // `Sleep`ten tek farki ikinci arguman, ve o arguman butun mesele:
+        // **uyarilabilir** bir uyku, bekleyen APC'leri calistirir ve
+        // `WAIT_IO_COMPLETION` doner. Uyarilabilir olmayan bir uyku
+        // kuyruga hic bakmaz -- APC orada kalir.
+        //
+        // POSIX'te bunun karsiligi yok: bir sinyal `nanosleep`i
+        // uygulamanin izni olmadan boler. Burada bolunme izni **acikca**
+        // veriliyor; verilmezse akis kuyrugundaki APC'yi hic gormez.
+        NT_SLEEP_EX => {
+            let ms = arg(args, 0).unwrap_or(0);
+            let alertable = arg(args, 1).unwrap_or(0) != 0;
+
+            // Once kuyruk: zaten bekleyen bir APC varsa uyunmaz.
+            // Windows'un sozlesmesi de budur ve sebebi somut -- APC
+            // "hemen yap" demek, "10 ms sonra yap" demek degil.
+            if alertable && unsafe { apc::deliver(frame, from_interrupt) } {
+                return;
+            }
+
+            if ms > 0 {
+                crate::level0a::core::scheduler::sleep_ticks((ms / 10).max(1));
+            } else {
+                crate::level0a::core::scheduler::yield_now();
+            }
+
+            // Uykudan sonra yeniden bakiliyor: kardes bir akisin uyku
+            // sirasinda kuyruga koydugu APC boylece goruluyor. Dongu
+            // icinde `SleepEx(n, TRUE)` cagiran bir akisin APC'leri
+            // gormesinin yolu bu.
+            if alertable && unsafe { apc::deliver(frame, from_interrupt) } {
+                return;
+            }
+            0
+        }
+
+        // QueueUserAPC(pfnAPC, hThread, dwData) -> DWORD (0 = basarisiz)
+        //
+        // Arguman sirasi tuhaf durabilir (yordam once, tutamac sonra)
+        // ama Windows'un imzasi aynen boyledir.
+        //
+        // Hedefin **baska** bir akis olabilmesi cagrinin varlik sebebi:
+        // `QueueUserAPC`nin asil isi bir akisa is yaptirmaktir. Kendine
+        // kuyruklamak da gecerli ve testte ayrica olculuyor.
+        NT_QUEUE_USER_APC => {
+            let proc_addr = arg_ptr(args, 0).unwrap_or(0);
+            let handle = arg_ptr(args, 1).unwrap_or(0);
+            let param = arg_ptr(args, 2).unwrap_or(0);
+            match thread_of_handle(handle) {
+                None => {
+                    set_last_error(ERROR_INVALID_HANDLE);
+                    WIN32_FALSE
+                }
+                Some(task) => match apc::queue(task, proc_addr, param) {
+                    Ok(()) => WIN32_TRUE,
+                    Err(apc::ApcError::NoSuchThread) => {
+                        set_last_error(ERROR_INVALID_HANDLE);
+                        WIN32_FALSE
+                    }
+                    Err(_) => {
+                        // Dolu kuyruk ve gecersiz yordam ayni hata
+                        // kodunu aliyor: Windows'un kendisi de
+                        // `QueueUserAPC` icin ayri bir kod belgelemiyor.
+                        set_last_error(ERROR_INVALID_PARAMETER);
+                        WIN32_FALSE
+                    }
+                },
+            }
+        }
+
+        // APC yordami dondu. Tramplen disinda kimse cagirmamali.
+        NT_CONTINUE_APC => {
+            if unsafe { apc::resume(frame, from_interrupt) } {
+                return;
+            }
+            // APC icinde degilken cagrildi: kullanici rastgele bir
+            // baglama zipliyor olurdu. Sinyal tarafindaki `sigreturn`
+            // denetimiyle ayni kural.
+            set_last_error(ERROR_INVALID_PARAMETER);
             WIN32_FALSE
         }
 
@@ -1876,9 +1968,27 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
         // TCMK yalnizca `INFINITE` ve sifir sureyi ayirt ediyor: ara
         // degerler icin zamanlayicida "sureli bekleme" kavrami yok, ve
         // beklenen sureyi uydurmak yaniltirdi.
-        NT_WAIT_FOR_SINGLE_OBJECT => {
+        // `WaitForSingleObjectEx(h, ms, bAlertable)` ayni arm'da: tek
+        // fark, uyarilabilir bicimin **once kuyruga bakmasi**.
+        //
+        // Gercek Windows'ta bekleme sirasinda gelen bir APC beklemeyi
+        // boler. TCMK'de bekleme noktasi cagrinin **basi**: kuyrukta
+        // duran bir APC hemen calisir ve cagri `WAIT_IO_COMPLETION`
+        // doner, ama bekleme basladiktan sonra gelen bir APC onu
+        // kaldirmaz. Ayrim bilincli -- zamanlayicida "beklemeyi disaridan
+        // bol" diye bir ilkel yok, ve varmis gibi yapmak bir programi
+        // hic gelmeyecek bir uyanmaya baglardi.
+        NT_WAIT_FOR_SINGLE_OBJECT | NT_WAIT_FOR_SINGLE_OBJECT_EX => {
             let handle = arg(args, 0).unwrap_or(0) as usize;
             let timeout = arg(args, 1).unwrap_or(0);
+            if number == NT_WAIT_FOR_SINGLE_OBJECT_EX
+                && arg(args, 2).unwrap_or(0) != 0
+                && unsafe { apc::deliver(frame, from_interrupt) }
+            {
+                // Cerceve APC yordamina cevrildi; donus degeri
+                // `NtContinueApc`de uretilecek.
+                return;
+            }
             match handle.checked_sub(PROCESS_HANDLE_FLAG) {
                 None => {
                     set_last_error(ERROR_INVALID_HANDLE);

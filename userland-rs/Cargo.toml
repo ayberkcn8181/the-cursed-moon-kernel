@@ -136,6 +136,10 @@ path = "src/win/unwind.rs"
 name = "winnest"
 path = "src/win/nested.rs"
 
+[[bin]]
+name = "winapc"
+path = "src/win/apc.rs"
+
 [profile.dev]
 panic = "abort"
 opt-level = 1

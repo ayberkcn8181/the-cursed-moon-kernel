@@ -27,8 +27,8 @@ masaustu sunuyor.
 | Mimariler | i386 (Multiboot1, `int 0x80`) · x86_64 (Multiboot2, `syscall`) |
 | Ikili bicimleri | ELF32/ELF64 · PE32/PE32+ (ithal tablosu cozulur) |
 | POSIX cagrilari | 73 (+ ELF yardimci vektoru, dosya destekli `mmap`, `clone`, `futex`, `SIGPIPE`, `EINTR`/`SA_RESTART`, is denetimi, `SA_SIGINFO`, `sigaltstack`, gercek-zamanli sinyaller) |
-| NT/Win32 cagrilari | 86 (`KERNEL32.dll` 64 ihracat + `TCMKGUI.dll`) |
-| Ring 3 uygulamalari | 40 ELF + 17 PE |
+| NT/Win32 cagrilari | 90 (`KERNEL32.dll` 67 ihracat + `TCMKGUI.dll`) |
+| Ring 3 uygulamalari | 40 ELF + 18 PE |
 | Kalici depolama | ATA PIO + MBR + TCMKFS (yazilabilir, iki mimari) + takas |
 | Kod | ~30 bin satir cekirdek + ~17 bin satir userland |
 
@@ -60,7 +60,7 @@ artik POSIX yuzunde de **yakalanip duzeltilebiliyor**
 gucte cevap veriyor.
 
 Her yetenek QEMU'da **olculerek** dogrulanmistir: `probe` (16 sinav),
-`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (5), `bigfile` (6), `heap` (5), `swapx` (6), `jobs` (6), `winsusp` (6), `winctx` (7), `sigfault` (7), `winunwind` (7), `altstack` (7), `winnest` (6), `rtsig` (7), `bequest`
+`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (5), `bigfile` (6), `heap` (5), `swapx` (6), `jobs` (6), `winsusp` (6), `winctx` (7), `sigfault` (7), `winunwind` (7), `altstack` (7), `winnest` (6), `rtsig` (7), `winapc` (7), `bequest`
 (6), `nested` (4), `winenv` (4) gibi programlar sonucu hem ekrana hem
 seri gunluge yaziyor. Olcumler yol boyunca gercek hatalar buldu -- dolan
 VFS tablosu, `CreateFileA`'nin cevrilmeyen Windows yollari, `GDT`
@@ -7269,6 +7269,215 @@ ayni degil.
 * **`SIGRTMIN` gercekten 32.** Gercek Linux'ta libc ilk iki numarayi
   kendi kullanir (is parcacigi altyapisi) ve uygulamalara 34'ten baslar;
   TCMK'de libc olmadigi icin sinir gercek sinirin kendisi.
+
+## Kesinti degil, randevu: APC kuyruklari
+
+Bir onceki bati POSIX tarafinda gercek-zamanli sinyalleri getirdi ve su
+cumleyle bitti: *"Windows'ta en yakin karsilik APC kuyruklaridir."* Bu
+bati o cumleyi olcuyor -- ve olcum, benzerligin yuzeyde kaldigini
+gosteriyor.
+
+Ikisi de ayni ise yariyor: bir akisa "su an ne yapiyorsan, sunu da
+calistir" demek. Ama **teslim ani** keskin bicimde ayri:
+
+```text
+  POSIX sinyal  ->  her sistem cagrisi donusunde teslim edilir
+                    (surece SORULMAZ)
+  Windows APC   ->  yalnizca UYARILABILIR bir bekleme noktasinda
+                    (surec acikca IZIN VERMIS olmali)
+```
+
+### Varsayilanlar ters
+
+Fark bir ayrinti degil, iki ayri tasarim karari:
+
+```text
+  sinyal ->  kesinti.  "su an bolunebilirsin" VARSAYILAN.
+             Bolunmek istemiyorsan MASKELERSIN (sigprocmask).
+  APC    ->  randevu.  "su an bolunebilirsin" ozel olarak SOYLENIR.
+             Hicbir sey soylemezsen HIC bolunmezsin.
+```
+
+Sonucu somut: hicbir zaman `SleepEx(..., TRUE)` ya da
+`WaitForSingleObjectEx(..., TRUE)` cagirmayan bir Windows akisi,
+kuyrugunda kac APC olursa olsun **hicbirini** calistirmaz. Bir POSIX
+programinin "sinyali hic gormedim" diyebilmesi icin onu maskelemis
+olmasi gerekir; bir Windows programinin APC'yi hic gormemesi icin
+**hicbir sey yapmamasi** yeterli.
+
+### Hangisi daha iyi -- ikisi de degil
+
+Ikisi de bir sorunu otekine takas ediyor, ve takasin ne oldugunu
+soylemek "hangisi dogru" sorusundan daha faydali.
+
+Sinyal, **yeniden-girilebilirlik** sorununu programa yikiyor: bir
+isleyici kritik bolgenin tam ortasinda kosabilir, o yuzden sinyal
+isleyicisinde ne yapilabilecegi kati bicimde sinirlidir (POSIX'in
+"async-signal-safe" listesi bu yuzden vardir ve `malloc` o listede
+degildir). APC o sorunu **tasarim geregi** yok ediyor: yordam yalnizca
+programin "su an uygunum" dedigi anda kosar, yani kritik bolgede hic
+kosmaz -- APC yordami icinde `malloc` cagirmak guvenlidir.
+
+Bedeli de ayni yerden geliyor: bir akisin APC'sini **hic gormeme**
+ihtimali. Uyarilabilir bekleme cagirmayan bir akisa gonderilen APC
+sonsuza kadar kuyrukta bekler. Sinyalde bu olamaz.
+
+### Kuyruk her zaman kuyruk
+
+POSIX'te iki sinif sinyal var: birlesen (standart) ve kuyruklanan
+(gercek-zamanli). Windows'ta boyle bir ayrim **yok** -- her APC kuyruga
+girer ve her APC bir deger tasir (`dwData`). Yani Windows'ta "ucuz ve
+birlesen" bir bildirim yolu hic olmadi, ve POSIX'in ucuz yolunu secme
+imkani orada bulunmuyor.
+
+```text
+  POSIX   kill(SIGUSR1) x3      ->  1 teslim, degersiz
+          sigqueue(SIGRTMIN) x3 ->  3 teslim, her biri degerli
+  Windows QueueUserAPC x3       ->  3 teslim, her biri degerli
+                                    (baska secenek yok)
+```
+
+### Yedi sinav
+
+`winapc.exe` (PE32 ve PE32+) ayrimi tek tek olcuyor:
+
+```text
+[winapc] A kuyruga girdi:          gecti (QueueUserAPC kabul etti)
+[winapc] B kendiliginden kosmuyor: gecti (Sleep + is: yordam kosmadi)
+[winapc] C izin verilince kosuyor: gecti (SleepEx(_,TRUE) kosturdu,
+                                          WAIT_IO_COMPLETION dondu)
+[winapc] D deger tasindi:          gecti (dwData yordama ulasti)
+[winapc] E sira + toplu bosaltma:  gecti (uc APC, 11-22-33, TEK beklemede)
+[winapc] F izinsiz bekleme:        gecti (kosturmadi, APC kuyrukta KALDI)
+[winapc] G baska akisa:            gecti (kardes akis kendi beklemesinde)
+```
+
+![winapc](docs/screenshot-winapc.png)
+
+B bu sinavin sebebi. A tek basina yalnizca "cagri kabul edildi" diyor;
+asil soru kabul edilen seyin **ne zaman** oldugu. B, uyarilabilir
+olmayan bir dizi sistem cagrisi yapiyor (`Sleep`, `GetTickCount`) --
+bunlarin her biri bir POSIX sinyalinin teslim edilecegi noktadir. APC
+kosmuyor.
+
+F ayni soruyu tersten soruyor ve bir tuzagi kapatiyor: izinsiz bekleme
+APC'yi kosturmuyorsa, onu **atmis** da olabilirdi. "Kosmadi" tek basina
+ikisini ayirt etmiyor. Bu yuzden F'nin ikinci yarisi var: izinsiz
+beklemenin hemen ardindan izinli bir bekleme geliyor ve APC orada
+kosuyor. Kaybolmamis, beklemis.
+
+G cagrinin varlik sebebi: `QueueUserAPC`nin asil isi bir akisa is
+yaptirmaktir, kendine degil. Kardes akis `SleepEx(10, TRUE)` dongusunde
+duruyor, ana akis yalnizca kuyruga koyuyor.
+
+### Bes bozma
+
+Her sinavin neyi olctugu, o seyi kirarak dogrulandi:
+
+```text
+Sleep de APC kosturuyor        ->  B "yordam IZINSIZ kostu:
+                                      sinyal gibi davraniyor"  (+ C)
+SleepEx bayragi yok sayiyor    ->  F "izinsiz bekleme yordami KOSTURDU"
+resume kuyruga bakmiyor        ->  E "tek bekleme yalnizca BIR APC
+                                      kosturdu"
+dwData tasinmiyor              ->  D "deger sifir geldi"  (+ E, G)
+hedef tutamaci yok sayiliyor   ->  G "kardes akis APC'yi hic gormedi"
+                                      (A-F'nin hepsi gecti)
+```
+
+Sonuncusu G'nin ayirt ediciligini gosteriyor: ilk alti sinav
+`QueueUserAPC`in hedefi hic umursamadigi bir cekirdekte de gecti.
+
+### Yol boyunca cikan bir hata: yuvanin onceki kiracisi
+
+`winapc` tek basina ve iki mimaride sorunsuz gecti. Sonra gerileme
+sinavinda **sirayi degistirdim** -- `winapc`den sonra `sigfault` -- ve
+cekirdek coktu:
+
+```text
+[LEVEL-0b1] fork: gorev #6 -> #1
+[LEVEL-0b2] ISTISNA #14 (page-fault) -- Ring 0 kaynakli
+            IP=0x0028f382  adres=0x00c819e0  sayfa-yok / okuma / Ring 0
+[LEVEL-0b2][FALLBACK] Cekirdek baglaminda istisna -- kurtarilamaz.
+```
+
+Hatali adres tanidikti: `winapc`in kardes akisinin yigini. Ve `0x28f382`
+`seh::begin`e dusuyordu -- yani **ELF** bir surec icin Windows istisna
+dagiticisi calisiyordu.
+
+Zincir soyle:
+
+```text
+1. PE uygulamasi CreateThread cagiriyor; teb::install kardes akisin
+   YUVASINA bir TEB adresi yaziyor.
+2. Akis bitiyor. Yuva geri veriliyor -- ama TEB kaydi yuvada KALIYOR.
+3. Ayni yuvayi bir ELF surecinin fork cocugu aliyor.
+4. Cocuk sayfa hatasi veriyor. Istisna yolu "TEB var mi" diye soruyor,
+   "var" cevabini aliyor ve bunu "bu bir PE" diye okuyor.
+5. seh::begin artik eslenmemis bir adrese, Ring 0'dan yaziyor.
+```
+
+Hata **bu batidan eski**: ayni cokme `winthread sigfault` sirasiyla da
+uretiliyor ve `winthread` cok daha onceki bir bati. Gorunur olmamasinin
+sebebi siraydi -- kardes akis acan bir PE uygulamasinin hemen ardindan
+`fork` eden bir ELF uygulamasi kosturmak gerekiyordu.
+
+Duzeltme, yuva geri verildiginde degil **yeniden verildiginde**: yeni
+bir gorev TEB'siz doguyor (`spawn_inner`). Yuvaya TEB yazan iki yol da
+(imaj yukleme ve `CreateThread`) oradan sonra calistigi icin sira dogru.
+Ayni satirin yanina APC kuyrugunun temizligi de eklendi -- yuvada kalan
+bir APC, yeni gorevin kuyrugunda artik gecersiz bir yordam adresi
+olurdu.
+
+Not: bunu bulan sey yeni bir sinav degil, **sinavlarin sirasi**. Tek tek
+kosturuldugunda her sey geciyordu.
+
+
+### Nasil calisiyor
+
+Sinyal tarafiyla **ayni ilkel**: cekirdek kullanici yiginina bir cagri
+cercevesi kurup baglami APC yordamina ceviriyor ve donus adresine bir
+tramplen koyuyor. Yordam `ret` edince tramplen `NtContinueApc` cagiriyor;
+cekirdek kuyrukta baska varsa sirakini kuruyor, yoksa saklanan baglami
+geri koyup bekleme cagrisina `WAIT_IO_COMPLETION` donduruyor.
+
+TEB'de artik **iki** tramplen var ve ayri olmalari sart: bir SEH
+isleyicisi karar dondurur (`EXCEPTION_CONTINUE_SEARCH` gibi) ve tramplen
+o karari cekirdege tasir; bir APC yordami `void` doner ve tasinacak
+hicbir sey yoktur. Ikisini tek tramplene bindirmek, APC'nin EAX'inde
+kalan cop degeri bir istisna karari saymak olurdu.
+
+Cagri cercevesini kuran kod ise **ortak**: `seh::build_call_frame` iki
+musteriye birden hizmet ediyor, cunku ikisi de ayni seyi soruyor --
+"Windows cagri geleneginde su fonksiyonu su argumanla cagir, donunce su
+adrese dus".
+
+### Bilerek yapilmayanlar
+
+* **Ic ice APC yok.** Bir APC yordami kendi icinde uyarilabilir bekleme
+  cagirirsa ikinci APC calismaz, kuyrukta kalir. Gercek Windows ic ice
+  teslim yapar. Sinyal tarafinda dort katmanli bir baglam yigini var,
+  cunku orada teslim programin izni olmadan olur ve bir isleyicinin
+  icinde ikinci bir sinyal **beklenen** bir durumdur. Burada teslim
+  noktasini program kendisi seciyor, yani ic ice kalmak da onun karari.
+* **Bekleme sirasinda gelen APC beklemeyi bolmez.** TCMK'de uyarilabilir
+  bekleme noktasi cagrinin **basidir**: kuyrukta duran bir APC hemen
+  kosar, ama `WaitForSingleObjectEx` bekledigi sirada gelen bir APC onu
+  kaldirmaz. Zamanlayicida "beklemeyi disaridan bol" diye bir ilkel yok,
+  ve varmis gibi yapmak bir programi hic gelmeyecek bir uyanmaya
+  baglardi. `SleepEx` dongu icinde cagrildiginda pratikte fark
+  gorunmuyor -- G sinavi tam olarak boyle calisiyor.
+* **Kuyruk siniri sabit** (akis basina sekiz). Gercek Windows'ta
+  belgelenmis bir sinir yok; kuyruk cekirdek bellegiyle sinirli. TCMK'de
+  kuyruk statik bir tabloda duruyor.
+* **`QueueUserAPC2` ve ozel APC yok.** Cekirdek kipi APC'leri (ozel/
+  normal ayrimi, `KeInsertQueueApc`) surucu tarafinin isi; burada
+  yalnizca kullanici kipi APC var.
+* **Ortusen (`overlapped`) G/C yok.** `WAIT_IO_COMPLETION` adinin
+  geldigi yer o -- uyarilabilir beklemenin ilk musterisi dosya
+  islemlerinin tamamlanma yordamlariydi. TCMK'de eszamansiz dosya G/C'si
+  yok, yani APC'nin bu ilk musterisi de yok; `QueueUserAPC` uzerinden
+  gelen kullanimi var.
 
 ## Alfa'nin bilinen sinirlari
 

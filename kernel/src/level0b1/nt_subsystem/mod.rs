@@ -3,6 +3,8 @@
 // Gomulu DLL tablosu iki mimarida da gereklidir: PE32 (i386) ve PE32+
 // (x86_64) yukleyicileri ayni ihracat tablosunu kullanir, yalnizca
 // urettikleri thunk'in cagri gelenegi degisir (bkz. dll::emit_thunk).
+/// APC kuyruklari: QueueUserAPC + uyarilabilir bekleme.
+pub mod apc;
 pub mod dll;
 /// Dosya esleme nesneleri: CreateFileMapping / MapViewOfFile.
 pub mod mapping;

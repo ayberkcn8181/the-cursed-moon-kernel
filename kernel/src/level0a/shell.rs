@@ -935,6 +935,24 @@ fn execute(line: &str) {
             write_str("   reddedilen: ");
             write_num(dropped as usize);
             newline();
+            // Windows yuzundeki ikiz: APC kuyruklari. Sayilari yan yana
+            // koymak bir seyi gorunur kiliyor -- teslim edilen APC
+            // sayisi, uyarilabilir bekleme cagiran bir program yoksa
+            // kuyruga girenden **kucuk** kalir. Sinyalde boyle bir fark
+            // olamaz: orada teslim programin iznine bagli degil.
+            let (apc_in, apc_out, apc_no, apc_peak) =
+                crate::level0b1::nt_subsystem::apc::stats();
+            write_str("apc kuyrugu: kuyruga ");
+            write_num(apc_in as usize);
+            write_str("  kosan ");
+            write_num(apc_out as usize);
+            write_str("  reddedilen ");
+            write_num(apc_no as usize);
+            write_str("  en derin ");
+            write_num(apc_peak as usize);
+            write_str("/");
+            write_num(crate::level0b1::nt_subsystem::apc::MAX_APC);
+            newline();
             write_line("  id  gorev        isleyicili       bekleyen        engelli");
             for i in 0..scheduler::MAX_TASKS {
                 if scheduler::state_of(i) == scheduler::TaskState::Unused {

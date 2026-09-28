@@ -78,6 +78,15 @@ const MAX_MODULES: usize = 3;
 /// Linux'un eski sinyal tramplenleri de aynen boyleydi.
 const TRAMPOLINE_OFFSET: usize = 0x100;
 
+/// APC teslim tramplenin yeri.
+///
+/// Ayri bir tramplen sart, cunku iki donusun **anlami** ayri: bir SEH
+/// isleyicisi karar dondurur (`EXCEPTION_CONTINUE_SEARCH` gibi) ve
+/// tramplen o karari cekirdege tasir; bir APC yordami ise `void` doner
+/// ve tasinacak hicbir sey yoktur. Ikisini tek tramplene bindirmek,
+/// APC'nin EAX'inde kalan cop degeri bir istisna karari saymak olurdu.
+const APC_TRAMPOLINE_OFFSET: usize = 0x120;
+
 // --- Alan ofsetleri (Windows ile ayni) --------------------------------
 //
 // Bu sayilar derlenmis Windows kodunun icine gomuludur: `mov eax,
@@ -205,6 +214,7 @@ pub unsafe fn install(task: usize, top: usize, bottom: usize) -> usize {
     ((teb + layout::LAST_ERROR) as *mut u32).write_unaligned(0);
 
     emit_trampoline(teb + TRAMPOLINE_OFFSET);
+    emit_apc_trampoline(teb + APC_TRAMPOLINE_OFFSET);
     build_peb(task, teb, peb, word);
 
     TEB_ADDRESS[task % scheduler::MAX_TASKS]
@@ -246,6 +256,16 @@ pub fn trampoline(task: usize) -> usize {
     }
 }
 
+/// APC tramplenin adresi -- TEB yoksa sifir.
+pub fn apc_trampoline(task: usize) -> usize {
+    let teb = address(task);
+    if teb == 0 {
+        0
+    } else {
+        teb + APC_TRAMPOLINE_OFFSET
+    }
+}
+
 /// Tramplen kodu: isleyicinin karari (EAX/RAX) ile `NtContinueDispatch`
 /// cagirir.
 ///
@@ -279,6 +299,32 @@ unsafe fn emit_trampoline(at: usize) {
     code.add(12).write(0xCC);
 }
 
+/// APC tramplen (i386): yordam `ret 4` ettiginde buraya duser.
+///
+/// `NtContinueApc` arguman almiyor, ama EDX yine de gecerli bir adrese
+/// cevriliyor: Win32 servis yolu arguman blogunu kosulsuz okuyor ve
+/// cop bir EDX ile gelmek, denetimi bosuna calistirmak olurdu.
+///
+/// # Safety
+/// `emit_trampoline` ile ayni kosul.
+#[cfg(target_arch = "x86")]
+unsafe fn emit_apc_trampoline(at: usize) {
+    // 8D 54 24 00     lea edx, [esp]     ; gecerli bir arguman blogu
+    // B8 xx xx xx xx  mov eax, servis
+    // CD 2E           int 0x2E
+    // CC              int3               ; buraya asla donulmez
+    let code = at as *mut u8;
+    code.write(0x8D);
+    code.add(1).write(0x54);
+    code.add(2).write(0x24);
+    code.add(3).write(0x00);
+    code.add(4).write(0xB8);
+    (code.add(5) as *mut u32).write_unaligned(super::nt_syscalls::NT_CONTINUE_APC);
+    code.add(9).write(0xCD);
+    code.add(10).write(0x2E);
+    code.add(11).write(0xCC);
+}
+
 /// x86_64 tramplen. Fark, NT cagri sozlesmesinin argumanlari **golge
 /// alandan** okumasi (bkz. `dll::emit_thunk`): karar oraya dokulur.
 ///
@@ -302,6 +348,28 @@ unsafe fn emit_trampoline(at: usize) {
     core::ptr::copy_nonoverlapping(CODE.as_ptr(), code, CODE.len());
     (code.add(11) as *mut u32)
         .write_unaligned(super::nt_syscalls::NT_CONTINUE_DISPATCH);
+}
+
+/// APC tramplen (x86_64). i386'daki ile ayni is; fark yalnizca RDX'in
+/// golge alani gostermesi.
+///
+/// # Safety
+/// `emit_trampoline` ile ayni kosul.
+#[cfg(target_arch = "x86_64")]
+unsafe fn emit_apc_trampoline(at: usize) {
+    // 48 8D 54 24 08  lea rdx, [rsp+8]   ; gecerli bir arguman blogu
+    // B8 xx xx xx xx  mov eax, servis
+    // CD 2E           int 0x2E
+    // CC              int3
+    const CODE: [u8; 13] = [
+        0x48, 0x8D, 0x54, 0x24, 0x08,
+        0xB8, 0x00, 0x00, 0x00, 0x00,
+        0xCD, 0x2E,
+        0xCC,
+    ];
+    let code = at as *mut u8;
+    core::ptr::copy_nonoverlapping(CODE.as_ptr(), code, CODE.len());
+    (code.add(6) as *mut u32).write_unaligned(super::nt_syscalls::NT_CONTINUE_APC);
 }
 
 /// Son hata kodunu TEB'e de yazar.

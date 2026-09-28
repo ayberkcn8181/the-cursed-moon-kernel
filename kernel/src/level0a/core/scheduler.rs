@@ -429,6 +429,23 @@ fn spawn_inner(
         // Saklanan Ring 3 baglami da: yoksa `GetThreadContext` yuvanin
         // onceki kiracisinin giris noktasini gosterirdi.
         crate::level0b1::thread::forget_context(index);
+        // TEB kaydi da yuvaya bagli -- ve bunu **atlamak oldurucuydu**.
+        //
+        // Yeni bir gorev burada TEB'siz dogmali. Aksi halde su oluyordu:
+        // bir PE uygulamasi `CreateThread` ile kardes akis aciyor,
+        // `teb::install` o yuvaya bir TEB adresi yaziyor, akis bitiyor --
+        // ama kayit yuvada kaliyor. Ayni yuvayi sonra bir ELF surecinin
+        // `fork` cocugu aliyor ve o surec bir sayfa hatasi verdiginde
+        // istisna yolu TEB'e bakip "bu bir PE" diye karar veriyor.
+        // `seh::begin` artik var olmayan bir adrese, **Ring 0'dan**,
+        // yaziyor: kurtarilamaz bir cekirdek hatasi.
+        //
+        // Yuvaya TEB'i yazan iki yol da (imaj yukleme ve `CreateThread`)
+        // buradan **sonra** calistigi icin temizlemek dogru sirada.
+        crate::level0b1::nt_subsystem::teb::clear(index);
+        // Ayni gerekce: yuvada kalan bir APC, yeni gorevin kuyrugunda
+        // artik gecersiz bir yordam adresi olurdu.
+        crate::level0b1::nt_subsystem::apc::reset(index);
         (*tasks.add(index)).parent = CURRENT.load(Ordering::Relaxed);
         (*tasks.add(index)).waitable = waitable;
         // Siradan bir gorev kendi grubunun lideridir. Is parcaciklari

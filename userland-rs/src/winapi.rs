@@ -279,6 +279,42 @@ extern "system" {
     /// Surecin cikis kodu; hala calisiyorsa [`STILL_ACTIVE`].
     pub fn GetExitCodeProcess(process: Handle, exit_code: *mut Dword) -> Bool;
 
+    /// Bir akisin kuyruguna **APC** koyar.
+    ///
+    /// POSIX sinyalinin Windows'taki en yakin akrabasi, ama teslim ani
+    /// farkli ve fark belirleyici:
+    ///
+    /// ```text
+    ///   sinyal  ->  her syscall donusunde teslim (surece sorulmaz)
+    ///   APC     ->  yalnizca UYARILABILIR bekleme noktasinda
+    /// ```
+    ///
+    /// Yani [`SleepEx`] ya da [`WaitForSingleObjectEx`] `alertable`
+    /// bicimiyle cagrilmadikca kuyruktaki APC **hic** kosmaz. Bir
+    /// sinyali yok saymanin yolu onu maskelemektir; bir APC'yi
+    /// calistirmanin yolu ona izin vermektir -- varsayilanlar ters.
+    ///
+    /// Arguman sirasi tuhaf durur (yordam once, tutamac sonra) ama
+    /// Windows'un imzasi aynen boyledir. Doner: 0 = basarisiz.
+    pub fn QueueUserAPC(apc: ApcProc, thread: Handle, data: usize) -> Dword;
+
+    /// **Uyarilabilir** uyku: bekleyen APC'ler kosar.
+    ///
+    /// `alertable` sifirsa [`Sleep`] ile ayni sey; sifir degilse kuyruk
+    /// bosaltilir ve donus [`WAIT_IO_COMPLETION`] olur. APC yoksa 0.
+    pub fn SleepEx(milliseconds: Dword, alertable: Bool) -> Dword;
+
+    /// Uyarilabilir bekleme.
+    ///
+    /// TCMK'de bekleme noktasi cagrinin **basidir**: kuyrukta duran bir
+    /// APC hemen kosar, ama bekleme basladiktan sonra gelen bir APC
+    /// beklemeyi bolmez.
+    pub fn WaitForSingleObjectEx(
+        handle: Handle,
+        milliseconds: Dword,
+        alertable: Bool,
+    ) -> Dword;
+
     /// Vektorlu istisna isleyicisi ekler.
     ///
     /// SEH zincirinden **once** calisir ve zincirin aksine surecin
@@ -803,6 +839,20 @@ impl ProcessInformation {
         }
     }
 }
+
+/// APC yordamin imzasi (`PAPCFUNC`).
+///
+/// Tek arguman, donus yok. Sinyal isleyicisinden farki degerin
+/// **her zaman** tasinmasi: POSIX'te deger yalnizca gercek-zamanli
+/// sinyallerde var, burada her APC'de.
+pub type ApcProc = unsafe extern "system" fn(usize);
+
+/// Uyarilabilir bir bekleme **APC yuzunden** bitti.
+///
+/// Adi tarihsel (`WAIT_IO_COMPLETION`): uyarilabilir beklemenin ilk
+/// musterisi ortusen dosya islemlerinin tamamlanma yordamlariydi.
+/// `QueueUserAPC` ayni yolu uygulamalara acti, ama ad kaldi.
+pub const WAIT_IO_COMPLETION: Dword = 0xC0;
 
 /// `WaitForSingleObject`: sonsuza kadar bekle.
 pub const INFINITE: Dword = 0xFFFF_FFFF;

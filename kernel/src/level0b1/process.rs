@@ -655,6 +655,10 @@ unsafe fn enter_ring3(
     // Istisna isleyicileri de surece aittir; yeni imaj bunlari devralamaz
     // (devralsaydi, artik var olmayan bir koda dallanilirdi).
     crate::level0b1::nt_subsystem::seh::reset(scheduler::current_id());
+    // APC kuyrugu da oyle: kuyruktaki yordam adresleri eski imajin
+    // adres uzayina aitti. Yeni imajda o adres baska bir seyin olabilir,
+    // yani devralmak kontrolsuz bir dallanma demek olurdu.
+    crate::level0b1::nt_subsystem::apc::reset(scheduler::current_id());
     // Esleme nesneleri ve gorunumleri de surece ait: yeni imaj eskinin
     // taniticilarini devralamaz.
     crate::level0b1::nt_subsystem::mapping::reset(scheduler::current_id());
