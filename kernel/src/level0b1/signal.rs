@@ -101,6 +101,23 @@ pub const SIGTERM: u32 = 15;
 // farklilasmiyorlar (farklilasan seyler `SIGCHLD` oncesi eski
 // numaralandirmadan kalma).
 
+/// Bir cocuk surecin **durumu degisti**: cikti, olduruldu, durdu ya da
+/// devam etti.
+///
+/// Iki ozelligiyle diger sinyallerden ayri duruyor:
+///
+///   * Varsayilani **yok saymak**. Cogu sinyal olduruyor; bu, gelmesi
+///     beklenen ve cogu programin umursamadigi bir bildirim.
+///   * `si_code` tek basina hikayeyi anlatiyor (`CLD_*`) ve `si_status`
+///     cikis kodunu ya da olduren sinyali tasiyor -- yani `waitpid`
+///     cagirmadan da cevap alinabiliyor.
+///
+/// Windows'ta karsiligi **yok** ve olmamasi bir eksiklik degil, baska
+/// bir secim: orada cocuk oldugunde surec **nesnesi isaretlenir** ve
+/// ebeveyn onu `WaitForSingleObject` ile ceker. POSIX iter, Windows
+/// beklenir.
+pub const SIGCHLD: u32 = 17;
+
 /// Durmus bir sureci **devam ettirir**.
 ///
 /// Iki ozelligi var ve ikisi de diger sinyallerden ayri:
@@ -244,11 +261,36 @@ pub const SA_SIGINFO: u32 = 0x0000_0004;
 /// ```
 pub const SA_ONSTACK: u32 = 0x0800_0000;
 
+/// Cocuk **durdugunda** `SIGCHLD` gonderilmesin.
+///
+/// Yalnizca olum bildirilsin demek. Cogu program bunu ister: bir
+/// cocugun durmasi is denetimi meselesidir ve onunla yalnizca kabuk
+/// ilgilenir. Bayrak olmasaydi her `Ctrl-Z` butun ebeveynleri
+/// uyandirirdi.
+pub const SA_NOCLDSTOP: u32 = 0x0000_0001;
+
+/// Cocuklar **zombi birakmasin**.
+///
+/// POSIX'in en bilinen tuhafliklarindan biri: `SIGCHLD`i `SIG_IGN`
+/// yapmak "bu sinyali umursamiyorum" demenin otesinde bir sey yapar --
+/// cekirdek cocuklari kendisi toplar ve `waitpid` artik `ECHILD` doner.
+/// `SA_NOCLDWAIT` ayni etkiyi bir isleyici kuruluyken de saglar.
+///
+/// Ayrim onemli: yok saymak normalde sinyali **atmak**tir, zombiyi
+/// degil. Burada yok saymanin ikinci bir anlami var ve o anlam
+/// kaydin kendisini siliyor.
+pub const SA_NOCLDWAIT: u32 = 0x0000_0002;
+
 /// Cekirdegin tanidigi bayraklar. Digerleri sessizce yok sayilir --
 /// `SA_RESTART` gibi, karsiligi olmayan bir bayragi kabul ediyormus gibi
 /// yapmak yaniltici olurdu (bkz. README).
-pub const SUPPORTED_FLAGS: u32 =
-    SA_NODEFER | SA_RESETHAND | SA_RESTART | SA_SIGINFO | SA_ONSTACK;
+pub const SUPPORTED_FLAGS: u32 = SA_NODEFER
+    | SA_RESETHAND
+    | SA_RESTART
+    | SA_SIGINFO
+    | SA_ONSTACK
+    | SA_NOCLDSTOP
+    | SA_NOCLDWAIT;
 
 // --- `sigaltstack` ---------------------------------------------------
 
@@ -312,6 +354,25 @@ pub const SEGV_ACCERR: i32 = 2;
 pub const FPE_INTDIV: i32 = 1;
 /// `SIGILL`: gecersiz islem.
 pub const ILL_ILLOPN: i32 = 2;
+
+// --- `SIGCHLD`in `si_code`lari ----------------------------------------
+//
+// Burada `si_code` bir yan bilgi degil, **asil** bilgi: hangi olayin
+// oldugunu yalnizca o soyluyor. `si_status`un anlami da ona bagli --
+// cikista cikis kodu, olumde olduren sinyal, durmada durduran sinyal.
+
+/// Cocuk kendi cikti; `si_status` cikis kodu.
+pub const CLD_EXITED: i32 = 1;
+/// Cocuk bir sinyalle olduruldu; `si_status` o sinyal.
+pub const CLD_KILLED: i32 = 2;
+/// Olum bir cekirdek dokumu birakti. TCMK dokum almiyor, ama kod
+/// taniniyor: `CLD_KILLED` ile karistirmak, dokum arayan bir programi
+/// bos yere aratirdi.
+pub const CLD_DUMPED: i32 = 3;
+/// Cocuk durdu; `si_status` durduran sinyal.
+pub const CLD_STOPPED: i32 = 5;
+/// Durmus cocuk devam etti.
+pub const CLD_CONTINUED: i32 = 6;
 
 /// Bir sinyalin **neden** geldigi.
 ///
@@ -639,12 +700,21 @@ pub enum DefaultAction {
     Stop,
     /// Durmussa devam ettirir; degilse hicbir sey yapmaz.
     Continue,
+    /// Hicbir sey yapmaz -- sinyal sessizce dusuruluyor.
+    ///
+    /// Uzun sure gereksizdi: her sinyal ya olduruyor ya durduruyordu.
+    /// `SIGCHLD` ile gerekli oldu ve gerekcesi onun ne oldugunda:
+    /// **beklenen** bir bildirim. Cocugu olan her surec onu aliyor ve
+    /// cogu umursamiyor; varsayilani olum olsaydi `fork` eden her
+    /// program cocugu bitince olurdu.
+    Ignore,
 }
 
 pub fn default_action(signo: u32) -> DefaultAction {
     match signo {
         SIGSTOP | SIGTSTP => DefaultAction::Stop,
         SIGCONT => DefaultAction::Continue,
+        SIGCHLD => DefaultAction::Ignore,
         _ => DefaultAction::Terminate,
     }
 }
@@ -675,6 +745,93 @@ pub fn raise(target: usize, signo: u32) -> Result<(), SignalError> {
             value: 0,
         },
     )
+}
+
+// --- `SIGCHLD`: cocugun durumunu **itmek** ---------------------------
+
+/// Kac `SIGCHLD` gonderildi, kac tanesi bastirildi (kabuk raporu).
+static CHILD_SENT: AtomicU32 = AtomicU32::new(0);
+static CHILD_SUPPRESSED: AtomicU32 = AtomicU32::new(0);
+static CHILD_REAPED: AtomicU32 = AtomicU32::new(0);
+
+/// `(gonderilen, bastirilan, kendiliginden toplanan)`.
+pub fn child_stats() -> (u32, u32, u32) {
+    (
+        CHILD_SENT.load(Ordering::Relaxed),
+        CHILD_SUPPRESSED.load(Ordering::Relaxed),
+        CHILD_REAPED.load(Ordering::Relaxed),
+    )
+}
+
+/// Bu gorevin `SIGCHLD` yerlestirmesini okur.
+fn chld_disposition(task: usize) -> Disposition {
+    if task >= scheduler::MAX_TASKS {
+        return Disposition::DEFAULT;
+    }
+    // SAFETY: yalnizca kendi yuvasi okunuyor.
+    unsafe {
+        (core::ptr::addr_of!(DISPOSITIONS) as *const Disposition)
+            .add(task * SLOTS + SIGCHLD as usize)
+            .read()
+    }
+}
+
+/// Bu surecin cocuklari **zombi birakmayacak** mi?
+///
+/// Iki yol da ayni sonuca cikiyor ve POSIX ikisini de tanimliyor:
+/// `SIGCHLD`i acikca yok saymak, ya da bir isleyici kurup
+/// `SA_NOCLDWAIT` demek. Birincisi tarihsel, ikincisi acik.
+///
+/// Varsayilan (`SIG_DFL`) bu kumeye **girmiyor**: `SIGCHLD`in
+/// varsayilani da yok saymaktir ama o, sinyali dusurmek demek --
+/// zombiyi degil. Ikisini birbirine karistirmak, hicbir sey yapmayan
+/// her programin `waitpid`ini bozardi.
+pub fn child_autoreap(parent: usize) -> bool {
+    let d = chld_disposition(parent);
+    d.handler == SIG_IGN || d.flags & SA_NOCLDWAIT != 0
+}
+
+/// Bir cocugun durum degisikligini ebeveynine bildirir.
+///
+/// `status`un anlami `code`a bagli: cikista cikis kodu, olumde olduren
+/// sinyal, durmada durduran sinyal. `si_status` alani gercek
+/// `siginfo_t`de `si_value` ile **ayni ofsette** durur (ikisi de ayni
+/// birlesimin ucuncu alani), o yuzden burada da ayni yuvayi
+/// kullaniyorlar.
+pub fn notify_child_event(parent: usize, child: usize, code: i32, status: u32) {
+    if parent >= scheduler::MAX_TASKS || parent == child {
+        return;
+    }
+    // `SA_NOCLDSTOP`: durma ve devam etme bildirimleri bastiriliyor,
+    // olum bildirimi degil. Cogu program bunu ister -- bir cocugun
+    // durmasi is denetimi meselesidir ve onunla yalnizca kabuk
+    // ilgilenir.
+    if matches!(code, CLD_STOPPED | CLD_CONTINUED) {
+        let d = chld_disposition(parent);
+        if d.flags & SA_NOCLDSTOP != 0 {
+            CHILD_SUPPRESSED.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+    }
+
+    let sent = raise_with(
+        parent,
+        SIGCHLD,
+        SigInfo {
+            code,
+            addr: 0,
+            pid: child,
+            value: status as usize,
+        },
+    );
+    if sent.is_ok() {
+        CHILD_SENT.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Kendiliginden toplanan bir cocugu sayar (yalnizca olcum).
+pub fn count_autoreap() {
+    CHILD_REAPED.fetch_add(1, Ordering::Relaxed);
 }
 
 /// POSIX `sigqueue`: sinyali **bir degerle** gonderir.
@@ -1396,6 +1553,7 @@ pub fn name_of(signo: u32) -> &'static str {
         SIGCONT => "SIGCONT",
         SIGSTOP => "SIGSTOP",
         SIGTSTP => "SIGTSTP",
+        SIGCHLD => "SIGCHLD",
         // Gercek-zamanlilarin tek tek adi yok; POSIX onlari zaten
         // `SIGRTMIN+n` diye adlandirir, yani ad bir **sayi ifadesi**.
         _ if rt(signo) => "SIGRT",
@@ -1526,6 +1684,9 @@ pub unsafe fn deliver_pending(frame: &mut SyscallFrame, from_interrupt: bool) {
                 // burada yapacak is yok. Yine de kuyruga girmesi
                 // gerekiyordu: isleyici kurulmussa o calismali.
                 DefaultAction::Continue => continue,
+                // `SIGCHLD`: varsayilan yok saymak. Sinyal teslim
+                // sayilmiyor, cunku hicbir sey olmadi.
+                DefaultAction::Ignore => continue,
             },
             _ => {
                 let depth = DEPTH[task].load(Ordering::SeqCst);

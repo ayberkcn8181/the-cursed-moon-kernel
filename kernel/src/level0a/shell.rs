@@ -912,6 +912,18 @@ fn execute(line: &str) {
             // Senkron alim: `sigtimedwait` ile **okunan** sinyaller.
             // Teslim sayacindan ayri durmasi bilincli -- bunlar hic
             // teslim edilmedi, isleyicileri hic kosmadi.
+            // `SIGCHLD`: cocuk durumunun **itilen** yuzu. Bastirilan
+            // sayaci `SA_NOCLDSTOP`un, toplanan sayaci da `SIG_IGN`in
+            // izi -- ikisi de sessizce calisiyor, o yuzden gorunur
+            // olmalari onemli.
+            let (chld_sent, chld_suppressed, chld_reaped) = signal::child_stats();
+            write_str("SIGCHLD: gonderilen ");
+            write_num(chld_sent as usize);
+            write_str("  bastirilan ");
+            write_num(chld_suppressed as usize);
+            write_str("  kendiliginden toplanan ");
+            write_num(chld_reaped as usize);
+            newline();
             let (sync_taken, sync_timeouts) = signal::sync_stats();
             write_str("senkron alinan: ");
             write_num(sync_taken as usize);

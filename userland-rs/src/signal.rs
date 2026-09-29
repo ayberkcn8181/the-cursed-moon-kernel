@@ -52,6 +52,26 @@ pub const SIGTERM: u32 = 15;
 
 // --- Is denetimi ---
 
+/// Bir **cocuk surecin durumu degisti**: cikti, olduruldu, durdu ya da
+/// devam etti.
+///
+/// Iki ozelligiyle ayri duruyor:
+///
+///   * Varsayilani **yok saymak**. Cocugu olan her surec onu aliyor ve
+///     cogu umursamiyor; varsayilani olum olsaydi `fork` eden her
+///     program cocugu bitince olurdu.
+///   * `si_code` (`CLD_*`) ve `si_status` birlikte, `waitpid`
+///     cagirmadan da cevap veriyor.
+///
+/// Windows'ta karsiligi yok, ve bu bir eksiklik degil -- baska bir
+/// secim:
+///
+/// ```text
+///   POSIX    cocuk oldu  ->  ebeveyne SIGCHLD GONDERILIR   (itme)
+///   Windows  cocuk oldu  ->  surec nesnesi ISARETLENIR     (cekme)
+/// ```
+pub const SIGCHLD: u32 = 17;
+
 /// Durmus bir sureci devam ettirir.
 ///
 /// Iki ozelligi diger sinyallerden ayri: durmus bir surec teslim
@@ -295,6 +315,22 @@ pub const SA_SIGINFO: u32 = 0x0000_0004;
 /// surec tanisiz oler.
 pub const SA_ONSTACK: u32 = 0x0800_0000;
 
+/// Cocuk **durdugunda** `SIGCHLD` gonderilmesin -- yalnizca olumde.
+///
+/// Cogu program bunu ister: bir cocugun durmasi is denetimi
+/// meselesidir ve onunla yalnizca kabuk ilgilenir.
+pub const SA_NOCLDSTOP: u32 = 0x0000_0001;
+
+/// Cocuklar **zombi birakmasin**.
+///
+/// POSIX'in en bilinen tuhafliklarindan biri: `SIGCHLD`i `SIG_IGN`
+/// yapmak "umursamiyorum" demenin otesinde bir sey yapar -- cekirdek
+/// cocuklari kendisi toplar ve `waitpid` artik `ECHILD` doner.
+/// `SA_NOCLDWAIT` ayni etkiyi bir isleyici kuruluyken saglar.
+///
+/// Yani yok saymak burada sinyali degil **kaydi** siliyor.
+pub const SA_NOCLDWAIT: u32 = 0x0000_0002;
+
 /// `ss_flags`: su an o yiginin **ustunde** kosuluyor.
 pub const SS_ONSTACK: u32 = 1;
 /// `ss_flags`: ayri yigini kaldir.
@@ -378,6 +414,22 @@ pub const FPE_INTDIV: i32 = 1;
 /// `SIGILL`: gecersiz islem.
 pub const ILL_ILLOPN: i32 = 2;
 
+// --- `SIGCHLD`in `si_code`lari ---
+//
+// Burada `si_code` bir yan bilgi degil **asil** bilgi: hangi olayin
+// oldugunu yalnizca o soyluyor, ve `si_status`un anlami da ona bagli.
+
+/// Cocuk kendi cikti; `si_status` cikis kodu.
+pub const CLD_EXITED: i32 = 1;
+/// Cocuk bir sinyalle olduruldu; `si_status` o sinyal.
+pub const CLD_KILLED: i32 = 2;
+/// Olum bir cekirdek dokumu birakti (TCMK dokum almiyor).
+pub const CLD_DUMPED: i32 = 3;
+/// Cocuk durdu; `si_status` durduran sinyal.
+pub const CLD_STOPPED: i32 = 5;
+/// Durmus cocuk devam etti.
+pub const CLD_CONTINUED: i32 = 6;
+
 /// `siginfo_t`nin okunan bolumu.
 ///
 /// Gercek `siginfo_t` 128 bayttir ve sonrasi sinyale gore degisen bir
@@ -422,6 +474,17 @@ impl SigInfo {
     /// Gonderenin kimligi (`si_code == SI_USER` ya da `SI_QUEUE`).
     pub fn pid(&self) -> usize {
         self.field & 0xFFFF_FFFF
+    }
+
+    /// `SIGCHLD`in tasidigi durum: cikis kodu, olduren ya da durduran
+    /// sinyal -- hangisi oldugunu `si_code` soyluyor.
+    ///
+    /// `si_value` ile **ayni alani** okuyor ve bu bir kisayol degil:
+    /// gercek `siginfo_t`de ikisi ayni birlesimin ucuncu yuvasidir.
+    /// Ayri bir alan tanimlamak, olmayan bir ayrimi varmis gibi
+    /// gostermek olurdu.
+    pub fn status(&self) -> u32 {
+        self.value() as u32
     }
 
     /// `sigqueue`in tasidigi deger -- yalnizca `si_code == SI_QUEUE`de.

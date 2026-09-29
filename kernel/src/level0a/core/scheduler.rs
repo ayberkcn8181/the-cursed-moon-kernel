@@ -858,6 +858,37 @@ fn reclaim_thread_slot(index: usize, code: u32, signal: u32) -> bool {
     true
 }
 
+/// Bir gorev **cocuk surec** mi (yoksa is parcacigi mi)?
+///
+/// Ayrim `SIGCHLD` icin sart: bir is parcacigi bittiginde ebeveyne
+/// "cocugun oldu" demek yanlis olurdu -- o bir cocuk degil, ayni
+/// surecin bir parcasiydi. Grup lideri olmak, kendi surecin olmak
+/// demek.
+fn is_child_process(index: usize) -> bool {
+    group_of(index) == index
+}
+
+/// Cikan bir cocugun ebeveynine `SIGCHLD` gonderir.
+///
+/// Cikis **kodu** ile olum **sebebi** ayri tutuluyor: `si_code` hangi
+/// olay oldugunu, `si_status` da onun sayisini tasiyor. `waitpid`in
+/// tek kelimede paketledigi bilgi burada iki alana ayriliyor -- ve bu
+/// tesadufi degil, `siginfo_t` zaten "ne oldu" ile "ne kadar"i ayri
+/// sorular sayiyor.
+fn notify_parent_exit(index: usize) {
+    if !is_child_process(index) {
+        return;
+    }
+    let parent = parent_of(index);
+    let signal = exit_signal_of(index);
+    let (code, status) = if signal != 0 {
+        (crate::level0b1::signal::CLD_KILLED, signal)
+    } else {
+        (crate::level0b1::signal::CLD_EXITED, exit_code_of(index))
+    };
+    crate::level0b1::signal::notify_child_event(parent, index, code, status);
+}
+
 /// Calisan gorevi sonlandirir ve bir daha asla ona donmez.
 pub fn terminate_current() -> ! {
     // Tanimlayicilari birak. Boru uclari icin sart: kapanmayan bir yazma
@@ -887,11 +918,27 @@ pub fn terminate_current() -> ! {
         // Kimse beklemeyecekse yuva hemen geri verilir. Beklenebilir
         // olanlar (fork cocuklari) `wait_for_task` toplayana kadar zombi
         // kalir; ebeveyni de oldulerse `reap_orphans` temizler.
+        // `SIGCHLD` yok sayiliyorsa cocuk zombi birakmaz: yuva hemen
+        // geri veriliyor ve `waitpid` artik `ECHILD` donecek. POSIX'in
+        // en bilinen tuhafliklarindan biri ve tek satirda ozeti bu --
+        // yok saymak burada sinyali degil **kaydi** siliyor.
+        if (*tasks.add(current)).waitable
+            && is_child_process(current)
+            && crate::level0b1::signal::child_autoreap(parent_of(current))
+        {
+            (*tasks.add(current)).waitable = false;
+            crate::level0b1::signal::count_autoreap();
+        }
         if !(*tasks.add(current)).waitable {
             release_slot(current);
         }
         reap_orphans();
     });
+
+    // Bildirim kritik bolumun **disinda**: `raise_with` ebeveyni
+    // uyandirabiliyor ve uyandirma kesmeler kapaliyken yapilacak bir
+    // is degil.
+    notify_parent_exit(leaving);
 
     loop {
         yield_now();
@@ -935,6 +982,18 @@ pub fn stop_task(index: usize, signo: u32) -> bool {
             }
         }
     });
+    // Durma da ebeveyne bildirilir -- ama `SA_NOCLDSTOP` ile
+    // bastirilabilir (bkz. `notify_child_event`). Bildirim **yield'dan
+    // once**: kendini durduran bir gorev asagida uykuya daliyor ve
+    // sinyali oradan gonderemezdi.
+    if stopped && is_child_process(index) {
+        crate::level0b1::signal::notify_child_event(
+            parent_of(index),
+            index,
+            crate::level0b1::signal::CLD_STOPPED,
+            signo,
+        );
+    }
     // Kendini durduran gorev burada birakir; `continue_task` geri getirir.
     if stopped && index == CURRENT.load(Ordering::Relaxed) {
         yield_now();
@@ -947,7 +1006,7 @@ pub fn continue_task(index: usize) -> bool {
     if index >= MAX_TASKS {
         return false;
     }
-    crate::arch::cpu::without_interrupts(|| unsafe {
+    let resumed = crate::arch::cpu::without_interrupts(|| unsafe {
         let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
         if (*tasks.add(index)).state != TaskState::Stopped {
             return false;
@@ -966,7 +1025,16 @@ pub fn continue_task(index: usize) -> bool {
         crate::level0b1::nt_subsystem::nt_syscalls::forget_suspend(index);
         wake_child_watchers(index);
         true
-    })
+    });
+    if resumed && is_child_process(index) {
+        crate::level0b1::signal::notify_child_event(
+            parent_of(index),
+            index,
+            crate::level0b1::signal::CLD_CONTINUED,
+            0,
+        );
+    }
+    resumed
 }
 
 /// `waitpid` ile bu gorevi bekleyenleri uyandirir.
@@ -1857,6 +1925,13 @@ pub fn terminate(index: usize) -> Result<(), &'static str> {
                 ) {
                     (*tasks.add(index)).waitable = false;
                 }
+                if (*tasks.add(index)).waitable
+                    && is_child_process(index)
+                    && crate::level0b1::signal::child_autoreap(parent_of(index))
+                {
+                    (*tasks.add(index)).waitable = false;
+                    crate::level0b1::signal::count_autoreap();
+                }
                 if !(*tasks.add(index)).waitable {
                     release_slot(index);
                 }
@@ -1864,6 +1939,14 @@ pub fn terminate(index: usize) -> Result<(), &'static str> {
             }
         }
     })?;
+
+    // Disaridan oldurulen bir cocuk da ebeveynine bildirilir.
+    //
+    // Ilk yazilista yalnizca `terminate_current` bildiriyordu ve sinav
+    // bunu yakaladi: `kill` ile oldurulen cocuk icin **hicbir sinyal
+    // gelmiyordu**. Iki cikis yolu var (kendi cikan ve oldurulen) ve
+    // ikisinin de ayni sozu vermesi gerekiyor.
+    notify_parent_exit(index);
 
     // Gorevin izleri: penceresi ekranda kalirsa artik kimsenin cizmedigi
     // olu bir dikdortgen olur; adres uzayi birakilmazsa cerceveler sizar.

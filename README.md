@@ -28,7 +28,7 @@ masaustu sunuyor.
 | Ikili bicimleri | ELF32/ELF64 · PE32/PE32+ (ithal tablosu cozulur) |
 | POSIX cagrilari | 74 (+ ELF yardimci vektoru, dosya destekli `mmap`, `clone`, `futex`, `SIGPIPE`, `EINTR`/`SA_RESTART`, is denetimi, `SA_SIGINFO`, `sigaltstack`, gercek-zamanli sinyaller, `sigtimedwait`) |
 | NT/Win32 cagrilari | 93 (`KERNEL32.dll` 70 ihracat + `TCMKGUI.dll`) |
-| Ring 3 uygulamalari | 41 ELF + 19 PE (biri yalnizca x86_64) |
+| Ring 3 uygulamalari | 42 ELF + 19 PE (biri yalnizca x86_64) |
 | Kalici depolama | ATA PIO + MBR + TCMKFS (yazilabilir, iki mimari) + takas |
 | Kod | ~30 bin satir cekirdek + ~17 bin satir userland |
 
@@ -60,7 +60,7 @@ artik POSIX yuzunde de **yakalanip duzeltilebiliyor**
 gucte cevap veriyor.
 
 Her yetenek QEMU'da **olculerek** dogrulanmistir: `probe` (16 sinav),
-`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (5), `bigfile` (6), `heap` (5), `swapx` (6), `jobs` (6), `winsusp` (6), `winctx` (7), `sigfault` (7), `winunwind` (7), `altstack` (7), `winnest` (6), `rtsig` (7), `winapc` (7), `sigwait` (7), `winpdata` (7), `bequest`
+`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (5), `bigfile` (6), `heap` (5), `swapx` (6), `jobs` (6), `winsusp` (6), `winctx` (7), `sigfault` (7), `winunwind` (7), `altstack` (7), `winnest` (6), `rtsig` (7), `winapc` (7), `sigwait` (7), `winpdata` (7), `sigchld` (7), `bequest`
 (6), `nested` (4), `winenv` (4) gibi programlar sonucu hem ekrana hem
 seri gunluge yaziyor. Olcumler yol boyunca gercek hatalar buldu -- dolan
 VFS tablosu, `CreateFileA`'nin cevrilmeyen Windows yollari, `GDT`
@@ -6281,8 +6281,10 @@ bir boru hattinda ucunde de ayni sayi gorunur.
   terminalden degil.
 * **Oturum (session) yok.** `setsid` ve oturum lideri kavrami yok;
   `SIGHUP` yayini da yok.
-* **`SIGCHLD` yok.** Ebeveyn cocugunun durum degistirdigini yalnizca
-  `waitpid` ile ogreniyor.
+* ~~**`SIGCHLD` yok.**~~ Geldi -- bkz.
+  [Cocugun durumu](#cocugun-durumu-itilen-bilgi). Ebeveyn artik
+  sormadan ogreniyor; `si_code` ne oldugunu, `si_status` da sayisini
+  tasiyor. `SIG_IGN` zombi birakmiyor.
 * **Durmus gorevin beklemesi kayboluyor.** `SIGSTOP` bir gorevi uyku ya
   da bekleme icindeyken de durduruyor; `SIGCONT` onu `Ready` yapiyor,
   yani eski bekleme sartina donmuyor. Cagiranlarin hepsi dongu icinde
@@ -6698,7 +6700,7 @@ pes edip cikiyor. Ikisi birlikte, bozuk bir cekirdekte sinavin
   gorunur bir hata uretiyor ve yakalanabiliyor.
 * **`si_code` kumesi dar.** `SI_USER`, `SI_KERNEL`, `SEGV_MAPERR`,
   `SEGV_ACCERR`, `FPE_INTDIV`, `ILL_ILLOPN` var; `BUS_*`, `TRAP_*` ve
-  `CLD_*` yok (son kume icin once `SIGCHLD` gerekir, o da yok).
+  `CLD_*` da var (bkz. `SIGCHLD`); `BUS_*` ve `TRAP_*` yok.
 * **Standart sinyalde neden tektir.** `PENDING` bir bit oldugu icin
   ayni standart sinyal iki kez gonderilirse bir kez teslim edilir ve
   neden de tektir. Bu bir eksiklik degil, birlesmenin dogal sonucu --
@@ -7793,6 +7795,142 @@ tasiyor.
   urettigi bir bicim; duzeni farkli olabilir, ve okumaya calismak kod
   adresi yerine cop dondurmek olurdu.
 
+## Cocugun durumu: itilen bilgi
+
+Bu batiya kadar bir ebeveyn, cocugunun durum degistirdigini yalnizca
+`waitpid` cagirarak ogrenebiliyordu. Yani bilgi **cekiliyordu**: ebeveyn
+sormadan hicbir sey ogrenmiyordu, ve sormak da ya bloke oluyordu ya da
+`WNOHANG` ile bir yoklama dongusu gerektiriyordu.
+
+`SIGCHLD` bunu tersine ceviriyor -- bilgi **itiliyor**.
+
+```text
+  POSIX    cocuk oldu  ->  ebeveyne SIGCHLD GONDERILIR   (itme)
+  Windows  cocuk oldu  ->  surec nesnesi ISARETLENIR     (cekme)
+```
+
+Windows'un karsiligi yok ve bu bir eksiklik degil, baska bir secim.
+Orada cocuk oldugunde surec nesnesi isaretlenir ve ebeveyn onu
+`WaitForSingleObject` ile ceker -- yani Win32'de cocuk olumu de
+**randevu**dur, tipki APC gibi (bkz.
+[Kesinti degil, randevu](#kesinti-degil-randevu-apc-kuyruklari)). Ayni
+eksen ucuncu kez karsimiza cikiyor: POSIX itiyor, Windows bekletiyor.
+
+### `SIGCHLD` iki yerde kural disi
+
+**Bir: varsayilani yok saymak.** Cogu sinyalin varsayilani olum; bu ise
+gelmesi beklenen ve cogu programin umursamadigi bir bildirim.
+`DefaultAction`a bu bati ile dorduncu bir sik eklendi (`Ignore`) ve
+gerekcesi somut: varsayilani olum olsaydi `fork` eden **her** program
+cocugu bitince olurdu.
+
+**Iki: `SIG_IGN` yapmak sinyali degil kaydi siliyor.** POSIX'in en
+bilinen tuhafliklarindan biri -- `SIGCHLD`i yok saymak "bu sinyali
+umursamiyorum" demenin otesinde bir sey yapar:
+
+```text
+  SIG_DFL   ->  sinyal dusuruluyor.  Zombi KALIYOR, waitpid calisiyor.
+  SIG_IGN   ->  cekirdek cocuklari KENDISI topluyor.
+                Zombi kalmiyor, waitpid ECHILD doner.
+```
+
+Ikisi de "hicbir sey yapma" gibi gorunuyor ama bambaska seyler yapiyor.
+`SA_NOCLDWAIT` ayni etkiyi bir isleyici kuruluyken saglar.
+
+### `si_status` ile `si_value` ayni yuvada
+
+`SIGCHLD`in tasidigi durum (`si_status`) ile `sigqueue`nun tasidigi
+deger (`si_value`) gercek `siginfo_t`de **ayni ofsette** durur: ikisi de
+`{pid, uid, ucuncu}` birlesiminin ucuncu alani. TCMK'de de ayni yuvayi
+paylasiyorlar -- ayirmak, olmayan bir ayrimi varmis gibi gostermek
+olurdu.
+
+`si_status`un **anlami** ise `si_code`a bagli:
+
+```text
+  CLD_EXITED     si_status = cikis kodu
+  CLD_KILLED     si_status = olduren sinyal
+  CLD_STOPPED    si_status = durduran sinyal
+  CLD_CONTINUED  si_status = 0
+```
+
+`waitpid`in tek bir durum kelimesine paketledigi bilgi burada iki ayri
+alana aciliyor. Ve bu tesadufi degil: `siginfo_t` "ne oldu" ile "ne
+kadar"i bastan beri ayri sorular sayiyor.
+
+### Yedi sinav
+
+`sigchld` (ELF, iki mimari):
+
+```text
+[sigchld] A waitpid'siz geldi:  gecti (cocuk cikti, isleyici waitpid'siz kostu)
+[sigchld] B kim ve nasil:       gecti (si_pid cocuk, CLD_EXITED, si_status 42)
+[sigchld] C sinyalle olum:      gecti (CLD_KILLED ve si_status olduren sinyal)
+[sigchld] D varsayilan yok      gecti (isleyicisiz SIGCHLD sureci oldurmedi)
+          saymak
+[sigchld] E durdu / devam etti: gecti (CLD_STOPPED sonra CLD_CONTINUED)
+[sigchld] F SA_NOCLDSTOP:       gecti (durma bastirildi, olum yine bildirildi)
+[sigchld] G SIG_IGN zombi       gecti (zombi kalmadi, waitpid ECHILD dondu)
+          birakmaz
+```
+
+![sigchld](docs/screenshot-sigchld.png)
+
+A'da cocuk bilerek **toplanmiyor**: olculen sey tam olarak "sormadan
+ogrendim mi". `waitpid` once cagrilsaydi sinyalin hicbir katkisi
+gorunmezdi.
+
+F iki yariyi birlikte olcmek zorunda. Yalnizca "durma gelmedi"
+bakilsaydi, hicbir sey gondermeyen bir cekirdek de gecerdi; o yuzden
+ayni sinavda olum bildiriminin **geldigi** de denetleniyor.
+
+### Dort bozma, ve iki hata
+
+```text
+varsayilan yok saymak degil  ->  D "isleyicisiz SIGCHLD sureci OLDURDU"
+SA_NOCLDSTOP olumu de        ->  F "olum de bildirilmedi: bayrak
+bastiriyor                          fazlasini bastiriyor"
+SIG_IGN toplamiyor           ->  G "cocuk ZOMBI kaldi"
+si_status yazilmiyor         ->  B ve C "si_status ... tasimiyor"
+```
+
+Sinav iki hatayi da kendisi buldu.
+
+**Bir (cekirdekte).** Ilk kosumda C ve F kaldi: `kill` ile oldurulen bir
+cocuk icin **hicbir sinyal gelmiyordu**. Sebep, cikisin iki ayri yolu
+olmasiydi -- `terminate_current` (kendi cikan) ve `terminate`
+(disaridan oldurulen) -- ve bildirim yalnizca birincisine konmustu. Iki
+yolun da ayni sozu vermesi gerekiyor.
+
+**Iki (sinavda).** Varsayilani olum yapan bozmada sinav D'ye varamadan
+sustu. Sebep sinavin kendi kurulumuydu: `SIG_DFL`e donusu **ebeveynde**
+yapiyordu, yani prober cocugunun cikisi ebeveyni olduruyordu. `fork`
+yerlestirmeleri devrettigi icin bunu cocukta yapmak yeterli -- ve
+dogru olan da o, cunku olculen sey cocugun davranisi.
+
+Teshis bir kez daha keskinlestirildi: "cocuk cevap vermedi" ile
+"isleyicisiz SIGCHLD sureci OLDURDU" ayni gozlem degil, ve ilkinde
+sinav neden sustugunu soyleyemiyordu. `waitpid`in durum kelimesinden
+`WIFSIGNALED` okunarak ikisi ayrildi.
+
+### Bilerek yapilmayanlar
+
+* **`si_utime`/`si_stime` yok.** `siginfo_t`nin `_sigchld` yuzu cocugun
+  harcadigi CPU suresini de tasir; TCMK surec basina CPU tikini
+  sayiyor ama onu `siginfo_t`ye kadar getirmiyor.
+* **Bildirimler birlesir.** `SIGCHLD` standart bir sinyal, yani bit
+  maskesinde bekliyor: iki cocuk ard arda cikarsa ebeveyn **bir** kez
+  uyanir ve son kaydi gorur. Gercek Linux de boyle davranir ve cozumu
+  aynidir -- isleyici `waitpid(WNOHANG)` ile dongu kurar. Kuyruklu
+  olmasi icin gercek-zamanli bir sinyal olmasi gerekirdi
+  (bkz. [Birlesen sinyal, kuyruklanan sinyal](#birlesen-sinyal-kuyruklanan-sinyal)).
+* **`CLD_TRAPPED` yok.** Hata ayiklayici tuzagi; `ptrace` olmadan
+  karsiligi yok.
+* **Terminal tarafi hala eksik.** `tcsetpgrp`/`tcgetpgrp`, on plan/arka
+  plan ayrimi, `SIGTTIN`/`SIGTTOU` ve oturum (`setsid`) yok -- onlar
+  paylasilan bir denetim terminali kavrami istiyor ve TCMK'de her GUI
+  surecinin kendi penceresi var.
+
 ## Alfa'nin bilinen sinirlari
 
 Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
@@ -7839,9 +7977,8 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
   `kill(-pgid)`, `waitpid(-pgid)`, `WUNTRACED`/`WCONTINUED` ve
   `SIGSTOP`/`SIGCONT`/`SIGTSTP` calisiyor. Eksik olan **terminal**
   tarafi: `tcsetpgrp`/`tcgetpgrp`, on plan/arka plan ayrimi,
-  `SIGTTIN`/`SIGTTOU` ve oturum (`setsid`) yok. `SIGCHLD` de yok --
-  ebeveyn cocugunun durum degistirdigini yalnizca `waitpid` ile
-  ogreniyor.
+  `SIGTTIN`/`SIGTTOU` ve oturum (`setsid`) yok. `SIGCHLD` bu batiyla
+  geldi (yukari bkz.), yani ebeveyn artik sormadan ogreniyor.
 - **Is-parcacigi yigini sabit 8 KiB**: `dwStackSize` yok sayiliyor.
   Beklemenin iki yolu da artik var (`futex` / `WaitOnAddress`, yukari
   bkz.), ama uzerlerine kurulacak `CRITICAL_SECTION`/`SRWLOCK` katmani

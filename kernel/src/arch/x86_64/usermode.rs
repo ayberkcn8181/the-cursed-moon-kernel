@@ -333,7 +333,14 @@ pub unsafe fn write_siginfo(at: usize, signo: u32, info: &crate::level0b1::signa
     put32(si::SIGNO, signo);
     put32(si::ERRNO, 0);
     put32(si::CODE, info.code as u32);
-    if info.code == crate::level0b1::signal::SI_QUEUE {
+    // Birlesimin `{pid, uid, ucuncu}` yuzu iki ayri musteriye hizmet
+    // ediyor ve ikisi de **ayni ofsetleri** kullaniyor: `sigqueue`nun
+    // `si_value`si ve `SIGCHLD`in `si_status`u. Gercek `siginfo_t`de de
+    // ayni yerde dururlar -- ayirmak, ayni birlesimi iki kez tanimlamak
+    // olurdu.
+    if info.code == crate::level0b1::signal::SI_QUEUE
+        || signo == crate::level0b1::signal::SIGCHLD
+    {
         put32(si::PID, info.pid as u32);
         put32(si::UID, 0);
         ((at + si::VALUE) as *mut u64).write_unaligned(info.value as u64);

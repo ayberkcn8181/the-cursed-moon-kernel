@@ -351,7 +351,14 @@ pub unsafe fn write_siginfo(at: usize, signo: u32, info: &crate::level0b1::signa
     // Birlesim: hata sinyallerinde adres, `kill` ile gelenlerde kimlik,
     // `sigqueue` ile gelenlerde kimlik + deger. Ucu ayni ofsetten
     // basladigi icin **secmek** zorunlu.
-    if info.code == crate::level0b1::signal::SI_QUEUE {
+    // Birlesimin `{pid, uid, ucuncu}` yuzu iki ayri musteriye hizmet
+    // ediyor ve ikisi de **ayni ofsetleri** kullaniyor: `sigqueue`nun
+    // `si_value`si ve `SIGCHLD`in `si_status`u. Gercek `siginfo_t`de de
+    // ayni yerde dururlar -- ayirmak, ayni birlesimi iki kez tanimlamak
+    // olurdu.
+    if info.code == crate::level0b1::signal::SI_QUEUE
+        || signo == crate::level0b1::signal::SIGCHLD
+    {
         put(si::PID, info.pid as u32);
         put(si::UID, 0);
         put(si::VALUE, info.value as u32);
