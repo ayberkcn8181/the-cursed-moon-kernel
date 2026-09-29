@@ -149,6 +149,7 @@ static KNOWN_APPS: &[(&str, &str, &str)] = &[
     ("sigfault", "/bin/sigfault", "sigfault"),
     ("altstack", "/bin/altstack", "altstack"),
     ("rtsig", "/bin/rtsig", "rtsig"),
+    ("sigwait", "/bin/sigwait", "sigwait"),
     // Windows ikilisi: yol .exe ile biter, cekirdek bicimi magic'ten
     // anlar (bkz. vfs::format) ve PE yukleyicisine yonlendirir. Yol iki
     // mimaride de aynidir; VFS'te duran ikilinin PE32 mi PE32+ mi oldugu

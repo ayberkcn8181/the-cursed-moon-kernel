@@ -1181,6 +1181,17 @@ fn wake_expired(count: usize) {
                         task.state = TaskState::Ready;
                     }
                 }
+                TaskState::SigWait => {
+                    // Yalnizca zaman asimi istenmisse. Suresiz sinyal
+                    // bekleyen (`pause`, `sigsuspend`, suresiz
+                    // `sigwaitinfo`) yalnizca bir sinyalle kalkar --
+                    // saatin onu kaldirmasi, beklemeyi sessizce bir
+                    // yoklama dongusune cevirirdi.
+                    if task.wait_timed && now.wrapping_sub(task.wake_tick) < 0x8000_0000 {
+                        task.state = TaskState::Ready;
+                        task.wait_timed = false;
+                    }
+                }
                 TaskState::AddrWait => {
                     // Yalnizca zaman asimi istenmisse; suresiz bekleyeni
                     // ancak `futex::wake` kaldirir.
@@ -1326,11 +1337,25 @@ static SIG_WAITS: AtomicUsize = AtomicUsize::new(0);
 /// Sikisan bir surec `kill` ile kaldirilabilir -- sinyal gonderimi zaten
 /// uyandirma yolunun kendisidir.
 pub fn wait_for_signal(deliverable: impl Fn() -> bool) -> bool {
+    wait_for_signal_until(deliverable, None)
+}
+
+/// `wait_for_signal`in **zaman asimli** bicimi.
+///
+/// `timeout_ticks` verilmisse gorev en fazla o kadar uyur ve kosul hala
+/// saglanmiyorsa `false` doner. `None` ise davranis aynen eskisi gibi:
+/// yalnizca bir sinyal kaldirir.
+///
+/// Ayrim `sigtimedwait` icin gerekti ve iki hal gercekten ayri:
+/// suresiz bekleyen bir gorevi saatin kaldirmasi, beklemeyi sessizce
+/// bir yoklama dongusune cevirirdi (bkz. `wake_expired`).
+pub fn wait_for_signal_until(deliverable: impl Fn() -> bool, timeout_ticks: Option<u32>) -> bool {
     let current = CURRENT.load(Ordering::Relaxed);
     if !can_block(current) {
         // Uyutulamayan baglam (masaustu/kabuk gorevi): yoklamaya dusulur.
         return deliverable();
     }
+    let deadline = timeout_ticks.map(|t| crate::level0a::pit::ticks().wrapping_add(t));
 
     loop {
         let armed = crate::arch::cpu::without_interrupts(|| unsafe {
@@ -1338,28 +1363,47 @@ pub fn wait_for_signal(deliverable: impl Fn() -> bool) -> bool {
                 return false;
             }
             let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+            (*tasks.add(current)).wait_timed = deadline.is_some();
+            if let Some(tick) = deadline {
+                (*tasks.add(current)).wake_tick = tick;
+            }
             (*tasks.add(current)).state = TaskState::SigWait;
             SIG_WAITS.fetch_add(1, Ordering::Relaxed);
             true
         });
         if !armed {
+            clear_sig_wait(current);
             return true;
         }
 
         yield_now();
 
         // Uyandirildik: sinyal geldiyse cikilir, gelmediyse (sahte
-        // uyanma) yeniden uyunur.
+        // uyanma) yeniden uyunur -- sure dolmadiysa.
         if deliverable() {
             break;
         }
+        if let Some(tick) = deadline {
+            if crate::level0a::pit::ticks().wrapping_sub(tick) < 0x8000_0000 {
+                clear_sig_wait(current);
+                return false;
+            }
+        }
     }
 
+    clear_sig_wait(current);
+    true
+}
+
+/// Bekleme yuvasini temizler ve gorevi calisir hale dondurur.
+fn clear_sig_wait(current: usize) {
     crate::arch::cpu::without_interrupts(|| unsafe {
         let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
-        (*tasks.add(current)).state = TaskState::Running;
+        (*tasks.add(current)).wait_timed = false;
+        if (*tasks.add(current)).state == TaskState::SigWait {
+            (*tasks.add(current)).state = TaskState::Running;
+        }
     });
-    true
 }
 
 /// Sinyal bekleyen **tek** bir gorevi uyandirir.

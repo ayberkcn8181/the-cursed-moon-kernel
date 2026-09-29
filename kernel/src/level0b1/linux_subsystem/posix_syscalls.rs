@@ -159,6 +159,8 @@ mod i386_numbers {
     pub const SYS_SIGALTSTACK: u32 = 186;
     /// `rt_sigqueueinfo` -- sinyali **degeriyle** gonderir.
     pub const SYS_SIGQUEUE: u32 = 178;
+    /// `rt_sigtimedwait` -- sinyali **senkron** alir.
+    pub const SYS_SIGTIMEDWAIT: u32 = 177;
     /// i386'da `mmap2` -- eski `mmap`(90) argumanlari bir yapida alirdi.
     pub const SYS_MMAP: u32 = 192;
     pub const SYS_MUNMAP: u32 = 91;
@@ -236,6 +238,8 @@ mod x86_64_numbers {
     pub const SYS_SIGALTSTACK: u32 = 131;
     /// `rt_sigqueueinfo`.
     pub const SYS_SIGQUEUE: u32 = 129;
+    /// `rt_sigtimedwait`.
+    pub const SYS_SIGTIMEDWAIT: u32 = 128;
     pub const SYS_MMAP: u32 = 9;
     pub const SYS_MUNMAP: u32 = 11;
     pub const SYS_GETPRIORITY: u32 = 140;
@@ -498,6 +502,15 @@ fn read_user_mask(addr: usize) -> Option<u64> {
         return None;
     }
     Some(mask_from_words(&words))
+}
+
+/// `siginfo_t` tamponu Ring 3'ten yazilabilir mi?
+///
+/// Kayit 128 bayt, yani en fazla iki sayfaya yayilir; iki ucu gormek
+/// butununu gormek demek.
+fn siginfo_buffer_ok(at: usize) -> bool {
+    let size = crate::arch::cpu::usermode::SIGINFO_SIZE;
+    mmu::is_user_accessible(at) && mmu::is_user_accessible(at + size - 1)
 }
 
 /// Kullanici alanina 64 bitlik bir `sigset_t` yazar.
@@ -1367,6 +1380,14 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
             const KSTAT_SWAP_USED: usize = 14;
             const KSTAT_SWAP_OUT: usize = 15;
             const KSTAT_SWAP_IN: usize = 16;
+            /// Cagiran gorevin **kendi** CPU tiki.
+            ///
+            /// Bir beklemenin gercekten uyku mu yoksa yoklama dongusu mu
+            /// oldugunu Ring 3'ten olcebilmek icin. Kabuk bunu `ps`
+            /// tablosunda zaten gosteriyordu, ama bir sinav programi
+            /// kendi sayacini goremiyordu -- yani "uyudu mu" sorusunu
+            /// ancak bir insan cevaplayabiliyordu.
+            const KSTAT_SELF_CPU: usize = 17;
 
             let value = match arg1 {
                 KSTAT_ADDRESS_WAITS => crate::level0a::core::scheduler::address_waits(),
@@ -1375,6 +1396,9 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
                 KSTAT_THREADS_CREATED => crate::level0b1::thread::created(),
                 KSTAT_TASKS => crate::level0a::core::scheduler::live_task_count(),
                 KSTAT_TASK_SLOTS => crate::level0a::core::scheduler::MAX_TASKS,
+                KSTAT_SELF_CPU => crate::level0a::core::scheduler::cpu_ticks_of(
+                    crate::level0a::core::scheduler::current_id(),
+                ) as usize,
                 // Dosya sistemi sayaclari: bir sinavin "blok sizdi mi"
                 // sorusunu Ring 3'ten cevaplayabilmesi icin. Disk yoksa
                 // ucu de sifir doner.
@@ -2432,6 +2456,66 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
                 Err(signal::SignalError::NoSuchTask) => -ESRCH,
                 Err(signal::SignalError::QueueFull) => -EAGAIN,
                 Err(_) => -EINVAL,
+            }
+        }
+
+        // `sigtimedwait(set, info, timeout_ms)` -- sinyali **bekler**.
+        //
+        // Sinyalin ucuncu yuzu. Ilk ikisi varsayilan davranis ve
+        // isleyiciydi; ikisi de akisi **keser**. Bu cagri sinyali bir
+        // mesaj gibi **okuyor**: isleyici kosmuyor, hicbir sey bolunmuyor.
+        //
+        //   sigaction + teslim  ->  cekirdek CAGIRIR, program bolunur
+        //   sigtimedwait        ->  program OKUR, hicbir sey bolunmez
+        //
+        // Windows'un APC sozlesmesinin POSIX'teki karsiligi bu (bkz.
+        // `nt_subsystem::apc`): teslim ani programin secimi. Fark,
+        // POSIX'te bunun **varsayilan olmamasi** -- sinyal once
+        // engellenmezse isleyiciye gider ve buraya hic ulasmaz.
+        //
+        // Gercek Linux ucuncu argumani `struct timespec*` alir ve NULL
+        // "suresiz" demektir. TCMK'nin zamanlayici cozunurlugu 10 ms
+        // oldugu icin nanosaniye tasimak yaniltici olurdu; `usize::MAX`
+        // suresizi karsiliyor.
+        SYS_SIGTIMEDWAIT => {
+            let task = crate::level0a::core::scheduler::current_id();
+            let Some(set) = read_user_mask(arg1) else {
+                return_errno(frame, -EFAULT);
+                return;
+            };
+            // Cikti tamponu **once** dogrulaniyor: sinyal kuyruktan
+            // cikarildiktan sonra yazamamak onu kaybetmek olurdu.
+            if arg2 != 0 && !siginfo_buffer_ok(arg2) {
+                return_errno(frame, -EFAULT);
+                return;
+            }
+            let timeout = if arg3 == usize::MAX {
+                None
+            } else {
+                // Tik cozunurlugu 10 ms; sifir olmayan her sure en az
+                // bir tik surer, yoksa "1 ms bekle" sessizce "hic
+                // bekleme"ye donerdi.
+                Some(if arg3 == 0 { 0 } else { ((arg3 as u32) / 10).max(1) })
+            };
+            match signal::sigwait(task, set, timeout) {
+                Ok((signo, info)) => {
+                    if arg2 != 0 {
+                        // SAFETY: tampon yukarida dogrulandi.
+                        unsafe {
+                            core::ptr::write_bytes(
+                                arg2 as *mut u8,
+                                0,
+                                crate::arch::cpu::usermode::SIGINFO_SIZE,
+                            );
+                            crate::arch::cpu::usermode::write_siginfo(arg2, signo, &info);
+                        }
+                    }
+                    frame.set_return(signo as usize);
+                    return;
+                }
+                Err(signal::SigWaitError::Timeout) => -EAGAIN,
+                Err(signal::SigWaitError::Interrupted) => -EINTR,
+                Err(signal::SigWaitError::InvalidSet) => -EINVAL,
             }
         }
 

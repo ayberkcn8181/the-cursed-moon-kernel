@@ -734,6 +734,110 @@ pub fn sigqueue(pid: usize, signo: u32, value: usize) -> isize {
     unsafe { sys::syscall3(sys::SYS_SIGQUEUE, pid, signo as usize, value) as isize }
 }
 
+// --- Sinyali beklemek: ucuncu yuz --------------------------------------
+
+/// `sigtimedwait` icin **suresiz** bekleme.
+///
+/// Gercek Linux ucuncu argumani `struct timespec*` alir ve `NULL`
+/// suresiz demektir; TCMK'nin cozunurlugu 10 ms oldugu icin sure
+/// dogrudan milisaniye geciyor ve bu deger `NULL`un yerini tutuyor.
+pub const WAIT_FOREVER: usize = usize::MAX;
+
+/// `sigtimedwait`in yazdigi kaydin tam olcusu.
+///
+/// Gercek `siginfo_t` 128 bayttir ve cekirdek tamponun tamamini
+/// sifirlayip yaziyor. [`SigInfo`] yalnizca **okunan** on kismi
+/// tanimliyor, o yuzden tampon ayrica ayrilmali.
+pub const SIGINFO_SIZE: usize = 128;
+
+/// `siginfo_t` icin hizali bir tampon.
+///
+/// Hizalama bilincli: kaydin icinde 8 baytlik alanlar var (x86_64'te
+/// `si_value`), ve hizasiz bir tampon onlari sayfa siniri yakininda
+/// boler.
+#[repr(C, align(16))]
+pub struct SigInfoBuf([u8; SIGINFO_SIZE]);
+
+impl SigInfoBuf {
+    pub const fn new() -> Self {
+        SigInfoBuf([0; SIGINFO_SIZE])
+    }
+
+    /// Kaydin okunabilir bolumu.
+    ///
+    /// # Safety
+    /// Yalnizca basarili bir `sigtimedwait`ten sonra anlamlidir;
+    /// oncesinde alanlar sifirdir.
+    pub fn info(&self) -> &SigInfo {
+        // SAFETY: `SigInfo` tamponun on ekidir ve tampon 16'ya hizali.
+        unsafe { &*(self.0.as_ptr() as *const SigInfo) }
+    }
+}
+
+impl Default for SigInfoBuf {
+    fn default() -> Self {
+        SigInfoBuf::new()
+    }
+}
+
+/// POSIX `sigtimedwait`: kumedeki bir sinyali **senkron** alir.
+///
+/// ## Sinyalin ucuncu yuzu
+///
+/// Bir sinyalin bir surece yapabilecegi iki sey vardi: varsayilan
+/// davranis (cogunlukla olum) ya da bir **isleyici** -- yani akisi
+/// kesen bir cagri. Bu cagri ucuncusu: sinyali bir **mesaj gibi
+/// okumak**.
+///
+/// ```text
+///   sigaction + teslim  ->  cekirdek CAGIRIR, program bolunur
+///   sigtimedwait        ->  program OKUR, hicbir sey bolunmez
+/// ```
+///
+/// ## Sinyal once ENGELLENMELI
+///
+/// Engellenmezse isleyiciye (ya da varsayilan davranisa) gider ve buraya
+/// hic ulasmaz. Kalip su:
+///
+/// ```ignore
+/// signal::sigprocmask(signal::SIG_BLOCK, signal::mask_of(SIGRTMIN));
+/// loop {
+///     let mut buf = signal::SigInfoBuf::new();
+///     let signo = signal::sigtimedwait(
+///         signal::mask_of(SIGRTMIN), Some(&mut buf), signal::WAIT_FOREVER);
+///     // ... isleyici degil, siradan kod
+/// }
+/// ```
+///
+/// Kazanc buyuk: sinyal isleyicisinin butun yeniden-girilebilirlik
+/// sinirlari ortadan kalkar. Isleyicide `malloc` cagirmak yasaktir,
+/// burada serbesttir -- cunku burasi bir isleyici degil, siradan bir
+/// dongu.
+///
+/// Windows'un APC sozlesmesi de aynidir: teslim ani programin secimi.
+/// Fark, Windows'ta bunun **varsayilan** olmasi; POSIX'te program
+/// varsayilanin disina cikmak icin ozel olarak calisiyor.
+///
+/// Doner: sinyal numarasi, ya da negatif hata --
+/// `-EAGAIN` sure doldu, `-EINTR` kume disi bir sinyal bekleme bolundu.
+pub fn sigtimedwait(set: u64, info: Option<&mut SigInfoBuf>, timeout_ms: usize) -> isize {
+    let mask = SigSet::from_bits(set);
+    let info_ptr = info.map_or(core::ptr::null_mut(), |b| b as *mut SigInfoBuf);
+    unsafe {
+        sys::syscall3(
+            sys::SYS_SIGTIMEDWAIT,
+            &mask as *const SigSet as usize,
+            info_ptr as usize,
+            timeout_ms,
+        ) as isize
+    }
+}
+
+/// `sigtimedwait`in suresiz bicimi (POSIX `sigwaitinfo`).
+pub fn sigwaitinfo(set: u64, info: Option<&mut SigInfoBuf>) -> isize {
+    sigtimedwait(set, info, WAIT_FOREVER)
+}
+
 /// POSIX `alarm`: `seconds` sonra kendine `SIGALRM` gonderir.
 ///
 /// Onceki alarmdan kalan saniyeyi doner; `0` alarmi iptal eder.

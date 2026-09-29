@@ -909,6 +909,15 @@ fn execute(line: &str) {
             // `pause`/`sigsuspend` ile kac kez uyunuldu. Sifirdan buyuk
             // olmasi, sinyal beklemesinin CPU yakmadiginin kanitidir --
             // yoklama dongusu bu sayaci hic artirmaz.
+            // Senkron alim: `sigtimedwait` ile **okunan** sinyaller.
+            // Teslim sayacindan ayri durmasi bilincli -- bunlar hic
+            // teslim edilmedi, isleyicileri hic kosmadi.
+            let (sync_taken, sync_timeouts) = signal::sync_stats();
+            write_str("senkron alinan: ");
+            write_num(sync_taken as usize);
+            write_str("   suresi dolan bekleme: ");
+            write_num(sync_timeouts as usize);
+            newline();
             write_str("sinyal uykusu: ");
             write_num(signal::suspend_count() as usize);
             write_str("   uyutulan gorev: ");

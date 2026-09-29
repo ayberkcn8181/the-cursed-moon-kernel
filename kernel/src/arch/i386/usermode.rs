@@ -238,7 +238,7 @@ pub unsafe fn build_signal_frame(
 // bozardi.
 
 /// `siginfo_t` -- her mimaride 128 bayt.
-const SIGINFO_SIZE: usize = 128;
+pub const SIGINFO_SIZE: usize = 128;
 
 /// `siginfo_t` alan ofsetleri (i386).
 mod si {
@@ -330,6 +330,39 @@ const USER_FLAGS: u32 = 0x0000_0CD5;
 ///
 /// # Safety
 /// `build_signal_frame` ile ayni kosul.
+/// `siginfo_t`nin **govdesini** kullanici alanina yazar.
+///
+/// Iki musterisi var ve ikisi de ayni kaydi istiyor: sinyal teslimi
+/// (isleyicinin ucuncu argumani) ve `sigtimedwait` (cagrinin cikti
+/// tamponu). Ayri yazmak, ayni ABI'nin iki kopyasi demek olurdu -- ve
+/// ikisi ayrisirsa senkron alinan bir sinyalin `si_value`si teslim
+/// edilenden farkli gorunurdu.
+///
+/// Tampon **temizlenmez**: cagiran gerektiginde kendisi sifirlar.
+///
+/// # Safety
+/// `at` en az `SIGINFO_SIZE` bayt yazilabilir olmalidir.
+pub unsafe fn write_siginfo(at: usize, signo: u32, info: &crate::level0b1::signal::SigInfo) {
+    let put = |off: usize, value: u32| ((at + off) as *mut u32).write_unaligned(value);
+
+    put(si::SIGNO, signo);
+    put(si::ERRNO, 0);
+    put(si::CODE, info.code as u32);
+    // Birlesim: hata sinyallerinde adres, `kill` ile gelenlerde kimlik,
+    // `sigqueue` ile gelenlerde kimlik + deger. Ucu ayni ofsetten
+    // basladigi icin **secmek** zorunlu.
+    if info.code == crate::level0b1::signal::SI_QUEUE {
+        put(si::PID, info.pid as u32);
+        put(si::UID, 0);
+        put(si::VALUE, info.value as u32);
+    } else if info.addr != 0 {
+        put(si::ADDR, info.addr as u32);
+    } else {
+        put(si::PID, info.pid as u32);
+        put(si::UID, 0);
+    }
+}
+
 pub unsafe fn build_siginfo_frame(
     context: &mut UserContext,
     stack: usize,
@@ -374,27 +407,10 @@ pub unsafe fn build_siginfo_frame(
     }
 
     core::ptr::write_bytes(siginfo_at as *mut u8, 0, RECORDS);
-    let put = |at: usize, value: u32| (at as *mut u32).write_unaligned(value);
-
-    put(siginfo_at + si::SIGNO, signo);
-    put(siginfo_at + si::ERRNO, 0);
-    put(siginfo_at + si::CODE, info.code as u32);
-    // Birlesim: hata sinyallerinde adres, `kill` ile gelenlerde kimlik.
-    // Ikisi ayni ofsette durdugu icin **secmek** zorunlu.
-    if info.code == crate::level0b1::signal::SI_QUEUE {
-        // `sigqueue` yolu: gonderen + **deger**. Ucu de ayni birlesimin
-        // ardisik alanlari, o yuzden hepsi birlikte yaziliyor.
-        put(siginfo_at + si::PID, info.pid as u32);
-        put(siginfo_at + si::UID, 0);
-        put(siginfo_at + si::VALUE, info.value as u32);
-    } else if info.addr != 0 {
-        put(siginfo_at + si::ADDR, info.addr as u32);
-    } else {
-        put(siginfo_at + si::PID, info.pid as u32);
-        put(siginfo_at + si::UID, 0);
-    }
-
+    write_siginfo(siginfo_at, signo, info);
     write_ucontext(ucontext_at, context, info);
+
+    let put = |at: usize, value: u32| (at as *mut u32).write_unaligned(value);
 
     put(call, restorer as u32);
     put(call + 4, signo);

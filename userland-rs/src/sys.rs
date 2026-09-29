@@ -78,6 +78,8 @@ mod i386_numbers {
     pub const SYS_SIGALTSTACK: usize = 186;
     /// `rt_sigqueueinfo` -- sinyali degeriyle gonderir.
     pub const SYS_SIGQUEUE: usize = 178;
+    /// `rt_sigtimedwait` -- sinyali **senkron** alir.
+    pub const SYS_SIGTIMEDWAIT: usize = 177;
     pub const SYS_MMAP: usize = 192;
     pub const SYS_MUNMAP: usize = 91;
     pub const SYS_GETPRIORITY: usize = 96;
@@ -139,6 +141,8 @@ mod x86_64_numbers {
     pub const SYS_SIGALTSTACK: usize = 131;
     /// `rt_sigqueueinfo`.
     pub const SYS_SIGQUEUE: usize = 129;
+    /// `rt_sigtimedwait`.
+    pub const SYS_SIGTIMEDWAIT: usize = 128;
     pub const SYS_MMAP: usize = 9;
     pub const SYS_MUNMAP: usize = 11;
     pub const SYS_GETPRIORITY: usize = 140;
@@ -1461,6 +1465,8 @@ pub mod kstat {
     pub const SWAP_OUT: usize = 15;
     /// Diskten geri okunan sayfa sayisi.
     pub const SWAP_IN: usize = 16;
+    /// Cagiran gorevin **kendi** CPU tiki.
+    pub const SELF_CPU: usize = 17;
 }
 
 /// Bir cekirdek sayacini okur.
@@ -1481,6 +1487,15 @@ pub fn address_wakes() -> usize {
 /// PIT tik sayaci -- 10 ms cozunurluk.
 pub fn ticks() -> usize {
     kstat(kstat::TICKS)
+}
+
+/// Cagiran gorevin **kendi** CPU tiki.
+///
+/// Bir beklemenin gercekten uyku mu yoksa yoklama dongusu mu oldugunu
+/// programin kendisi olcebilsin diye: uyuyan bir gorev zamanlanmaz,
+/// yani bu sayac artmaz. Kabuk ayni sayiyi `ps` tablosunda gosteriyor.
+pub fn self_cpu_ticks() -> usize {
+    kstat(kstat::SELF_CPU)
 }
 
 /// Su anda **dolu** gorev yuvasi sayisi (zombiler dahil).

@@ -168,6 +168,9 @@ static ALTSTACK_ELF: &[u8] = include_bytes!("../../userland/altstack.elf");
 /// Birlesen sinyal ile kuyruklanan sinyal: gercek-zamanli sinyaller.
 #[cfg(target_arch = "x86")]
 static RTSIG_ELF: &[u8] = include_bytes!("../../userland/rtsig.elf");
+/// Sinyali okumak: sigwaitinfo / sigtimedwait.
+#[cfg(target_arch = "x86")]
+static SIGWAIT_ELF: &[u8] = include_bytes!("../../userland/sigwait.elf");
 /// Sayilan aski: CREATE_SUSPENDED, SuspendThread/ResumeThread.
 #[cfg(target_arch = "x86")]
 static WINSUSP_EXE: &[u8] = include_bytes!("../../userland/winsusp.exe");
@@ -301,6 +304,8 @@ static SIGFAULT64: &[u8] = include_bytes!("../../userland/sigfault.elf64");
 static ALTSTACK64: &[u8] = include_bytes!("../../userland/altstack.elf64");
 #[cfg(target_arch = "x86_64")]
 static RTSIG64: &[u8] = include_bytes!("../../userland/rtsig.elf64");
+#[cfg(target_arch = "x86_64")]
+static SIGWAIT64: &[u8] = include_bytes!("../../userland/sigwait.elf64");
 
 /// **Windows (PE32+) uygulamalari** -- i386'dakilerle ayni kaynak, ayni
 /// ithal kutuphaneleri; degisen yalnizca hedef. Taban 0x140000000
@@ -390,6 +395,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/sigfault", SIGFAULT_ELF),
     ("/bin/altstack", ALTSTACK_ELF),
     ("/bin/rtsig", RTSIG_ELF),
+    ("/bin/sigwait", SIGWAIT_ELF),
     ("/bin/winclock.exe", WINCLOCK_EXE),
     ("/bin/winpad.exe", WINPAD_EXE),
     ("/bin/winfiles.exe", WINFILES_EXE),
@@ -452,6 +458,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/sigfault", SIGFAULT64),
     ("/bin/altstack", ALTSTACK64),
     ("/bin/rtsig", RTSIG64),
+    ("/bin/sigwait", SIGWAIT64),
     ("/bin/winclock.exe", WINCLOCK_EXE64),
     ("/bin/winpad.exe", WINPAD_EXE64),
     ("/bin/winfiles.exe", WINFILES_EXE64),

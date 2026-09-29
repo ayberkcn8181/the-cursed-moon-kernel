@@ -1061,6 +1061,152 @@ fn restore_mask(task: usize) {
 }
 
 /// Kac kez `pause`/`sigsuspend` ile sinyal beklendi.
+// --- `sigtimedwait`: sinyali **beklemek**, yakalamak degil -----------
+
+/// `sigtimedwait`in donmeme sebepleri.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SigWaitError {
+    /// Sure doldu, kumeden sinyal gelmedi (`EAGAIN`).
+    Timeout,
+    /// Kumede olmayan, teslim edilebilir bir sinyal bekliyor (`EINTR`).
+    ///
+    /// POSIX'in kurali: `sigtimedwait` yalnizca **beklenen** sinyali
+    /// dondurur, ama baska bir sinyalin isleyicisi kosacaksa bekleme
+    /// bolunur. Bolmeseydik o isleyici hic kosmazdi -- teslim noktasi
+    /// sistem cagrisinin donusudur ve cagri donmuyor.
+    Interrupted,
+    /// Bos ya da yalnizca engellenemez sinyaller iceren kume.
+    InvalidSet,
+}
+
+/// Kac kez sinyal **senkron** alindi (kabuk raporu).
+static SYNC_TAKEN: AtomicU32 = AtomicU32::new(0);
+/// Kac `sigtimedwait` suresi doldu.
+static SYNC_TIMEOUTS: AtomicU32 = AtomicU32::new(0);
+
+pub fn sync_stats() -> (u32, u32) {
+    (
+        SYNC_TAKEN.load(Ordering::Relaxed),
+        SYNC_TIMEOUTS.load(Ordering::Relaxed),
+    )
+}
+
+/// Bekleyen sinyali **kuyruktan alir** -- isleyici kosturmadan.
+///
+/// `deliver_pending` ile ayni cikarma mantigi, ama sonrasi bambaska:
+/// orada sinyal bir **cagriya** cevriliyor, burada bir **degere**.
+/// Ortak olan yalnizca "hangi yuvadan cikar" sorusu.
+unsafe fn take_pending(task: usize, signo: u32) -> SigInfo {
+    if rt(signo) {
+        match queue_pop(task, signo) {
+            Some(info) => {
+                if !queue_has(task, signo) {
+                    PENDING[task].fetch_and(!(1u64 << signo), Ordering::SeqCst);
+                }
+                info
+            }
+            None => {
+                PENDING[task].fetch_and(!(1u64 << signo), Ordering::SeqCst);
+                SigInfo::from_kernel()
+            }
+        }
+    } else {
+        PENDING[task].fetch_and(!(1u64 << signo), Ordering::SeqCst);
+        (core::ptr::addr_of!(INFO) as *const SigInfo)
+            .add(task * INFO_SLOTS + signo as usize)
+            .read()
+    }
+}
+
+/// POSIX `sigtimedwait`: kumedeki bir sinyali **senkron** alir.
+///
+/// ## Sinyalin ucuncu yuzu
+///
+/// Bir sinyalin bir surece ne yapabilecegi iki seydi: varsayilan
+/// davranis (cogunlukla olum) ya da bir **isleyici** -- yani akisi kesen
+/// bir cagri. Bu cagri ucuncusunu getiriyor: sinyali bir **mesaj gibi
+/// okumak**.
+///
+/// ```text
+///   sigaction + teslim  ->  cekirdek CAGIRIR, program bolunur
+///   sigtimedwait        ->  program OKUR, hicbir sey bolunmez
+/// ```
+///
+/// Bu, Windows'un APC sozlesmesinin POSIX'teki karsiligidir (bkz.
+/// `nt_subsystem::apc`): teslim ani programin secimi. Aradaki fark,
+/// POSIX'te bunun **varsayilan olmamasi** -- program once sinyali
+/// engellemek zorunda. Engellemezse sinyal isleyiciye gider ve buraya
+/// hic ulasmaz.
+///
+/// Gercek programlardaki kalip tam olarak budur: sinyal butun akislarda
+/// engellenir, tek bir akis `sigwaitinfo` dongusunde oturur. Sinyal
+/// isleyicisinin butun yeniden-girilebilirlik sinirlari boylece ortadan
+/// kalkar -- kod sinyali siradan bir dongude isler.
+///
+/// ## Neden `timeout` tik cinsinden
+///
+/// Gercek Linux bir `struct timespec*` alir ve `NULL` "suresiz" demek.
+/// TCMK'nin zamanlayici cozunurlugu 10 ms oldugu icin nanosaniye
+/// tasimak yaniltici olurdu; `None` suresizi karsiliyor.
+pub fn sigwait(
+    task: usize,
+    set: u64,
+    timeout_ticks: Option<u32>,
+) -> Result<(u32, SigInfo), SigWaitError> {
+    if task >= scheduler::MAX_TASKS {
+        return Err(SigWaitError::InvalidSet);
+    }
+    // `SIGKILL`/`SIGSTOP` beklenemez. Beklenebilseydi bir surec onlari
+    // **tuketerek** kendini oldurulemez yapardi -- maskeye alinamama
+    // kuraliyla ayni gerekce, ayni delik.
+    let set = set & !UNBLOCKABLE & !1;
+    if set == 0 {
+        return Err(SigWaitError::InvalidSet);
+    }
+
+    loop {
+        // Kumeden bekleyen var mi? Engel maskesine **bakilmiyor**: asil
+        // kullanim zaten sinyali engelleyip burada beklemek.
+        let ready = PENDING[task].load(Ordering::SeqCst) & set;
+        if ready != 0 {
+            let signo = ready.trailing_zeros();
+            // SAFETY: gorevin kendi yuvasi; cagiran Ring 3'ten geliyor.
+            let info = unsafe { take_pending(task, signo) };
+            SYNC_TAKEN.fetch_add(1, Ordering::Relaxed);
+            return Ok((signo, info));
+        }
+
+        // Kumede olmayan ama **teslim edilecek** bir sinyal varsa bekleme
+        // bolunur: aksi halde o isleyici hic kosmazdi.
+        if interrupts_call(task) {
+            return Err(SigWaitError::Interrupted);
+        }
+
+        // Yoklama bicimi (`timeout == 0`): uyumadan hemen doner.
+        if timeout_ticks == Some(0) {
+            SYNC_TIMEOUTS.fetch_add(1, Ordering::Relaxed);
+            return Err(SigWaitError::Timeout);
+        }
+
+        let woke = scheduler::wait_for_signal_until(
+            || {
+                PENDING[task].load(Ordering::SeqCst) & set != 0
+                    || interrupts_call(task)
+            },
+            timeout_ticks,
+        );
+        if !woke {
+            SYNC_TIMEOUTS.fetch_add(1, Ordering::Relaxed);
+            return Err(SigWaitError::Timeout);
+        }
+        // Uyandik ama kosul bir yarista kaybolmus olabilir: dongu
+        // bastan bakiyor. Zaman asimi olan bicimde sure yeniden
+        // baslamiyor, cunku `wait_for_signal_until` kendi son tarihini
+        // her cagrida yeniden hesapliyor -- bu bilincli bir
+        // sadelestirme ve README'de yazili.
+    }
+}
+
 pub fn suspend_count() -> u32 {
     SUSPENDS.load(Ordering::Relaxed)
 }

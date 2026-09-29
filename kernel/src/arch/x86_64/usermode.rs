@@ -235,7 +235,7 @@ pub unsafe fn build_signal_frame(
 // 8'e hizalandigi icin arada bir dolgu var, ve `ucontext_t` registerlari
 // bir dizide (`gregs`) tutuyor.
 
-const SIGINFO_SIZE: usize = 128;
+pub const SIGINFO_SIZE: usize = 128;
 
 /// `siginfo_t` alan ofsetleri (x86_64).
 mod si {
@@ -317,6 +317,34 @@ const USER_FLAGS: u64 = 0x0000_0CD5;
 ///
 /// # Safety
 /// `build_signal_frame` ile ayni kosul.
+/// `siginfo_t`nin **govdesini** kullanici alanina yazar.
+///
+/// Iki musterisi var ve ikisi de ayni kaydi istiyor: sinyal teslimi
+/// (isleyicinin ucuncu argumani) ve `sigtimedwait` (cagrinin cikti
+/// tamponu). Ayri yazmak, ayni ABI'nin iki kopyasi demek olurdu.
+///
+/// Tampon **temizlenmez**: cagiran gerektiginde kendisi sifirlar.
+///
+/// # Safety
+/// `at` en az `SIGINFO_SIZE` bayt yazilabilir olmalidir.
+pub unsafe fn write_siginfo(at: usize, signo: u32, info: &crate::level0b1::signal::SigInfo) {
+    let put32 = |off: usize, value: u32| ((at + off) as *mut u32).write_unaligned(value);
+
+    put32(si::SIGNO, signo);
+    put32(si::ERRNO, 0);
+    put32(si::CODE, info.code as u32);
+    if info.code == crate::level0b1::signal::SI_QUEUE {
+        put32(si::PID, info.pid as u32);
+        put32(si::UID, 0);
+        ((at + si::VALUE) as *mut u64).write_unaligned(info.value as u64);
+    } else if info.addr != 0 {
+        ((at + si::ADDR) as *mut u64).write_unaligned(info.addr as u64);
+    } else {
+        put32(si::PID, info.pid as u32);
+        put32(si::UID, 0);
+    }
+}
+
 pub unsafe fn build_siginfo_frame(
     context: &mut UserContext,
     stack: usize,
@@ -358,23 +386,7 @@ pub unsafe fn build_siginfo_frame(
     }
 
     core::ptr::write_bytes(siginfo_at as *mut u8, 0, RECORDS);
-    let put32 = |at: usize, value: u32| (at as *mut u32).write_unaligned(value);
-
-    put32(siginfo_at + si::SIGNO, signo);
-    put32(siginfo_at + si::ERRNO, 0);
-    put32(siginfo_at + si::CODE, info.code as u32);
-    if info.code == crate::level0b1::signal::SI_QUEUE {
-        // `sigqueue` yolu: gonderen + **deger**.
-        put32(siginfo_at + si::PID, info.pid as u32);
-        put32(siginfo_at + si::UID, 0);
-        ((siginfo_at + si::VALUE) as *mut u64).write_unaligned(info.value as u64);
-    } else if info.addr != 0 {
-        ((siginfo_at + si::ADDR) as *mut u64).write_unaligned(info.addr as u64);
-    } else {
-        put32(siginfo_at + si::PID, info.pid as u32);
-        put32(siginfo_at + si::UID, 0);
-    }
-
+    write_siginfo(siginfo_at, signo, info);
     write_ucontext(ucontext_at, context, info);
 
     (call as *mut u64).write_unaligned(restorer as u64);

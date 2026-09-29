@@ -26,9 +26,9 @@ masaustu sunuyor.
 |---|---|
 | Mimariler | i386 (Multiboot1, `int 0x80`) · x86_64 (Multiboot2, `syscall`) |
 | Ikili bicimleri | ELF32/ELF64 · PE32/PE32+ (ithal tablosu cozulur) |
-| POSIX cagrilari | 73 (+ ELF yardimci vektoru, dosya destekli `mmap`, `clone`, `futex`, `SIGPIPE`, `EINTR`/`SA_RESTART`, is denetimi, `SA_SIGINFO`, `sigaltstack`, gercek-zamanli sinyaller) |
+| POSIX cagrilari | 74 (+ ELF yardimci vektoru, dosya destekli `mmap`, `clone`, `futex`, `SIGPIPE`, `EINTR`/`SA_RESTART`, is denetimi, `SA_SIGINFO`, `sigaltstack`, gercek-zamanli sinyaller, `sigtimedwait`) |
 | NT/Win32 cagrilari | 90 (`KERNEL32.dll` 67 ihracat + `TCMKGUI.dll`) |
-| Ring 3 uygulamalari | 40 ELF + 18 PE |
+| Ring 3 uygulamalari | 41 ELF + 18 PE |
 | Kalici depolama | ATA PIO + MBR + TCMKFS (yazilabilir, iki mimari) + takas |
 | Kod | ~30 bin satir cekirdek + ~17 bin satir userland |
 
@@ -60,7 +60,7 @@ artik POSIX yuzunde de **yakalanip duzeltilebiliyor**
 gucte cevap veriyor.
 
 Her yetenek QEMU'da **olculerek** dogrulanmistir: `probe` (16 sinav),
-`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (5), `bigfile` (6), `heap` (5), `swapx` (6), `jobs` (6), `winsusp` (6), `winctx` (7), `sigfault` (7), `winunwind` (7), `altstack` (7), `winnest` (6), `rtsig` (7), `winapc` (7), `bequest`
+`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (5), `bigfile` (6), `heap` (5), `swapx` (6), `jobs` (6), `winsusp` (6), `winctx` (7), `sigfault` (7), `winunwind` (7), `altstack` (7), `winnest` (6), `rtsig` (7), `winapc` (7), `sigwait` (7), `bequest`
 (6), `nested` (4), `winenv` (4) gibi programlar sonucu hem ekrana hem
 seri gunluge yaziyor. Olcumler yol boyunca gercek hatalar buldu -- dolan
 VFS tablosu, `CreateFileA`'nin cevrilmeyen Windows yollari, `GDT`
@@ -7255,9 +7255,10 @@ ayni degil.
 
 ### Bilerek yapilmayanlar
 
-* **`sigwaitinfo`/`sigtimedwait` yok.** Kuyruktan **senkron** okuma yuzu.
-  Teslim yalnizca isleyici uzerinden oluyor; bir surec kuyrugu bekleyip
-  kendisi cekemiyor.
+* ~~**`sigwaitinfo`/`sigtimedwait` yok.**~~ Geldi -- bkz.
+  [Sinyali okumak](#sinyali-okumak-kesintinin-ucuncu-yuzu). Bir surec
+  artik kuyrugu bekleyip sinyali kendisi cekebiliyor; isleyici hic
+  kosmuyor.
 * **`si_uid` her zaman 0.** TCMK'de kullanici kimligi yok.
 * **`rt_sigqueueinfo` tam `siginfo_t` almiyor.** Cagri yalnizca
   **degeri** aliyor; kaydin geri kalanini cekirdek dolduruyor. Gercek
@@ -7479,6 +7480,145 @@ adrese dus".
   yok, yani APC'nin bu ilk musterisi de yok; `QueueUserAPC` uzerinden
   gelen kullanimi var.
 
+## Sinyali okumak: kesintinin ucuncu yuzu
+
+Bir onceki bati Windows'un APC kuyruklarini getirdi ve su ayrimla bitti:
+
+```text
+  sinyal ->  kesinti. "su an bolunebilirsin" VARSAYILAN.
+  APC    ->  randevu. "su an bolunebilirsin" ozel olarak SOYLENIR.
+```
+
+Orada yarim kalan bir soru vardi: POSIX'te randevu yuzu **yok mu**? Var.
+Adi `sigwaitinfo` ve bu bati onu getiriyor.
+
+### Sinyalin uc yuzu
+
+Simdiye kadar bir sinyalin bir surece yapabilecegi iki sey vardi:
+
+```text
+  1. varsayilan davranis  ->  cogunlukla olum
+  2. isleyici             ->  cekirdek CAGIRIR, akis bolunur
+  3. sigwaitinfo          ->  program OKUR, hicbir sey bolunmez
+```
+
+Ucuncusu sinyali bir **mesaja** cevirir. Fark akademik degil: isleyici
+yolunda kod "ne zaman kosacagimi bilmiyorum" durumundadir ve bu yuzden
+ne yapabilecegi sinirlidir -- POSIX'in async-signal-safe listesi budur
+ve `malloc` o listede **degildir**. `sigwaitinfo` yolunda kod siradan
+bir dongudur; orada `malloc` cagirmak serbesttir, cunku orasi bir
+isleyici degil.
+
+### Sart: sinyal once ENGELLENMELI
+
+Engellenmezse sinyal isleyiciye (ya da varsayilan davranisa) gider ve
+`sigwaitinfo`ya hic ulasmaz. Gercek programlardaki kalip tam olarak
+budur:
+
+```c
+sigprocmask(SIG_BLOCK, &set, NULL);   // butun akislarda engelle
+for (;;) {
+    int sig = sigwaitinfo(&set, &info);   // tek akis burada oturur
+    ...                                    // isleyici degil, siradan kod
+}
+```
+
+Iste POSIX ile Windows'un asil ayrimi burada gorunuyor: **ikisinde de
+randevu yuzu var, ama varsayilan ters.**
+
+```text
+  POSIX    varsayilan kesinti. Randevu icin program OZEL OLARAK calisir
+           (once engelle, sonra bekle).
+  Windows  varsayilan randevu. Kesinti yuzu yok -- APC baska turlu
+           teslim edilemez.
+```
+
+### Yedi sinav
+
+`sigwait` (ELF, iki mimari):
+
+```text
+[sigwait] A isleyici KOSMADI:   gecti (sinyal alindi, isleyici hic kosmadi)
+[sigwait] B deger + si_code:    gecti (si_value ve si_code senkron yolda da dogru)
+[sigwait] C kuyruk sirasi:      gecti (11-22-33 gonderildi, 11-22-33 okundu)
+[sigwait] D zaman asimi:        gecti (EAGAIN dondu, sure doldu, CPU yakilmadi)
+[sigwait] E kume disi:          gecti (alinmadi ve kuyrukta kaldi)
+[sigwait] F bekleyip uyaniyor:  gecti (bekleme sirasinda gelen sinyal alindi)
+[sigwait] G tuketiliyor:        gecti (alinan sinyal kuyruktan dustu)
+```
+
+![sigwait](docs/screenshot-sigwait.png)
+
+A bu sinavin sebebi ve olcusu ters yonden bakiyor: isleyici
+**kuruluyor** ve kosmamasi gerekiyor. Kurmamak sinavi zayiflatirdi --
+isleyicisiz bir sinyalin kosmamasi zaten kesin. Asil soru, isleyicisi
+**olan** bir sinyalin senkron alindiginda isleyiciye hic ugramamasi.
+
+E ile G ayni tuzagi iki yerde kapatiyor. E'de "kume disi sinyal
+alinmadi" tek basina yetmez: sinyal sessizce **atilmis** da olabilirdi.
+Bu yuzden hemen ardindan o sinyal kendi kumesiyle isteniyor ve degeriyle
+birlikte geliyor. G'de ise tersi olculuyor -- alinan sinyalin
+kuyruktan gercekten **dustugu**; dusmeseydi ayni sinyal sonsuza kadar
+okunabilir ve `sigwaitinfo` dongusu hic bloke olmazdi.
+
+D'nin ikinci yarisi ayri bir sey olcuyor: zaman asimi bir yoklama
+dongusuyle de "calisir" gorunurdu. Olcu, gorevin **kendi CPU tikinin**
+bekleme boyunca artmamasi. Bunun icin cekirdege kucuk bir sayac
+eklendi (`kstat::SELF_CPU`): kabuk `ps` tablosunda ayni sayiyi zaten
+gosteriyordu, ama bir sinav programi kendi sayacini goremiyordu -- yani
+"uyudu mu" sorusunu ancak bir insan cevaplayabiliyordu.
+
+### Dort bozma
+
+```text
+kume yok sayiliyor        ->  E "kume disi sinyal ALINDI: maske
+                                 yok sayiliyor"  (yalnizca E)
+sinyal tuketilmiyor       ->  B, C, D, E, F, G kaldi;
+                              G "ayni sinyal YENIDEN okundu"
+engel maskesi yok         ->  A "isleyici KOSTU: sinyal okunmadi,
+sayiliyor                       teslim edildi"  (+ B, C, E, G)
+zamanli bekleme           ->  D "cocuk cevap vermedi: bekleme
+hic uyanmiyor                   ASILI KALDI"  (yalnizca D)
+```
+
+### Sinavin kendisi iki kez duzeltildi
+
+Ikisi de ayni kuraldan: **bir sinav susmamali.**
+
+**Bir:** A ve C once `sigwaitinfo`nun suresiz bicimini kullaniyordu. Ucuncu
+bozmada (engel maskesi yok sayiliyor) sinyal isleyiciye gidiyor, kuyrukta
+hicbir sey kalmiyor ve suresiz bekleme sonsuza kadar asili kaliyordu --
+sinav **hicbir sey yazmadan** oluyordu. Ikisi de sinirli bicime cevrildi;
+simdi ayni bozmada A "isleyici KOSTU" diyor. Ayni gerekceyle E ve G
+yoklama bicimine (`timeout = 0`) gecti: ikisi de zamanlamayi degil kume
+uyeligini ve tuketimi olcuyor, yani uyuyan bir bicime bagli olmalari
+gereksiz bir kirilganlikti.
+
+**Iki:** sinav sonuclari yalnizca **sonda** yaziliyordu. Dorduncu bozmada
+(zamanli bekleme hic uyanmiyor) cikti yine bos kaldi ve nerede takildigi
+gorunmedi. Artik her sinav hesaplandigi anda yaziliyor; ayni bozmada
+sirayla A, B, C geciyor ve D'de "bekleme ASILI KALDI" goruluyor. Zaman
+asimini olcen tek sinav (D) ayrica cocuk surecte kosuyor, cikis kodunda
+bir isaretci bitiyle -- cocuk hic cevap veremezse bu "her sey basarisiz"
+ile karismasin diye.
+
+### Bilerek yapilmayanlar
+
+* **`sigwait(3)` yok.** POSIX'in uc yuzu var: `sigwait` (yalnizca
+  numara), `sigwaitinfo` (numara + `siginfo_t`) ve `sigtimedwait`
+  (ayrica sure). TCMK yalnizca sonuncusunu tasiyor; digerleri onun
+  ustune kullanici tarafinda kuruluyor -- libc'de de iliski budur.
+* **Zaman `struct timespec` degil, milisaniye.** Gercek `rt_sigtimedwait`
+  bir `timespec*` alir ve `NULL` suresizi gosterir. TCMK'nin zamanlayici
+  cozunurlugu 10 ms oldugu icin nanosaniye tasimak yaniltici olurdu;
+  `usize::MAX` `NULL`un yerini tutuyor.
+* **Sahte uyanmada sure yeniden basliyor.** Bekleme bir yaris yuzunden
+  bosuna uyanirsa (baska bir akis ayni sinyali kapti) dongu bastan
+  bakiyor ve zaman asimi sifirdan sayiliyor. Tek akisli kullanimda bu
+  hal olusmuyor.
+* **`si_overrun` yok.** POSIX zamanlayicilarinin (`timer_create`) kacan
+  atis sayisini tasiyan alan; TCMK'de o zamanlayicilar yok.
+
 ## Alfa'nin bilinen sinirlari
 
 Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
@@ -7518,9 +7658,8 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
   saf hesap dongusu sinyali gormez (`spin` boyle); `SIGKILL` ise
   isbirligi gerektirmedigi icin her zaman calisir. Maskeleme
   (`sigprocmask`), `alarm`, `sigsuspend`, `SA_RESTART`, `SA_SIGINFO`,
-  `sigaltstack` ve gercek-zamanli (kuyruklu) sinyaller var; maske 64
-  bit. Eksik olan `sigwait`/`sigtimedwait` -- yani kuyrugu **senkron**
-  okuma yuzu. `SIGSTOP` ve `SIGKILL` yakalanamaz ve maskelenemez
+  `sigaltstack`, gercek-zamanli (kuyruklu) sinyaller ve `sigtimedwait`
+  var; maske 64 bit. `SIGSTOP` ve `SIGKILL` yakalanamaz ve maskelenemez
   (yukari bkz.).
 - ~~**Surec gruplari yok**~~ -- var (yukari bkz.): `setpgid`/`getpgid`,
   `kill(-pgid)`, `waitpid(-pgid)`, `WUNTRACED`/`WCONTINUED` ve
