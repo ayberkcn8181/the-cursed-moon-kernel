@@ -11,6 +11,9 @@ pub mod mapping;
 /// Modul tablosu: GetModuleHandleA / GetProcAddress / LoadLibraryA.
 pub mod modules;
 pub mod nt_syscalls;
+/// x86_64 tablo tabanli SEH: islev tablolari ve `UNWIND_INFO`.
+#[cfg(target_arch = "x86_64")]
+pub mod pdata;
 /// Windows istisna dagitimi (SEH zinciri + vektorlu isleyiciler).
 pub mod seh;
 pub mod teb;

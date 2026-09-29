@@ -33,6 +33,9 @@ use crate::level0a::kernel_api::{self, KernelError};
 use crate::level0a::{gui_api, wm};
 
 use super::apc;
+#[cfg(target_arch = "x86_64")]
+use super::pdata;
+
 use super::mapping;
 use super::modules;
 use super::seh;
@@ -103,6 +106,12 @@ pub const NT_SLEEP_EX: u32 = 0x3049;
 pub const NT_WAIT_FOR_SINGLE_OBJECT_EX: u32 = 0x304A;
 /// APC yordami dondu; tramplen buradan cekirdege giriyor.
 pub const NT_CONTINUE_APC: u32 = 0x304B;
+/// `RtlAddFunctionTable(FunctionTable, EntryCount, BaseAddress)`.
+pub const NT_RTL_ADD_FUNCTION_TABLE: u32 = 0x304C;
+/// `RtlDeleteFunctionTable(FunctionTable)`.
+pub const NT_RTL_DELETE_FUNCTION_TABLE: u32 = 0x304D;
+/// `RtlLookupFunctionEntry(ControlPc, *ImageBase, HistoryTable)`.
+pub const NT_RTL_LOOKUP_FUNCTION_ENTRY: u32 = 0x304E;
 pub const NT_SLEEP_MS: u32 = 0x3001;
 pub const NT_GET_TICK_COUNT: u32 = 0x3002;
 pub const NT_WIN32_CLOSE_HANDLE: u32 = 0x3003;
@@ -455,6 +464,13 @@ const WAIT_FAILED: usize = 0xFFFF_FFFF;
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 /// Cagriya verilen parametre gecersiz (bos ad, okunamayan isaretci).
 const ERROR_INVALID_PARAMETER: u32 = 87;
+
+/// Bu cagri bu mimaride yok.
+///
+/// Windows'un kendi kodu: bir API yalnizca bazi yapilarda varsa
+/// digerlerinde bunu doner. `RtlAddFunctionTable` ailesi 32-bit'te
+/// boyledir -- orada SEH zincir tabanlidir ve tabloya gerek yoktur.
+const ERROR_CALL_NOT_IMPLEMENTED: u32 = 120;
 /// `ReadFile` bloke olmayan bos bir boruda bunu birakir. POSIX ikizi
 /// `EAGAIN`; ikisi de "simdilik yok, sonra tekrar dene" demek -- dosya
 /// sonu **degil**.
@@ -985,6 +1001,95 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
                         WIN32_FALSE
                     }
                 },
+            }
+        }
+
+        // --- x86_64 tablo tabanli SEH ---
+        //
+        // Uc cagri da gercek Win32'de **yalnizca 64-bit'te** vardir:
+        // 32-bit'te SEH zincir tabanlidir ve tabloya gerek yoktur.
+        // TCMK ihracat listesini iki mimari icin tek tuttugu icin
+        // (ordinaller kaymasin diye, bkz. `dll::Export`) adlar 32-bit'te
+        // de gorunuyor; orada cagrilar acikca **FALSE** donuyor.
+        // Sessizce basarili donmek, bir tablonun kaydedildigi
+        // izlenimini verirdi.
+        NT_RTL_ADD_FUNCTION_TABLE => {
+            #[cfg(target_arch = "x86_64")]
+            {
+                let table = arg_ptr(args, 0).unwrap_or(0);
+                let count = arg(args, 1).unwrap_or(0) as usize;
+                let base = arg_ptr(args, 2).unwrap_or(0);
+                let task = crate::level0a::core::scheduler::current_id();
+                if pdata::add_table(task, table, count, base) {
+                    WIN32_TRUE
+                } else {
+                    set_last_error(ERROR_INVALID_PARAMETER);
+                    WIN32_FALSE
+                }
+            }
+            #[cfg(target_arch = "x86")]
+            {
+                set_last_error(ERROR_CALL_NOT_IMPLEMENTED);
+                WIN32_FALSE
+            }
+        }
+
+        NT_RTL_DELETE_FUNCTION_TABLE => {
+            #[cfg(target_arch = "x86_64")]
+            {
+                let table = arg_ptr(args, 0).unwrap_or(0);
+                let task = crate::level0a::core::scheduler::current_id();
+                if pdata::delete_table(task, table) {
+                    WIN32_TRUE
+                } else {
+                    set_last_error(ERROR_INVALID_PARAMETER);
+                    WIN32_FALSE
+                }
+            }
+            #[cfg(target_arch = "x86")]
+            {
+                set_last_error(ERROR_CALL_NOT_IMPLEMENTED);
+                WIN32_FALSE
+            }
+        }
+
+        // `RtlLookupFunctionEntry` bir **isaretci** doner: hata adresini
+        // iceren `RUNTIME_FUNCTION`un kendi adresi, kopyasi degil.
+        // `ImageBase` cikti parametresiyle geliyor, cunku RVA'lari
+        // cozebilmek icin cagiranin ona da ihtiyaci var.
+        NT_RTL_LOOKUP_FUNCTION_ENTRY => {
+            #[cfg(target_arch = "x86_64")]
+            {
+                let pc = arg_ptr(args, 0).unwrap_or(0);
+                let out_base = arg_ptr(args, 1).unwrap_or(0);
+                let task = crate::level0a::core::scheduler::current_id();
+                match pdata::lookup(task, pc) {
+                    Some((entry_at, _, base)) => {
+                        if out_base != 0 {
+                            if !mmu::is_user_accessible(out_base)
+                                || !mmu::is_user_accessible(out_base + 7)
+                            {
+                                set_last_error(ERROR_INVALID_PARAMETER);
+                                0
+                            } else {
+                                // SAFETY: isaretci yukarida dogrulandi.
+                                unsafe { (out_base as *mut u64).write_unaligned(base as u64) };
+                                entry_at
+                            }
+                        } else {
+                            entry_at
+                        }
+                    }
+                    // Windows da bulunamayinca NULL doner; bu bir hata
+                    // degil, "bu adres bir tabloya ait degil" demek --
+                    // yaprak fonksiyonlarda normaldir.
+                    None => 0,
+                }
+            }
+            #[cfg(target_arch = "x86")]
+            {
+                set_last_error(ERROR_CALL_NOT_IMPLEMENTED);
+                0
             }
         }
 

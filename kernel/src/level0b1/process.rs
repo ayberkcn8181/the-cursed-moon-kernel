@@ -659,6 +659,11 @@ unsafe fn enter_ring3(
     // adres uzayina aitti. Yeni imajda o adres baska bir seyin olabilir,
     // yani devralmak kontrolsuz bir dallanma demek olurdu.
     crate::level0b1::nt_subsystem::apc::reset(scheduler::current_id());
+    // Islev tablolari da: kayitlar eski imajin adres uzayinda duruyordu
+    // ve icindeki RVA'lar eski goruntu tabanina goreliydi. Devralmak,
+    // yeni imajda rastgele bir adresi "isleyici" saymak olurdu.
+    #[cfg(target_arch = "x86_64")]
+    crate::level0b1::nt_subsystem::pdata::reset(scheduler::current_id());
     // Esleme nesneleri ve gorunumleri de surece ait: yeni imaj eskinin
     // taniticilarini devralamaz.
     crate::level0b1::nt_subsystem::mapping::reset(scheduler::current_id());

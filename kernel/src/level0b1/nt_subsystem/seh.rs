@@ -54,6 +54,8 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use crate::arch::cpu::regs::UserContext;
 use crate::level0a::core::{mmu, scheduler};
 
+#[cfg(target_arch = "x86_64")]
+use super::pdata;
 use super::teb;
 
 // --- Windows istisna kodlari (ntstatus.h) -----------------------------
@@ -162,7 +164,15 @@ mod sizes {
     pub const RECORD: usize = 0x98;
     /// `CONTEXT` (x64): 1232 bayt.
     pub const CONTEXT: usize = 0x4D0;
-    pub const FRAME: usize = RECORD + CONTEXT + 0x100;
+    /// `DISPATCHER_CONTEXT`: yalnizca x64'te var ve **kayittir**.
+    ///
+    /// i386'da isleyicinin dorduncu argumani cekirdege aitti ve TCMK
+    /// sifir geciyordu. x64'te tablo tabanli cozumun kendisi oradan
+    /// okunuyor: goruntu tabani, fonksiyonun `RUNTIME_FUNCTION`u ve dil
+    /// verisi. Bos gecmek, MSVC'nin urettigi bir isleyiciyi ilk
+    /// adiminda cop okumaya gondermek olurdu.
+    pub const DISPATCHER: usize = super::pdata::DISPATCHER_SIZE;
+    pub const FRAME: usize = RECORD + CONTEXT + DISPATCHER + 0x100;
 }
 
 // --- EXCEPTION_RECORD alan ofsetleri ----------------------------------
@@ -357,7 +367,8 @@ static CONTEXT_AT: [AtomicUsize; scheduler::MAX_TASKS] =
 static POINTERS_AT: [AtomicUsize; scheduler::MAX_TASKS] =
     [const { AtomicUsize::new(0) }; scheduler::MAX_TASKS];
 
-/// Yurumede kalinan yer: once vektorlu liste, sonra (i386'da) zincir.
+/// Yurumede kalinan yer: once vektorlu liste, sonra zincir (i386) ya da
+/// islev tablosu (x86_64).
 const PHASE_VECTORED: usize = 0;
 const PHASE_CHAIN: usize = 1;
 /// Sahipsiz istisna filtresi calisiyor.
@@ -756,7 +767,21 @@ unsafe fn advance(task: usize, base: usize) -> Option<UserContext> {
         }
     }
 
-    // --- 2. SEH zinciri (yalnizca i386) ---
+    // --- 2a. Islev tablosu (yalnizca x86_64) ---
+    //
+    // i386'nin zincirinin yerini tutan sey. Aradaki fark yalnizca
+    // **bulma** yolu: zincir yiginda gezilir, tablo ikilide aranir.
+    // Bulunduktan sonrasi ortak -- ayni imza, ayni karar kumesi.
+    #[cfg(target_arch = "x86_64")]
+    {
+        if let Some(next) = table_handler(task, base, record_at, context_at) {
+            return Some(next);
+        }
+        return last_resort(task, base, pointers_at);
+    }
+
+    // --- 2b. SEH zinciri (yalnizca i386) ---
+    #[cfg(target_arch = "x86")]
     loop {
         let record = NEXT_RECORD[task].load(Ordering::Relaxed);
         if record == usize::MAX || record == 0 {
@@ -1054,6 +1079,66 @@ unsafe fn last_resort(task: usize, base: usize, pointers_at: usize) -> Option<Us
     // Donus degerleri ise farkli -- bkz. `continue_dispatch`.
     PHASE[task].store(PHASE_FILTER, Ordering::Relaxed);
     build_frame(task, base, filter, &[pointers_at])
+}
+
+/// Hata adresini iceren fonksiyonun isleyicisini bulur ve cagirir.
+///
+/// x86_64'un zincir karsiligi -- ve neden ayri bir fonksiyon oldugu
+/// bir satirla anlasiliyor: zincirde "siradaki" diye bir sey var, burada
+/// yok. Tablo aramasi **tek** bir cevap verir (hata adresini iceren
+/// fonksiyon), o cevabin isleyicisi de "sahiplenmiyorum" derse gidecek
+/// baska yer yoktur -- cagiran cerceveye gecmek icin yigini **sanal
+/// olarak geri sarmak** gerekir ve o, dagitimin ikinci yarisidir
+/// (bkz. README). Su an tek cerceve derinliginde calisiyor.
+///
+/// `CHAIN_STEPS` burada da sayiliyor: ayni isleyici ic ice dagitimda
+/// yeniden bulunabilir ve dongu koruyucusu ortak.
+#[cfg(target_arch = "x86_64")]
+unsafe fn table_handler(
+    task: usize,
+    base: usize,
+    record_at: usize,
+    context_at: usize,
+) -> Option<UserContext> {
+    let steps = CHAIN_STEPS[task].fetch_add(1, Ordering::Relaxed);
+    if steps >= MAX_CHAIN {
+        return None;
+    }
+    // Hata adresi kayittan okunuyor: `begin` onu oraya yazmisti.
+    let pc = ((record_at + rec::ADDRESS) as *const usize).read_unaligned();
+    let (entry_at, function, image_base) = pdata::lookup(task, pc)?;
+    let (handler, handler_data) = pdata::handler_of(image_base, function.unwind)?;
+
+    // `EstablisherFrame` x64'te **cerceve isaretcisidir**, i386'daki
+    // gibi bir kayit adresi degil: tabloda kayit yok, yigin var.
+    // Cerceve kaydi olmayan (yaprak olmayan ama cerceve registeri
+    // kullanmayan) fonksiyonlarda bu, kesilen RSP'dir.
+    let establisher = (((context_at + ctx::RSP) as *const u64).read_unaligned()) as usize;
+
+    // `DISPATCHER_CONTEXT` kayitlarin hemen ustune yaziliyor: `begin`
+    // bloga onun icin de yer ayirdi (bkz. `sizes::DISPATCHER`).
+    let dispatcher_at = (POINTERS_AT[task].load(Ordering::Relaxed)
+        + core::mem::size_of::<usize>() * 2
+        + 0xF)
+        & !0xF;
+    if !writable(dispatcher_at, sizes::DISPATCHER) {
+        return None;
+    }
+    pdata::write_dispatcher(
+        dispatcher_at,
+        pc,
+        image_base,
+        entry_at,
+        establisher,
+        context_at,
+        handler,
+        handler_data,
+    );
+
+    // Imza i386 ile **birebir ayni**: (ExceptionRecord, EstablisherFrame,
+    // ContextRecord, DispatcherContext). Ayrilan sey yalnizca ilk ikisini
+    // nasil buldugumuz ve dorduncunun dolu olmasi.
+    build_frame(task, base, handler, &[record_at, establisher, context_at, dispatcher_at])
 }
 
 /// Isleyiciye girilecek yigin cercevesini kurar.

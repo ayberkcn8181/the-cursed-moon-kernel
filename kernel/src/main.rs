@@ -347,6 +347,9 @@ static WINUNWIND_EXE64: &[u8] = include_bytes!("../../userland/winunwind.exe64")
 static WINNEST_EXE64: &[u8] = include_bytes!("../../userland/winnest.exe64");
 #[cfg(target_arch = "x86_64")]
 static WINAPC_EXE64: &[u8] = include_bytes!("../../userland/winapc.exe64");
+/// x86_64 tablo tabanli SEH: RtlAddFunctionTable + UNWIND_INFO.
+#[cfg(target_arch = "x86_64")]
+static WINPDATA_EXE64: &[u8] = include_bytes!("../../userland/winpdata.exe64");
 
 /// Kullanici programlarinin VFS uzerinden okudugu test dosyasi.
 static BOOT_MSG: &[u8] = b"/boot/msg.txt: VFS uzerinden okundu (RAMFS).\n";
@@ -477,6 +480,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/winunwind.exe", WINUNWIND_EXE64),
     ("/bin/winnest.exe", WINNEST_EXE64),
     ("/bin/winapc.exe", WINAPC_EXE64),
+    ("/bin/winpdata.exe", WINPDATA_EXE64),
     ("/boot/msg.txt", BOOT_MSG),
 ];
 

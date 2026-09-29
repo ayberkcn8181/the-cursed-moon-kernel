@@ -376,6 +376,37 @@ extern "system" {
     /// ve `GetLastError` = `ERROR_MOD_NOT_FOUND` (126).
     pub fn GetModuleHandleA(module_name: *const u8) -> Hmodule;
 
+    /// Calisma zamaninda bir **islev tablosu** kaydeder (x64).
+    ///
+    /// x86_64'te SEH zincir degil **tablo** tabanlidir: derleyici her
+    /// fonksiyon icin ikiliye bir kayit yazar ve `__try` hicbir komut
+    /// uretmez. Bu cagri ayni kaydi calisma zamaninda eklemek icin
+    /// vardir ve asil musterisi JIT'lerdir -- urettikleri kodun
+    /// ikilide bir `.pdata` girdisi olamaz.
+    ///
+    /// Doner: 0 = basarisiz. 32-bit'te her zaman 0 (orada zincir var).
+    pub fn RtlAddFunctionTable(
+        table: *const RuntimeFunction,
+        count: Dword,
+        base: usize,
+    ) -> Bool;
+
+    /// Kaydedilmis bir islev tablosunu kaldirir.
+    pub fn RtlDeleteFunctionTable(table: *const RuntimeFunction) -> Bool;
+
+    /// Bir komut adresini iceren `RUNTIME_FUNCTION`u bulur.
+    ///
+    /// Doner: kaydin **adresi** (kopyasi degil), ya da NULL. NULL bir
+    /// hata degil: "bu adres bir tabloya ait degil" demek, ve yaprak
+    /// fonksiyonlarda normaldir. `image_base` cikti parametresi, cunku
+    /// kaydin icindeki RVA'lari cozmek icin cagiranin ona da ihtiyaci
+    /// var.
+    pub fn RtlLookupFunctionEntry(
+        control_pc: usize,
+        image_base: *mut u64,
+        history: *mut c_void,
+    ) -> *const RuntimeFunction;
+
     /// Bir fonksiyonun adresi.
     ///
     /// `proc_name`in ust 16 biti sifirsa Windows onu **ordinal** sayar
@@ -838,6 +869,67 @@ impl ProcessInformation {
             thread_id: 0,
         }
     }
+}
+
+/// `RUNTIME_FUNCTION` -- ikilideki uc `DWORD`.
+///
+/// Ucu de **RVA**dir (goruntu tabanina gore goreli), mutlak degil.
+/// Sebep yeniden yerlesim: bir DLL baska bir adrese yuklenince mutlak
+/// adresler bozulurdu, RVA'lar bozulmaz.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RuntimeFunction {
+    pub begin: u32,
+    pub end: u32,
+    pub unwind: u32,
+}
+
+/// `UNWIND_INFO` bayraklari (`Flags` alani, ust bes bit).
+///
+/// `EHANDLER` "bu fonksiyonun bir `__except` filtresi var", `UHANDLER`
+/// "bir `__finally` blogu var". Ikisi de yoksa kayit yalnizca geri
+/// sarma bilgisi tasir ve istisna dagitimi o fonksiyonu **atlar**.
+pub const UNW_FLAG_EHANDLER: u8 = 0x1;
+pub const UNW_FLAG_UHANDLER: u8 = 0x2;
+/// Kayit kendi bilgisini degil **baska bir kaydi** gosteriyor.
+pub const UNW_FLAG_CHAININFO: u8 = 0x4;
+
+/// x64 dil isleyicisinin imzasi.
+///
+/// i386'daki zincir isleyicisiyle **birebir ayni**: dort arguman, ayni
+/// karar kumesi (`EXCEPTION_CONTINUE_EXECUTION` / `..._SEARCH`).
+/// Ayrilan sey yalnizca isleyiciye nasil ulasildigi -- zincir yiginda
+/// gezilir, tablo ikilide aranir.
+pub type LanguageHandler = unsafe extern "system" fn(
+    record: *mut crate::seh::ExceptionRecord,
+    establisher: usize,
+    context: *mut c_void,
+    dispatcher: *mut c_void,
+) -> i32;
+
+/// `DISPATCHER_CONTEXT` icindeki alan ofsetleri (x64 ABI).
+///
+/// i386'da isleyicinin dorduncu argumani cekirdege aitti ve
+/// kullanilmiyordu. x64'te **kayittir**: tablo tabanli cozumun kendisi
+/// oradan okunur.
+pub mod disp {
+    pub const CONTROL_PC: usize = 0x00;
+    pub const IMAGE_BASE: usize = 0x08;
+    pub const FUNCTION_ENTRY: usize = 0x10;
+    pub const ESTABLISHER_FRAME: usize = 0x18;
+    pub const TARGET_IP: usize = 0x20;
+    pub const CONTEXT_RECORD: usize = 0x28;
+    pub const LANGUAGE_HANDLER: usize = 0x30;
+    pub const HANDLER_DATA: usize = 0x38;
+}
+
+/// `DISPATCHER_CONTEXT`ten bir kelime okur.
+///
+/// # Safety
+/// Yalnizca bir dil isleyicisinin icinde, cekirdegin verdigi
+/// isaretciyle cagrilmalidir.
+pub unsafe fn dispatcher_field(dispatcher: *mut c_void, offset: usize) -> usize {
+    ((dispatcher as usize + offset) as *const usize).read_unaligned()
 }
 
 /// APC yordamin imzasi (`PAPCFUNC`).

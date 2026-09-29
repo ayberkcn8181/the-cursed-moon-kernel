@@ -27,8 +27,8 @@ masaustu sunuyor.
 | Mimariler | i386 (Multiboot1, `int 0x80`) · x86_64 (Multiboot2, `syscall`) |
 | Ikili bicimleri | ELF32/ELF64 · PE32/PE32+ (ithal tablosu cozulur) |
 | POSIX cagrilari | 74 (+ ELF yardimci vektoru, dosya destekli `mmap`, `clone`, `futex`, `SIGPIPE`, `EINTR`/`SA_RESTART`, is denetimi, `SA_SIGINFO`, `sigaltstack`, gercek-zamanli sinyaller, `sigtimedwait`) |
-| NT/Win32 cagrilari | 90 (`KERNEL32.dll` 67 ihracat + `TCMKGUI.dll`) |
-| Ring 3 uygulamalari | 41 ELF + 18 PE |
+| NT/Win32 cagrilari | 93 (`KERNEL32.dll` 70 ihracat + `TCMKGUI.dll`) |
+| Ring 3 uygulamalari | 41 ELF + 19 PE (biri yalnizca x86_64) |
 | Kalici depolama | ATA PIO + MBR + TCMKFS (yazilabilir, iki mimari) + takas |
 | Kod | ~30 bin satir cekirdek + ~17 bin satir userland |
 
@@ -60,7 +60,7 @@ artik POSIX yuzunde de **yakalanip duzeltilebiliyor**
 gucte cevap veriyor.
 
 Her yetenek QEMU'da **olculerek** dogrulanmistir: `probe` (16 sinav),
-`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (5), `bigfile` (6), `heap` (5), `swapx` (6), `jobs` (6), `winsusp` (6), `winctx` (7), `sigfault` (7), `winunwind` (7), `altstack` (7), `winnest` (6), `rtsig` (7), `winapc` (7), `sigwait` (7), `bequest`
+`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (5), `bigfile` (6), `heap` (5), `swapx` (6), `jobs` (6), `winsusp` (6), `winctx` (7), `sigfault` (7), `winunwind` (7), `altstack` (7), `winnest` (6), `rtsig` (7), `winapc` (7), `sigwait` (7), `winpdata` (7), `bequest`
 (6), `nested` (4), `winenv` (4) gibi programlar sonucu hem ekrana hem
 seri gunluge yaziyor. Olcumler yol boyunca gercek hatalar buldu -- dolan
 VFS tablosu, `CreateFileA`'nin cevrilmeyen Windows yollari, `GDT`
@@ -4695,8 +4695,11 @@ komutunu kullandigi icin hic gorunmemisti. Simdi ikisi de dogru.
   `RtlUnwind` zinciri hedefe kadar cozuyor ve yoldaki her isleyiciyi
   `EXCEPTION_UNWINDING` ile cagiriyor, yani `__finally` bloklari
   kosuyor.
-* **x86_64'te tablo tabanli SEH yok** (yukari bkz.). `.pdata`
-  ayristirmak ve unwind kodlarini yorumlamak ayri bir is.
+* ~~**x86_64'te tablo tabanli SEH yok.**~~ Geldi -- bkz.
+  [x86_64'un SEH'i](#x86_64un-sehi-zincir-degil-tablo). `UNWIND_INFO`
+  cozumleniyor, `EHANDLER` bayragi okunuyor ve isleyici dolu bir
+  `DISPATCHER_CONTEXT` ile cagriliyor. Eksik olan **ikinci yari**:
+  sanal geri sarma (`RtlVirtualUnwind`), yani cagiran cerceveye gecmek.
 * ~~**Ic ice dagitim yok.**~~ Geldi -- bkz. [Ya hatayi inceleyen kodun
   kendisi cokerse?](#ya-hatayi-inceleyen-kodun-kendisi-cokerse).
   Coken bir isleyici artik sureci goturmuyor: dagitim siradakiyle
@@ -7618,6 +7621,177 @@ ile karismasin diye.
   hal olusmuyor.
 * **`si_overrun` yok.** POSIX zamanlayicilarinin (`timer_create`) kacan
   atis sayisini tasiyan alan; TCMK'de o zamanlayicilar yok.
+
+## x86_64'un SEH'i: zincir degil **tablo**
+
+Bu belge uzun sure su cumleyi tasiyordu: *"x86_64'un tablo tabanli
+SEH'i yok, o yuzden iki sinav orada atlaniyor."* Windows yuzunun en
+buyuk yapisal bosluguydu -- 64-bit'te `__try`nin karsiligi hic yoktu,
+yalnizca vektorlu isleyiciler (VEH) vardi.
+
+### Ayni karar, iki ayri tasima
+
+i386'da bir `__try` **calisma zamaninda** para oder: derleyici her
+girisde yigina iki kelimelik bir kayit iter ve `fs:[0]`i ona cevirir.
+Zincir yigin uzerinde yasar ve istisna aninda gezilir.
+
+x86_64'te Microsoft bu maliyeti tamamen kaldirdi. `__try` **hicbir
+komut uretmez**; derleyici bunun yerine ikili dosyaya her fonksiyon icin
+bir kayit yazar.
+
+```text
+  i386   zincir  ->  yiginda, CALISMA ZAMANINDA kurulur
+                     bedeli: her __try girisinde iki yazma
+                     cekirdegin isi: iki kelime oku, izle
+
+  x64    tablo   ->  ikilide, DERLEME ZAMANINDA kurulur
+                     bedeli: sifir komut
+                     cekirdegin isi: bir tablo cozumleyicisi
+```
+
+Maliyet kaybolmadi, **yer degistirdi**: uygulamadan cekirdege. Yeni
+`pdata.rs` o bedelin kendisi.
+
+### Ayrilan sey yalnizca "nasil bulunur"
+
+Bu batinin belki en sasirtici sonucu: isleyicinin **imzasi** ve **karar
+kumesi** iki mimaride birebir aynidir.
+
+```text
+  handler(ExceptionRecord, EstablisherFrame, ContextRecord, DispatcherContext)
+     -> 0 (ExceptionContinueExecution) | 1 (ExceptionContinueSearch)
+```
+
+Yani ayrilan sey yalnizca isleyiciye **nasil ulasildigi**. Ulasildiktan
+sonrasi ortak kod: `seh::advance` iki yolu da ayni `build_frame`e
+bagliyor ve `continue_dispatch` iki taraftan gelen karari ayni sekilde
+okuyor.
+
+Tek gercek fark dorduncu argumanda. i386'da `DispatcherContext` cekirdek
+icindi ve TCMK sifir geciyordu; x64'te **kayittir** ve isleyici ondan
+goruntu tabanini, kendi `RUNTIME_FUNCTION`unu ve dil verisini okur. Bos
+gecmek, MSVC'nin urettigi bir isleyiciyi ilk adiminda cop okumaya
+gondermek olurdu.
+
+### `UNWIND_INFO`nun kayan isleyicisi
+
+Kaydin duzeni:
+
+```text
+  +0  Version:3 | Flags:5
+  +1  SizeOfProlog
+  +2  CountOfCodes
+  +3  FrameRegister:4 | FrameOffset:4
+  +4  UnwindCode[CountOfCodes]      (2 bayt her biri, CIFT'e yuvarlanir)
+  ..  ExceptionHandler (RVA)        (yalnizca EHANDLER/UHANDLER varsa)
+  ..  ExceptionData[]               (dil'e ozel -- MSVC'de "scope table")
+```
+
+Isleyicinin ofseti **sabit degil**: geri sarma kodlarinin sayisina
+bagli, ve o sayi cifte yuvarlanir (kayit `DWORD` hizali kalsin diye).
+Yuvarlamayi unutmak, isleyici adresi yerine bir geri sarma kodunu
+okumak demektir.
+
+Bayrak da ayni kadar onemli: kayitlarin **cogunda isleyici yoktur**,
+yalnizca geri sarma bilgisi tasirlar. `EHANDLER` bitini okumayan bir
+cekirdek, o alandaki degeri kod adresi sanip oraya dallanirdi.
+
+### Tabloyu neden elle kuruyoruz
+
+Iki kaynak vardir: PE'nin kendi `.pdata` bolumu ve `RtlAddFunctionTable`
+(calisma zamaninda -- JIT'ler icin). TCMK yalnizca ikincisini okuyor ve
+sebebi somut: userland Rust ile yaziliyor ve Rust'in COFF cikisi
+`.pdata` degil **`.eh_frame`** uretiyor (DWARF). Yani TCMK'nin kendi
+PE'lerinde okunacak bir `.pdata` yok.
+
+```text
+$ objdump -h userland/winseh.exe64
+  0 .text      1 .rdata     2 .data     3 .eh_fram     4 .reloc
+```
+
+Varmis gibi bir cozumleyici yazmak, hicbir zaman kosmayan ve bu yuzden
+hicbir zaman dogrulanmayan kod birakmak olurdu. `winseh.exe`nin zincir
+kaydini elle kurmasiyla ayni durum: Rust'ta `__try` yok, o yuzden
+derleyicinin yapacagi sey elle yapiliyor.
+
+### Yedi sinav
+
+`winpdata.exe` (yalnizca PE32+):
+
+```text
+[winpdata] A tablo kabul edildi: gecti (RtlAddFunctionTable kabul etti)
+[winpdata] B kayit bulunuyor:    gecti (dogru girdi ve dogru goruntu tabani)
+[winpdata] C ISLEYICI KOSTU:     gecti (hata adresi tabloda, isleyici cagrildi)
+[winpdata] D dispatcher dolu:    gecti (ImageBase, FunctionEntry, HandlerData)
+[winpdata] E devam et yurudu:    gecti (CONTEXT duzeltildi, akis surdu)
+[winpdata] F EHANDLER sart:      gecti (kayit bulundu ama isleyici kosmadi)
+[winpdata] G silinince bitiyor:  gecti (silindi, aranmiyor)
+```
+
+![winpdata](docs/screenshot-winpdata.png)
+
+C bu sinavin sebebi: bu batiya kadar x86_64'te `__try`nin karsiligi
+yoktu. F ise kolayca atlanabilecek olani -- "kayit bulundu" ile
+"isleyici cagrildi" ayni sey **degil**.
+
+### Dort bozma, ve sinavin uc kez duzeltilmesi
+
+Bozmalar:
+
+```text
+EHANDLER bayragi yok sayiliyor  ->  F "bayraksiz kayitta isleyici KOSTU"
+cifte yuvarlama yok             ->  C "hata sahipsiz kaldi, agi buldu"
+                                    (+ D, E)
+aralik ust siniri bakilmiyor    ->  G "kapsam disi bir adres de bulunuyor"
+DISPATCHER_CONTEXT bos          ->  D "DISPATCHER_CONTEXT bos geldi"
+```
+
+Ama uc bozma, once sinavin **kendisini** duzeltti -- ucu de ayni
+kuraldan: *bir sinav susmamali.*
+
+**Bir.** `EHANDLER` bayragi yok sayildiginda F **gecti**. Sebebi
+utandirici derecede tesadufi: bayraksiz kaydin isleyici alanina uydurma
+bir RVA konmustu ve o deger `boom`un kendisine denk gelmis; "isleyici"
+yeniden patlamis ve cocuk yine olmustu. F dogru sonucu **yanlis
+sebeple** veriyordu. Simdi o alan **calisan** bir isleyiciyi gosteriyor:
+bayrak okunmazsa cocuk hayatta kalir ve bunu bildirir.
+
+**Iki.** Cifte yuvarlama kaldirildiginda sinav B'den sonra sustu --
+isleyici bulunamayinca hata sahipsiz kaliyor ve **surec oluyordu**.
+Cozum bir `SetUnhandledExceptionFilter` agi: dagitimda **en sonda**
+kosuyor, yani tablo isleyicisi varken hic cagrilmiyor. Bir VEH kurmak
+ayni isi yapmazdi -- o en **basta** kosar ve tablo yolunu hic denenmeden
+kapatirdi.
+
+**Uc.** `DISPATCHER_CONTEXT` sifir gecildiginde isleyici o isaretciyi
+okuyup coktu, dagitim ic ice girdi ve surec oldu -- sinav
+"DISPATCHER_CONTEXT bos geldi" diyecegi yerde hicbir sey demedi.
+Isleyici artik bos isaretciyi denetliyor. Gercek bir isleyici de ayni
+sekilde cokerdi; olcumun degeri tam da bu.
+
+Ayrica yuvarlama sinavi ilk yazilista **hic olcmuyordu**: elle kurulan
+kayitta kod sayisi sifirdi ve `(0+1) & ~1` de sifir. Yuvarlamayi yapan
+ile yapmayan cekirdek ayni yeri okuyordu. Kayit artik **tek** sayida kod
+tasiyor.
+
+### Bilerek yapilmayanlar
+
+* **Sanal geri sarma yok** -- yani tablo tabanli SEH'in **ikinci
+  yarisi**. Su an yalnizca hatanin olustugu cercevenin isleyicisi
+  cagriliyor. O isleyici "sahiplenmiyorum" derse gidecek baska yer yok:
+  cagiran cerceveye gecmek icin geri sarma kodlarini yurutup RSP/RIP'i
+  yeniden kurmak gerekir (`RtlVirtualUnwind`). i386'da bu bedava --
+  zincir zaten cagiran cerceveleri gosterir; x64'te bir kod
+  yorumlayicisi ister.
+* **`.pdata` okunmuyor** (yukari bkz.): TCMK'nin PE'lerinde yok.
+* **`RtlUnwindEx` yok.** `RtlUnwind`in x64 karsiligi ve sanal geri
+  sarmanin ustune kurulu.
+* **`UNW_FLAG_UHANDLER` ayirt edilmiyor.** Bayrak taniniyor ama iki hal
+  ayni yolu izliyor; ayirmak icin once geri sarma yarisinin olmasi
+  gerekiyor.
+* **`UNWIND_INFO` surum 2 reddediliyor.** Daha yeni derleyicilerin
+  urettigi bir bicim; duzeni farkli olabilir, ve okumaya calismak kod
+  adresi yerine cop dondurmek olurdu.
 
 ## Alfa'nin bilinen sinirlari
 

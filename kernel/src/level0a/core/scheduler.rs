@@ -446,6 +446,11 @@ fn spawn_inner(
         // Ayni gerekce: yuvada kalan bir APC, yeni gorevin kuyrugunda
         // artik gecersiz bir yordam adresi olurdu.
         crate::level0b1::nt_subsystem::apc::reset(index);
+        // Ayni gerekce islev tablolari icin de gecerli: yuvada kalan
+        // bir tablo, yeni gorevin adres uzayinda anlamsiz RVA'lar
+        // tasirdi (bkz. yukarida TEB icin anlatilan cokme).
+        #[cfg(target_arch = "x86_64")]
+        crate::level0b1::nt_subsystem::pdata::reset(index);
         (*tasks.add(index)).parent = CURRENT.load(Ordering::Relaxed);
         (*tasks.add(index)).waitable = waitable;
         // Siradan bir gorev kendi grubunun lideridir. Is parcaciklari

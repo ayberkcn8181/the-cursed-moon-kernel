@@ -172,6 +172,11 @@ static KNOWN_APPS: &[(&str, &str, &str)] = &[
     ("winunwind", "/bin/winunwind.exe", "winunwind"),
     ("winnest", "/bin/winnest.exe", "winnest"),
     ("winapc", "/bin/winapc.exe", "winapc"),
+    // Yalnizca x86_64'te var: olctugu sey (tablo tabanli SEH) 32-bit'te
+    // yok. Kisa ad iki mimaride de listede duruyor ama i386'da yol
+    // VFS'te bulunmuyor ve cagri "dosya yok" ile bitiyor -- listeyi
+    // mimariye gore bolmek, iki ayri tablo tutmak demek olurdu.
+    ("winpdata", "/bin/winpdata.exe", "winpdata"),
 ];
 
 /// Kabuktan gelen adi tam yola ve gorev adina cevirir.

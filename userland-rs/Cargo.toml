@@ -140,6 +140,10 @@ path = "src/win/nested.rs"
 name = "winapc"
 path = "src/win/apc.rs"
 
+[[bin]]
+name = "winpdata"
+path = "src/win/pdata.rs"
+
 [profile.dev]
 panic = "abort"
 opt-level = 1

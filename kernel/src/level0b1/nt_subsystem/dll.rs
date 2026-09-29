@@ -481,6 +481,31 @@ static KERNEL32: &[Export] = &[
         // hHandle, dwMilliseconds, bAlertable
         stack_bytes: 12,
     },
+    // x86_64 tablo tabanli SEH. Gercek Win32'de bu uc cagri **yalnizca
+    // 64-bit'te** vardir; TCMK ihracat listesini tek tuttugu icin
+    // (ordinaller kaymasin diye, yukari bkz.) adlar 32-bit'te de
+    // gorunuyor ve orada acikca FALSE donuyorlar.
+    Export {
+        name: "RtlAddFunctionTable",
+        ordinal: 68,
+        service: nt::NT_RTL_ADD_FUNCTION_TABLE,
+        // FunctionTable, EntryCount, BaseAddress
+        stack_bytes: 12,
+    },
+    Export {
+        name: "RtlDeleteFunctionTable",
+        ordinal: 69,
+        service: nt::NT_RTL_DELETE_FUNCTION_TABLE,
+        // FunctionTable
+        stack_bytes: 4,
+    },
+    Export {
+        name: "RtlLookupFunctionEntry",
+        ordinal: 70,
+        service: nt::NT_RTL_LOOKUP_FUNCTION_ENTRY,
+        // ControlPc, ImageBase, HistoryTable
+        stack_bytes: 12,
+    },
     Export {
         name: "GetExitCodeThread",
         ordinal: 50,

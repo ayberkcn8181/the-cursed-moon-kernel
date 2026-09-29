@@ -77,3 +77,6 @@ RtlUnwind@16 @64
 QueueUserAPC@12 @65
 SleepEx@8 @66
 WaitForSingleObjectEx@12 @67
+RtlAddFunctionTable@12 @68
+RtlDeleteFunctionTable@4 @69
+RtlLookupFunctionEntry@12 @70
