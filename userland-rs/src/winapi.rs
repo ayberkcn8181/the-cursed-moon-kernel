@@ -407,6 +407,32 @@ extern "system" {
         history: *mut c_void,
     ) -> *const RuntimeFunction;
 
+    /// Bir cerceveyi **sanal olarak** geri sarar.
+    ///
+    /// Tablo tabanli SEH'in ikinci yarisi. Birinci yari "hata adresinin
+    /// isleyicisi kim" sorusunu cevapliyor; bu, ondan sonra gelen
+    /// soruyu: **cagiran cerceveye nasil gecilir?**
+    ///
+    /// i386'da bu cagrinin karsiligi yok ve olamaz -- orada zincir
+    /// yiginda duruyor, yani yurumek bir isaretci izlemek. x64'te
+    /// zincir yok, yani cagiranin RSP'sini bulmanin tek yolu callee'nin
+    /// **prologunu geri almak**: hangi registerlar itildi, ne kadar yer
+    /// acildi, cerceve registeri kuruldu mu.
+    ///
+    /// `context` **yerinde** degistirilir: girisde callee'nin durumu,
+    /// cikista cagiranin. Doner: o cercevenin dil isleyicisi, ya da
+    /// NULL.
+    pub fn RtlVirtualUnwind(
+        handler_type: Dword,
+        image_base: usize,
+        control_pc: usize,
+        function: *const RuntimeFunction,
+        context: *mut c_void,
+        handler_data: *mut usize,
+        establisher: *mut u64,
+        context_pointers: *mut c_void,
+    ) -> usize;
+
     /// Bir fonksiyonun adresi.
     ///
     /// `proc_name`in ust 16 biti sifirsa Windows onu **ordinal** sayar
@@ -882,6 +908,33 @@ pub struct RuntimeFunction {
     pub begin: u32,
     pub end: u32,
     pub unwind: u32,
+}
+
+/// `RtlVirtualUnwind`in `HandlerType` degerleri.
+///
+/// Hangi isleyicinin arandigini soyler: `__except` filtresi mi,
+/// `__finally` blogu mu. TCMK henuz ayirt etmiyor (dagitim yarisi
+/// yalnizca birincisini kullaniyor), ama arguman gercek ABI'nin
+/// parcasi ve yeri bos gecilemez.
+pub const UNW_FLAG_NHANDLER: Dword = 0;
+pub const UNW_FLAG_EHANDLER_TYPE: Dword = 1;
+pub const UNW_FLAG_UHANDLER_TYPE: Dword = 2;
+
+/// Geri sarma islemleri (`UNWIND_CODE`in `UnwindOp` alani).
+///
+/// Kod sozcugunun duzeni: `offset_in_prolog:8 | op:4 | op_info:4`.
+/// `op_info` cogu islemde **register numarasi** -- ve o numaralandirma
+/// `CONTEXT` kaydinin alan sirasiyla ayni (RAX, RCX, RDX, RBX, RSP,
+/// RBP, RSI, RDI, R8..R15).
+pub const UWOP_PUSH_NONVOL: u16 = 0;
+pub const UWOP_ALLOC_LARGE: u16 = 1;
+pub const UWOP_ALLOC_SMALL: u16 = 2;
+pub const UWOP_SET_FPREG: u16 = 3;
+pub const UWOP_SAVE_NONVOL: u16 = 4;
+
+/// Bir geri sarma kodu sozcugu kurar.
+pub const fn unwind_code(prolog_offset: u16, op: u16, op_info: u16) -> u16 {
+    (prolog_offset & 0xFF) | (op << 8) | (op_info << 12)
 }
 
 /// `UNWIND_INFO` bayraklari (`Flags` alani, ust bes bit).

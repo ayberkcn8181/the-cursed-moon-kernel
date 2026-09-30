@@ -227,6 +227,13 @@ pub enum Reg {
     D,
     /// `Ebx` / `Rbx`.
     B,
+    /// `Ebp` / `Rbp` -- **cerceve** registeri.
+    ///
+    /// Digerlerinden farkli bir sebeple var: x64'un geri sarma
+    /// kodlarindan `UWOP_SET_FPREG`, yigin isaretcisini bu registerden
+    /// yeniden hesapliyor. Yani onu okumadan bir cerceve registeri
+    /// kullanan fonksiyonun geri sarmasi dogrulanamaz.
+    Bp,
 }
 
 fn offset_of(reg: Reg) -> usize {
@@ -238,6 +245,7 @@ fn offset_of(reg: Reg) -> usize {
         Reg::C => offsets::ECX,
         Reg::D => offsets::EDX,
         Reg::B => offsets::EBX,
+        Reg::Bp => offsets::EBP,
     }
     #[cfg(target_arch = "x86_64")]
     match reg {
@@ -247,6 +255,7 @@ fn offset_of(reg: Reg) -> usize {
         Reg::C => offsets::RCX,
         Reg::D => offsets::RDX,
         Reg::B => offsets::RBX,
+        Reg::Bp => offsets::RBP,
     }
 }
 
@@ -286,7 +295,7 @@ pub unsafe fn set_reg(context: *mut c_void, reg: Reg, value: usize) {
 // istedigimiz icin uyariyi susturuyoruz.
 #[cfg(target_arch = "x86")]
 #[allow(dead_code)]
-const _UNUSED: [usize; 3] = [offsets::EDI, offsets::ESI, offsets::EBP];
+const _UNUSED: [usize; 2] = [offsets::EDI, offsets::ESI];
 #[cfg(target_arch = "x86_64")]
 #[allow(dead_code)]
-const _UNUSED: [usize; 3] = [offsets::RDI, offsets::RSI, offsets::RBP];
+const _UNUSED: [usize; 2] = [offsets::RDI, offsets::RSI];

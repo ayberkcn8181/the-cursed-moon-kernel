@@ -365,9 +365,12 @@ pub const ILL_ILLOPN: i32 = 2;
 pub const CLD_EXITED: i32 = 1;
 /// Cocuk bir sinyalle olduruldu; `si_status` o sinyal.
 pub const CLD_KILLED: i32 = 2;
-/// Olum bir cekirdek dokumu birakti. TCMK dokum almiyor, ama kod
-/// taniniyor: `CLD_KILLED` ile karistirmak, dokum arayan bir programi
-/// bos yere aratirdi.
+/// Olum bir cekirdek dokumu birakti.
+///
+/// TCMK dokum almiyor, yani cekirdek bu kodu hic **uretmiyor**. Yine de
+/// tanimli: `CLD_KILLED` ile karistirmak, dokum arayan bir programi bos
+/// yere aratirdi. Kullanici tarafi onu ayirt edebilsin diye duruyor.
+#[allow(dead_code)]
 pub const CLD_DUMPED: i32 = 3;
 /// Cocuk durdu; `si_status` durduran sinyal.
 pub const CLD_STOPPED: i32 = 5;

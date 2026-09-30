@@ -80,3 +80,4 @@ WaitForSingleObjectEx@12 @67
 RtlAddFunctionTable@12 @68
 RtlDeleteFunctionTable@4 @69
 RtlLookupFunctionEntry@12 @70
+RtlVirtualUnwind@32 @71

@@ -112,6 +112,8 @@ pub const NT_RTL_ADD_FUNCTION_TABLE: u32 = 0x304C;
 pub const NT_RTL_DELETE_FUNCTION_TABLE: u32 = 0x304D;
 /// `RtlLookupFunctionEntry(ControlPc, *ImageBase, HistoryTable)`.
 pub const NT_RTL_LOOKUP_FUNCTION_ENTRY: u32 = 0x304E;
+/// `RtlVirtualUnwind(...)` -- bir cerceveyi **sanal olarak** geri sarar.
+pub const NT_RTL_VIRTUAL_UNWIND: u32 = 0x304F;
 pub const NT_SLEEP_MS: u32 = 0x3001;
 pub const NT_GET_TICK_COUNT: u32 = 0x3002;
 pub const NT_WIN32_CLOSE_HANDLE: u32 = 0x3003;
@@ -466,6 +468,11 @@ const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 const ERROR_INVALID_PARAMETER: u32 = 87;
 
 /// Bu cagri bu mimaride yok.
+///
+/// x86_64'te hicbir yerde kullanilmiyor -- oradaki uc tablo cagrisi da
+/// gercekten var. Sabit yine de tek yerde duruyor; mimariye gore
+/// gorunup kaybolan bir errno, ikinci bir tanim demek olurdu.
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
 ///
 /// Windows'un kendi kodu: bir API yalnizca bazi yapilarda varsa
 /// digerlerinde bunu doner. `RtlAddFunctionTable` ailesi 32-bit'te
@@ -1084,6 +1091,85 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
                     // degil, "bu adres bir tabloya ait degil" demek --
                     // yaprak fonksiyonlarda normaldir.
                     None => 0,
+                }
+            }
+            #[cfg(target_arch = "x86")]
+            {
+                set_last_error(ERROR_CALL_NOT_IMPLEMENTED);
+                0
+            }
+        }
+
+        // `RtlVirtualUnwind(HandlerType, ImageBase, ControlPc,
+        //                    FunctionEntry, ContextRecord, *HandlerData,
+        //                    *EstablisherFrame, ContextPointers)`
+        //
+        // Tablo tabanli SEH'in ikinci yarisinin **acik yuzu**: bir
+        // cerceveyi geri sarmak. `CONTEXT` yerinde degistiriliyor --
+        // girisde callee'nin durumu, cikista cagiranin.
+        //
+        // i386'da bu cagrinin karsiligi yok ve olamaz: orada geri
+        // sarilacak bir hesap yok, zincir zaten cagiran cerceveleri
+        // gosteriyor. Burada prologu **yorumlamak** gerekiyor.
+        NT_RTL_VIRTUAL_UNWIND => {
+            #[cfg(target_arch = "x86_64")]
+            {
+                let image_base = arg_ptr(args, 1).unwrap_or(0);
+                let control_pc = arg_ptr(args, 2).unwrap_or(0);
+                let entry_at = arg_ptr(args, 3).unwrap_or(0);
+                let context_at = arg_ptr(args, 4).unwrap_or(0);
+                let handler_data_out = arg_ptr(args, 5).unwrap_or(0);
+                let establisher_out = arg_ptr(args, 6).unwrap_or(0);
+
+                if entry_at == 0
+                    || !context_buffer_ok(context_at)
+                    || !mmu::is_user_accessible(entry_at)
+                    || !mmu::is_user_accessible(entry_at + pdata::RUNTIME_FUNCTION_SIZE - 1)
+                {
+                    set_last_error(ERROR_INVALID_PARAMETER);
+                    0
+                } else {
+                    // SAFETY: iki tampon da yukarida dogrulandi.
+                    let function = unsafe {
+                        pdata::RuntimeFunction {
+                            begin: (entry_at as *const u32).read_unaligned(),
+                            end: ((entry_at + 4) as *const u32).read_unaligned(),
+                            unwind: ((entry_at + 8) as *const u32).read_unaligned(),
+                        }
+                    };
+                    let mut state = unsafe { pdata::load_state(context_at) };
+                    match unsafe {
+                        pdata::virtual_unwind(image_base, &function, control_pc, &mut state)
+                    } {
+                        None => {
+                            set_last_error(ERROR_INVALID_PARAMETER);
+                            0
+                        }
+                        Some((establisher, found)) => {
+                            unsafe { pdata::store_state(context_at, &state) };
+                            let (handler, data) = found.unwrap_or((0, 0));
+                            if establisher_out != 0
+                                && mmu::is_user_accessible(establisher_out)
+                                && mmu::is_user_accessible(establisher_out + 7)
+                            {
+                                // SAFETY: isaretci yukarida dogrulandi.
+                                unsafe {
+                                    (establisher_out as *mut u64)
+                                        .write_unaligned(establisher as u64)
+                                };
+                            }
+                            if handler_data_out != 0
+                                && mmu::is_user_accessible(handler_data_out)
+                                && mmu::is_user_accessible(handler_data_out + 7)
+                            {
+                                // SAFETY: isaretci yukarida dogrulandi.
+                                unsafe {
+                                    (handler_data_out as *mut u64).write_unaligned(data as u64)
+                                };
+                            }
+                            handler
+                        }
+                    }
                 }
             }
             #[cfg(target_arch = "x86")]

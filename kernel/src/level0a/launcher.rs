@@ -178,6 +178,7 @@ static KNOWN_APPS: &[(&str, &str, &str)] = &[
     // VFS'te bulunmuyor ve cagri "dosya yok" ile bitiyor -- listeyi
     // mimariye gore bolmek, iki ayri tablo tutmak demek olurdu.
     ("winpdata", "/bin/winpdata.exe", "winpdata"),
+    ("winvunw", "/bin/winvunw.exe", "winvunw"),
 ];
 
 /// Kabuktan gelen adi tam yola ve gorev adina cevirir.

@@ -973,7 +973,33 @@ fn execute(line: &str) {
             write_num(apc_peak as usize);
             write_str("/");
             write_num(crate::level0b1::nt_subsystem::apc::MAX_APC);
+            // Calisan gorevin **su anki** kuyrugu: toplam sayaclardan
+            // ayri, cunku bekleyen bir APC uyarilabilir bir bekleme
+            // gelene kadar orada duruyor.
+            let mine = crate::level0b1::nt_subsystem::apc::pending(scheduler::current_id());
+            if mine > 0 {
+                write_str("  bende bekleyen ");
+                write_num(mine);
+            }
             newline();
+            // x86_64 tablo tabanli SEH: kac tablo kayitli, kac arama
+            // yapildi, kacinda kayit bulundu, ve kac cerceve **sanal
+            // olarak** geri sarildi. Sonuncusu i386'da karsiligi
+            // olmayan tek sayi -- orada yurumek bir isaretci izlemek.
+            #[cfg(target_arch = "x86_64")]
+            {
+                let (tables, lookups, found) =
+                    crate::level0b1::nt_subsystem::pdata::stats();
+                write_str("pdata: tablo ");
+                write_num(tables);
+                write_str("  arama ");
+                write_num(lookups);
+                write_str("  bulunan ");
+                write_num(found);
+                write_str("  geri sarilan cerceve ");
+                write_num(crate::level0b1::nt_subsystem::seh::frames_unwound());
+                newline();
+            }
             write_line("  id  gorev        isleyicili       bekleyen        engelli");
             for i in 0..scheduler::MAX_TASKS {
                 if scheduler::state_of(i) == scheduler::TaskState::Unused {

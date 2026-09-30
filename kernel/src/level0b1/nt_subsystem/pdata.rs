@@ -271,89 +271,281 @@ pub fn lookup(task: usize, pc: usize) -> Option<(usize, RuntimeFunction, usize)>
     })
 }
 
-/// Bir `UNWIND_INFO` kaydindan **dil isleyicisini** cikarir.
+// Not: bir zamanlar burada ayri bir `handler_of` vardi ve yalnizca
+// isleyiciyi buluyordu. `virtual_unwind` ayni kaydi zaten bastan sona
+// okudugu icin ikisi ayni ABI'nin iki kopyasi haline geldi -- ve bu
+// dosyanin yorumlari tam olarak o duruma karsi uyariyordu. Isleyici
+// artik geri sarmanin yan urunu.
+
+// --- Sanal geri sarma: prologu **yorumlamak** ------------------------
+//
+// Tablo tabanli SEH'in ikinci yarisi. Birinci yari "hata adresinin
+// isleyicisi kim" sorusunu cevapliyordu; bu yari onun ardindan gelen
+// soruyu: **cagiran cerceveye nasil gecilir?**
+//
+// i386'da soru yok. Zincir yiginda duruyor ve her kayit bir oncekini
+// gosteriyor -- yurumek bir isaretci izlemek. x64'te zincir yok, yani
+// cagiranin RSP'sini bulmanin tek yolu, callee'nin **prologunu geri
+// almak**: hangi registerlar itildi, yigina ne kadar yer acildi, cerceve
+// registeri kuruldu mu.
+//
+// Derleyici bunu bir kod dizisi olarak yaziyor ve cekirdek onu
+// **yurutuyor** -- ters yonde. Maliyetin uygulamadan cekirdege
+// gecmesinin en somut hali burasi: i386'da iki kelime okunuyordu,
+// burada kucuk bir yorumlayici kosuyor.
+
+/// Geri sarma islemleri (Windows x64 ABI).
+pub const UWOP_PUSH_NONVOL: u8 = 0;
+pub const UWOP_ALLOC_LARGE: u8 = 1;
+pub const UWOP_ALLOC_SMALL: u8 = 2;
+pub const UWOP_SET_FPREG: u8 = 3;
+pub const UWOP_SAVE_NONVOL: u8 = 4;
+pub const UWOP_SAVE_NONVOL_FAR: u8 = 5;
+pub const UWOP_SAVE_XMM128: u8 = 8;
+pub const UWOP_SAVE_XMM128_FAR: u8 = 9;
+pub const UWOP_PUSH_MACHFRAME: u8 = 10;
+
+/// Geri sarma sirasindaki makine durumu.
 ///
-/// Kaydin duzeni (Windows x64 ABI):
+/// `regs` **register numarasiyla** indeksleniyor (0=RAX .. 15=R15) ve bu
+/// bir kolaylik degil, ABI'nin kendi secimi: geri sarma kodlarindaki
+/// `op_info` alani dogrudan o numarayi tasiyor. Ayri bir esleme tablosu
+/// yazmak, ABI'nin zaten verdigi cevabi ikinci kez uydurmak olurdu.
+#[derive(Clone, Copy)]
+pub struct UnwindState {
+    pub rip: u64,
+    pub rsp: u64,
+    pub regs: [u64; 16],
+}
+
+/// `CONTEXT` icinde bir genel registerin ofseti.
 ///
-/// ```text
-///   +0  Version:3 | Flags:5
-///   +1  SizeOfProlog
-///   +2  CountOfCodes
-///   +3  FrameRegister:4 | FrameOffset:4
-///   +4  UnwindCode[CountOfCodes]      (2 bayt her biri, CIFT'e yuvarlanir)
-///   ..  ExceptionHandler (RVA)        (yalnizca EHANDLER/UHANDLER varsa)
-///   ..  ExceptionData[]               (dil'e ozel -- "scope table")
-/// ```
+/// Registerlar 0x78'den itibaren **register numarasi sirasinda** duruyor
+/// (RAX, RCX, RDX, RBX, RSP, RBP, RSI, RDI, R8..R15). Bu da tesadufi
+/// degil: ayni numaralandirma komut kodlamasinda, geri sarma kodlarinda
+/// ve `CONTEXT`te birden kullaniliyor.
+const CONTEXT_GPR_BASE: usize = 0x78;
+const CONTEXT_RIP: usize = 0xF8;
+
+fn gpr_offset(reg: usize) -> usize {
+    CONTEXT_GPR_BASE + reg * 8
+}
+
+/// `CONTEXT` kaydindan geri sarma durumunu okur.
 ///
-/// Isleyicinin ofseti **degisken**: geri sarma kodlarinin sayisina
-/// bagli. Ciftle yuvarlama ABI'nin parcasi (kayit `DWORD` hizali kalsin
-/// diye), ve unutmak isleyici yerine kod okumak demek olurdu.
+/// # Safety
+/// `at` gecerli bir x64 `CONTEXT` kaydi olmalidir.
+pub unsafe fn load_state(at: usize) -> UnwindState {
+    let mut regs = [0u64; 16];
+    for (i, slot) in regs.iter_mut().enumerate() {
+        *slot = ((at + gpr_offset(i)) as *const u64).read_unaligned();
+    }
+    UnwindState {
+        rip: ((at + CONTEXT_RIP) as *const u64).read_unaligned(),
+        rsp: regs[4],
+        regs,
+    }
+}
+
+/// Geri sarma durumunu `CONTEXT` kaydina geri yazar.
 ///
-/// Doner: `(isleyicinin mutlak adresi, dil verisinin adresi)`.
-pub fn handler_of(base: usize, unwind_rva: u32) -> Option<(usize, usize)> {
-    let mut rva = unwind_rva;
+/// # Safety
+/// `load_state` ile ayni kosul.
+pub unsafe fn store_state(at: usize, state: &UnwindState) {
+    for (i, value) in state.regs.iter().enumerate() {
+        // RSP ayri tutuluyor: geri sarma onu `regs[4]`ten bagimsiz
+        // guncelliyor ve ikisini karistirmak, cagiranin yigin
+        // isaretcisini callee'nin degeriyle ezmek olurdu.
+        let value = if i == 4 { state.rsp } else { *value };
+        ((at + gpr_offset(i)) as *mut u64).write_unaligned(value);
+    }
+    ((at + CONTEXT_RIP) as *mut u64).write_unaligned(state.rip);
+}
+
+/// Bir geri sarma kodunun kac yuva tuttugu.
+///
+/// Yuva sayisini yanlis hesaplamak, bir sonraki kodu **kodun ortasindan**
+/// okumak demek: yorumlayici sessizce cop yurutmeye baslar.
+fn slots_of(op: u8, info: u8) -> usize {
+    match op {
+        UWOP_ALLOC_LARGE => {
+            if info == 0 {
+                2
+            } else {
+                3
+            }
+        }
+        UWOP_SAVE_NONVOL | UWOP_SAVE_XMM128 => 2,
+        UWOP_SAVE_NONVOL_FAR | UWOP_SAVE_XMM128_FAR => 3,
+        _ => 1,
+    }
+}
+
+/// Yigindan bir kelime okur; okunamazsa `None`.
+unsafe fn peek(at: u64) -> Option<u64> {
+    let at = at as usize;
+    if !readable(at, 8) {
+        return None;
+    }
+    Some((at as *const u64).read_unaligned())
+}
+
+/// Bir cercevenin geri sarma bilgisini **yurutur**.
+///
+/// `state` girisde callee'nin durumu; cikista **cagiranin** durumu olur.
+/// Doner: `(EstablisherFrame, isleyici)`.
+///
+/// `pc` hatanin adresi. Prolog **ortasinda** olabiliriz ve o zaman
+/// kodlarin bir kismi henuz yurutulmemistir -- her kodun kendi prolog
+/// ofseti var ve ondan ilerideki kodlar atlaniyor. Atlamayi unutmak,
+/// henuz itilmemis bir registeri yigindan "geri almak" demek olurdu.
+///
+/// # Safety
+/// Cagiran gorevin adres uzayi etkin olmalidir.
+pub unsafe fn virtual_unwind(
+    base: usize,
+    function: &RuntimeFunction,
+    pc: usize,
+    state: &mut UnwindState,
+) -> Option<(usize, Option<(usize, usize)>)> {
+    let mut rva = function.unwind;
+    // Prolog icindeki konum: fonksiyonun basindan kac bayt ileride.
+    let mut pc_offset = (pc.wrapping_sub(base).wrapping_sub(function.begin as usize)) as u32;
+    let mut handler = None;
+    // `EstablisherFrame`: **fonksiyonun govdesindeki** yigin tabani,
+    // geri sarilmis hali degil. Kodlar uygulanmadan once yakalaniyor;
+    // cerceve registeri kuran bir fonksiyonda `SET_FPREG` onu
+    // yeniden hesaplayacak (asagi bkz.).
+    //
+    // Sirayi karistirmak sessiz bir hata olurdu: geri sarma bittikten
+    // sonraki RSP **cagiranin** yiginini gosterir, yani isleyici kendi
+    // yerel degiskenlerini bir ust cercevede arardi.
+    let mut establisher = state.rsp as usize;
+
     for _ in 0..MAX_CHAIN {
         let info = base.wrapping_add(rva as usize);
-        // Basligin dort bayti + en az bir kelime.
-        if !readable(info, 8) {
+        if !readable(info, 4) {
             return None;
         }
-        // SAFETY: bolge yukarida dogrulandi.
-        let (version_flags, count) = unsafe {
-            (
-                (info as *const u8).read(),
-                ((info + 2) as *const u8).read() as usize,
-            )
-        };
-        let version = version_flags & 0x7;
+        let version_flags = (info as *const u8).read();
+        if version_flags & 0x7 != 1 {
+            return None;
+        }
         let flags = version_flags >> 3;
-        // Surum 1 disindaki kayitlarin duzeni farkli olabilir; okumaya
-        // calismak, kod adresi yerine cop dondurmek olurdu.
-        if version != 1 {
+        let count = ((info + 2) as *const u8).read() as usize;
+        let frame_byte = ((info + 3) as *const u8).read();
+        let frame_reg = (frame_byte & 0xF) as usize;
+        let frame_off = (frame_byte >> 4) as u64;
+
+        let codes_at = info + 4;
+        if !readable(codes_at, count * 2 + 2) {
             return None;
         }
 
-        // Geri sarma kodlari **cifte yuvarlanir**.
-        let codes = (count + 1) & !1;
-        let after_codes = info + 4 + codes * 2;
-        if !readable(after_codes, RUNTIME_FUNCTION_SIZE) {
-            return None;
+        let mut i = 0usize;
+        while i < count {
+            let slot = ((codes_at + i * 2) as *const u16).read_unaligned();
+            let prolog_offset = (slot & 0xFF) as u32;
+            let op = ((slot >> 8) & 0xF) as u8;
+            let op_info = ((slot >> 12) & 0xF) as u8;
+            let width = slots_of(op, op_info);
+
+            // Bu kod henuz **yurutulmedi**: prologun o noktasina
+            // varilmadan hata olustu.
+            if prolog_offset > pc_offset {
+                i += width;
+                continue;
+            }
+
+            match op {
+                UWOP_PUSH_NONVOL => {
+                    state.regs[op_info as usize] = peek(state.rsp)?;
+                    state.rsp = state.rsp.wrapping_add(8);
+                }
+                UWOP_ALLOC_LARGE => {
+                    let size = if op_info == 0 {
+                        ((codes_at + (i + 1) * 2) as *const u16).read_unaligned() as u64 * 8
+                    } else {
+                        ((codes_at + (i + 1) * 2) as *const u32).read_unaligned() as u64
+                    };
+                    state.rsp = state.rsp.wrapping_add(size);
+                }
+                UWOP_ALLOC_SMALL => {
+                    state.rsp = state.rsp.wrapping_add((op_info as u64 + 1) * 8);
+                }
+                UWOP_SET_FPREG => {
+                    // Cerceve registeri kurulmus: yigin isaretcisi ondan
+                    // **yeniden hesaplaniyor**. Kodlar ters yurutme
+                    // sirasinda geldigi icin bu, itmelerden once
+                    // geliyor -- yani once dogru RSP bulunuyor, sonra
+                    // itilenler geri aliniyor.
+                    state.rsp = state.regs[frame_reg].wrapping_sub(frame_off * 16);
+                    // Cerceve registeri olan bir fonksiyonda yigin
+                    // tabani budur; yukarida yakalanan ham RSP degil.
+                    establisher = state.rsp as usize;
+                }
+                UWOP_SAVE_NONVOL => {
+                    let off =
+                        ((codes_at + (i + 1) * 2) as *const u16).read_unaligned() as u64 * 8;
+                    state.regs[op_info as usize] = peek(state.rsp.wrapping_add(off))?;
+                }
+                UWOP_SAVE_NONVOL_FAR => {
+                    let off = ((codes_at + (i + 1) * 2) as *const u32).read_unaligned() as u64;
+                    state.regs[op_info as usize] = peek(state.rsp.wrapping_add(off))?;
+                }
+                // XMM kaydetmeleri yigin isaretcisini degistirmiyor ve
+                // TCMK kayan nokta baglamini tasimiyor: yalnizca dogru
+                // sayida yuva atlaniyor.
+                UWOP_SAVE_XMM128 | UWOP_SAVE_XMM128_FAR => {}
+                // Kesme cercevesi yalnizca cekirdek kipinde olur. Ring
+                // 3'te gormek, kaydin bozuk oldugunu soyler.
+                UWOP_PUSH_MACHFRAME => return None,
+                _ => return None,
+            }
+            i += width;
+        }
+
+        // `EstablisherFrame`: cerceve registeri varsa ondan, yoksa
+        // fonksiyonun govdesindeki RSP.
+        if handler.is_none() && flags & (UNW_FLAG_EHANDLER | UNW_FLAG_UHANDLER) != 0 {
+            let codes = (count + 1) & !1;
+            let after = info + 4 + codes * 2;
+            if readable(after, 4) {
+                let handler_rva = (after as *const u32).read_unaligned();
+                if handler_rva != 0 {
+                    let at = base.wrapping_add(handler_rva as usize);
+                    if mmu::is_user_accessible(at) {
+                        handler = Some((at, after + 4));
+                    }
+                }
+            }
         }
 
         if flags & UNW_FLAG_CHAININFO != 0 {
-            // Zincirli kayit: isleyici alaninda bir `RUNTIME_FUNCTION`
-            // duruyor. Onun `unwind` alanini izliyoruz.
-            // SAFETY: bolge yukarida dogrulandi.
-            let next = unsafe { ((after_codes + 8) as *const u32).read_unaligned() };
+            let codes = (count + 1) & !1;
+            let after = info + 4 + codes * 2;
+            if !readable(after, RUNTIME_FUNCTION_SIZE) {
+                return None;
+            }
+            let next = ((after + 8) as *const u32).read_unaligned();
             if next == rva {
-                // Kendini gosteren zincir: donguye girmek yerine birak.
                 return None;
             }
             rva = next;
+            // Zincirlenen **ana** kaydin prologu tumuyle yurutulmustur:
+            // parca fonksiyon zaten onun govdesinde kosuyordu.
+            pc_offset = u32::MAX;
             continue;
         }
-
-        if flags & (UNW_FLAG_EHANDLER | UNW_FLAG_UHANDLER) == 0 {
-            // Bu fonksiyonun isleyicisi yok. Kayit yine de gecerli --
-            // yalnizca geri sarma bilgisi tasiyor.
-            return None;
-        }
-
-        // SAFETY: bolge yukarida dogrulandi.
-        let handler_rva = unsafe { (after_codes as *const u32).read_unaligned() };
-        if handler_rva == 0 {
-            return None;
-        }
-        let handler = base.wrapping_add(handler_rva as usize);
-        if !mmu::is_user_accessible(handler) {
-            return None;
-        }
-        // `HandlerData`: isleyici RVA'sinin hemen ardindaki alan.
-        // Dil'e ozeldir (MSVC'de "scope table"); cekirdek icerigini
-        // yorumlamaz, yalnizca adresini gecirir.
-        return Some((handler, after_codes + 4));
+        break;
     }
-    None
+
+    // Cagiranin durumu: donus adresi yiginin tepesinde.
+    let return_to = peek(state.rsp)?;
+    state.rsp = state.rsp.wrapping_add(8);
+    state.rip = return_to;
+    state.regs[4] = state.rsp;
+    Some((establisher, handler))
 }
 
 // --- DISPATCHER_CONTEXT ----------------------------------------------
@@ -378,6 +570,10 @@ pub mod disp {
     pub const LANGUAGE_HANDLER: usize = 0x30;
     pub const HANDLER_DATA: usize = 0x38;
     pub const HISTORY_TABLE: usize = 0x40;
+    /// Geri sarmanin kaldigi yer. TCMK dagitimda sifir geciyor;
+    /// anlamli olmasi icin once geri sarmanin **ikinci** yarisi
+    /// (`RtlUnwindEx`) gerekiyor.
+    #[allow(dead_code)]
     pub const SCOPE_INDEX: usize = 0x48;
 }
 

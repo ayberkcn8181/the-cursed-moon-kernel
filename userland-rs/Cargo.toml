@@ -144,6 +144,10 @@ path = "src/win/apc.rs"
 name = "winpdata"
 path = "src/win/pdata.rs"
 
+[[bin]]
+name = "winvunw"
+path = "src/win/vunwind.rs"
+
 [profile.dev]
 panic = "abort"
 opt-level = 1

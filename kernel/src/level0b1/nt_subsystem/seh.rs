@@ -382,6 +382,34 @@ static NEXT_RECORD: [AtomicUsize; scheduler::MAX_TASKS] =
 /// Zincirde kac adim atildi (dongu koruyucusu).
 static CHAIN_STEPS: [AtomicUsize; scheduler::MAX_TASKS] =
     [const { AtomicUsize::new(0) }; scheduler::MAX_TASKS];
+
+/// x86_64 yurumesinin **sanal olarak geri sarilmis** durumu.
+///
+/// i386'da bu diziye gerek yok: zincir yiginda duruyor ve "siradaki"
+/// bir isaretci okumakla bulunuyor. x64'te siradaki cerceveyi bulmak
+/// bir hesap gerektiriyor, ve o hesap isleyici cagrilari **arasinda**
+/// korunmak zorunda -- her isleyici cekirdege geri donuyor ve yurume
+/// oradan devam ediyor.
+#[cfg(target_arch = "x86_64")]
+static mut UNWIND_STATE: [pdata::UnwindState; scheduler::MAX_TASKS] =
+    [pdata::UnwindState {
+        rip: 0,
+        rsp: 0,
+        regs: [0; 16],
+    }; scheduler::MAX_TASKS];
+/// Yurume durumu kuruldu mu (0 = henuz baslamadi).
+#[cfg(target_arch = "x86_64")]
+static UNWIND_READY: [AtomicUsize; scheduler::MAX_TASKS] =
+    [const { AtomicUsize::new(0) }; scheduler::MAX_TASKS];
+/// Kac cerceve **sanal olarak** geri sarildi (olcum).
+#[cfg(target_arch = "x86_64")]
+static FRAMES_UNWOUND: AtomicUsize = AtomicUsize::new(0);
+
+/// Sanal geri sarilan cerceve sayisi -- kabuk raporu.
+#[cfg(target_arch = "x86_64")]
+pub fn frames_unwound() -> usize {
+    FRAMES_UNWOUND.load(Ordering::Relaxed)
+}
 /// Dagitilan istisnanin bayraklari -- `EXCEPTION_NONCONTINUABLE` burada.
 static FLAGS: [AtomicUsize; scheduler::MAX_TASKS] =
     [const { AtomicUsize::new(0) }; scheduler::MAX_TASKS];
@@ -423,6 +451,8 @@ pub fn reset(task: usize) {
     UNWIND_TARGET[task].store(0, Ordering::Relaxed);
     UNWIND_NEXT[task].store(0, Ordering::Relaxed);
     UNWIND_STEPS[task].store(0, Ordering::Relaxed);
+    #[cfg(target_arch = "x86_64")]
+    UNWIND_READY[task].store(0, Ordering::Relaxed);
 }
 
 /// `SetUnhandledExceptionFilter`. Doner: **onceki** filtre (Windows'un
@@ -691,6 +721,13 @@ unsafe fn begin(
         NEXT_VEH[task].store(0, Ordering::Relaxed);
         NEXT_RECORD[task].store(chain_head(teb_at), Ordering::Relaxed);
         CHAIN_STEPS[task].store(0, Ordering::Relaxed);
+        // x64 yurumesi de bastan kuruluyor. Unutmak sessiz ve olumcul
+        // bir hataydi: **ikinci** dagitim, birincinin biraktigi
+        // cerceveden devam ediyor ve o cerceve coktan yok oluyor.
+        // Sinav bunu ilk kosumda yakaladi -- D geciyor, E ondan sonra
+        // geldigi icin bambaska bir adreste patliyordu.
+        #[cfg(target_arch = "x86_64")]
+        UNWIND_READY[task].store(0, Ordering::Relaxed);
     }
     ACTIVE[task].store(1, Ordering::Relaxed);
 
@@ -1100,45 +1137,80 @@ unsafe fn table_handler(
     record_at: usize,
     context_at: usize,
 ) -> Option<UserContext> {
-    let steps = CHAIN_STEPS[task].fetch_add(1, Ordering::Relaxed);
-    if steps >= MAX_CHAIN {
-        return None;
+    // Yurume durumu ilk cagrida kuruluyor. Kaynak **kesilen baglam**:
+    // hata hangi cercevede olustuysa yurume oradan basliyor.
+    if UNWIND_READY[task].swap(1, Ordering::Relaxed) == 0 {
+        let state = pdata::load_state(context_at);
+        (core::ptr::addr_of_mut!(UNWIND_STATE) as *mut pdata::UnwindState)
+            .add(task)
+            .write(state);
     }
-    // Hata adresi kayittan okunuyor: `begin` onu oraya yazmisti.
-    let pc = ((record_at + rec::ADDRESS) as *const usize).read_unaligned();
-    let (entry_at, function, image_base) = pdata::lookup(task, pc)?;
-    let (handler, handler_data) = pdata::handler_of(image_base, function.unwind)?;
+    let state_at = (core::ptr::addr_of_mut!(UNWIND_STATE) as *mut pdata::UnwindState).add(task);
 
-    // `EstablisherFrame` x64'te **cerceve isaretcisidir**, i386'daki
-    // gibi bir kayit adresi degil: tabloda kayit yok, yigin var.
-    // Cerceve kaydi olmayan (yaprak olmayan ama cerceve registeri
-    // kullanmayan) fonksiyonlarda bu, kesilen RSP'dir.
-    let establisher = (((context_at + ctx::RSP) as *const u64).read_unaligned()) as usize;
+    // Cerceveleri **sirayla** geziyoruz: isleyicisi olan ilk cerceve
+    // dagitiliyor, olmayanlar atlaniyor.
+    //
+    // i386'da bu dongunun karsiligi zincirdeki bir sonraki kayda
+    // gecmekti -- bir isaretci okumak. Burada her adim bir prolog
+    // yorumlamak demek (bkz. `pdata::virtual_unwind`).
+    loop {
+        let steps = CHAIN_STEPS[task].fetch_add(1, Ordering::Relaxed);
+        if steps >= MAX_CHAIN {
+            return None;
+        }
+        let pc = (*state_at).rip as usize;
+        // Yaprak fonksiyonlarin tabloda kaydi olmayabilir ve o zaman
+        // yurume burada biter: kayitsiz bir cercevenin prologunu
+        // yorumlamanin yolu yok.
+        let (entry_at, function, image_base) = pdata::lookup(task, pc)?;
 
-    // `DISPATCHER_CONTEXT` kayitlarin hemen ustune yaziliyor: `begin`
-    // bloga onun icin de yer ayirdi (bkz. `sizes::DISPATCHER`).
-    let dispatcher_at = (POINTERS_AT[task].load(Ordering::Relaxed)
-        + core::mem::size_of::<usize>() * 2
-        + 0xF)
-        & !0xF;
-    if !writable(dispatcher_at, sizes::DISPATCHER) {
-        return None;
+        let mut next = *state_at;
+        let (establisher, found) =
+            pdata::virtual_unwind(image_base, &function, pc, &mut next)?;
+        // Durum **simdi** ilerletiliyor: bu isleyici "sahiplenmiyorum"
+        // derse cekirdege geri donulecek ve yurume cagiranin
+        // cercevesinden surecek.
+        state_at.write(next);
+        FRAMES_UNWOUND.fetch_add(1, Ordering::Relaxed);
+
+        let Some((handler, handler_data)) = found else {
+            // Bu cercevenin isleyicisi yok -- kayit yalnizca geri sarma
+            // bilgisi tasiyor. Bir ust cerceveye gecilir.
+            continue;
+        };
+        let pc = pc;
+
+        // `DISPATCHER_CONTEXT` kayitlarin hemen ustune yaziliyor:
+        // `begin` bloga onun icin de yer ayirdi.
+        let dispatcher_at = (POINTERS_AT[task].load(Ordering::Relaxed)
+            + core::mem::size_of::<usize>() * 2
+            + 0xF)
+            & !0xF;
+        if !writable(dispatcher_at, sizes::DISPATCHER) {
+            return None;
+        }
+        pdata::write_dispatcher(
+            dispatcher_at,
+            pc,
+            image_base,
+            entry_at,
+            establisher,
+            context_at,
+            handler,
+            handler_data,
+        );
+
+        // Imza i386 ile **birebir ayni**: (ExceptionRecord,
+        // EstablisherFrame, ContextRecord, DispatcherContext). Ayrilan
+        // sey yalnizca ilk ikisini nasil buldugumuz ve dorduncunun dolu
+        // olmasi.
+        return build_frame(
+            task,
+            base,
+            handler,
+            &[record_at, establisher, context_at, dispatcher_at],
+        );
     }
-    pdata::write_dispatcher(
-        dispatcher_at,
-        pc,
-        image_base,
-        entry_at,
-        establisher,
-        context_at,
-        handler,
-        handler_data,
-    );
-
-    // Imza i386 ile **birebir ayni**: (ExceptionRecord, EstablisherFrame,
-    // ContextRecord, DispatcherContext). Ayrilan sey yalnizca ilk ikisini
-    // nasil buldugumuz ve dorduncunun dolu olmasi.
-    build_frame(task, base, handler, &[record_at, establisher, context_at, dispatcher_at])
 }
 
 /// Isleyiciye girilecek yigin cercevesini kurar.

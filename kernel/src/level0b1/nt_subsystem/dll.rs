@@ -507,6 +507,14 @@ static KERNEL32: &[Export] = &[
         stack_bytes: 12,
     },
     Export {
+        name: "RtlVirtualUnwind",
+        ordinal: 71,
+        service: nt::NT_RTL_VIRTUAL_UNWIND,
+        // HandlerType, ImageBase, ControlPc, FunctionEntry,
+        // ContextRecord, HandlerData, EstablisherFrame, ContextPointers
+        stack_bytes: 32,
+    },
+    Export {
         name: "GetExitCodeThread",
         ordinal: 50,
         service: nt::NT_GET_EXIT_CODE_THREAD,

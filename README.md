@@ -27,8 +27,8 @@ masaustu sunuyor.
 | Mimariler | i386 (Multiboot1, `int 0x80`) · x86_64 (Multiboot2, `syscall`) |
 | Ikili bicimleri | ELF32/ELF64 · PE32/PE32+ (ithal tablosu cozulur) |
 | POSIX cagrilari | 74 (+ ELF yardimci vektoru, dosya destekli `mmap`, `clone`, `futex`, `SIGPIPE`, `EINTR`/`SA_RESTART`, is denetimi, `SA_SIGINFO`, `sigaltstack`, gercek-zamanli sinyaller, `sigtimedwait`) |
-| NT/Win32 cagrilari | 93 (`KERNEL32.dll` 70 ihracat + `TCMKGUI.dll`) |
-| Ring 3 uygulamalari | 42 ELF + 19 PE (biri yalnizca x86_64) |
+| NT/Win32 cagrilari | 94 (`KERNEL32.dll` 71 ihracat + `TCMKGUI.dll`) |
+| Ring 3 uygulamalari | 42 ELF + 20 PE (ikisi yalnizca x86_64) |
 | Kalici depolama | ATA PIO + MBR + TCMKFS (yazilabilir, iki mimari) + takas |
 | Kod | ~30 bin satir cekirdek + ~17 bin satir userland |
 
@@ -60,7 +60,7 @@ artik POSIX yuzunde de **yakalanip duzeltilebiliyor**
 gucte cevap veriyor.
 
 Her yetenek QEMU'da **olculerek** dogrulanmistir: `probe` (16 sinav),
-`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (5), `bigfile` (6), `heap` (5), `swapx` (6), `jobs` (6), `winsusp` (6), `winctx` (7), `sigfault` (7), `winunwind` (7), `altstack` (7), `winnest` (6), `rtsig` (7), `winapc` (7), `sigwait` (7), `winpdata` (7), `sigchld` (7), `bequest`
+`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (5), `bigfile` (6), `heap` (5), `swapx` (6), `jobs` (6), `winsusp` (6), `winctx` (7), `sigfault` (7), `winunwind` (7), `altstack` (7), `winnest` (6), `rtsig` (7), `winapc` (7), `sigwait` (7), `winpdata` (7), `sigchld` (7), `winvunw` (7), `bequest`
 (6), `nested` (4), `winenv` (4) gibi programlar sonucu hem ekrana hem
 seri gunluge yaziyor. Olcumler yol boyunca gercek hatalar buldu -- dolan
 VFS tablosu, `CreateFileA`'nin cevrilmeyen Windows yollari, `GDT`
@@ -7778,13 +7778,10 @@ tasiyor.
 
 ### Bilerek yapilmayanlar
 
-* **Sanal geri sarma yok** -- yani tablo tabanli SEH'in **ikinci
-  yarisi**. Su an yalnizca hatanin olustugu cercevenin isleyicisi
-  cagriliyor. O isleyici "sahiplenmiyorum" derse gidecek baska yer yok:
-  cagiran cerceveye gecmek icin geri sarma kodlarini yurutup RSP/RIP'i
-  yeniden kurmak gerekir (`RtlVirtualUnwind`). i386'da bu bedava --
-  zincir zaten cagiran cerceveleri gosterir; x64'te bir kod
-  yorumlayicisi ister.
+* ~~**Sanal geri sarma yok.**~~ Geldi -- bkz.
+  [Prologu geri almak](#prologu-geri-almak-sanal-geri-sarma). Yurume
+  artik cerceveleri geziyor: bir `__try` cagirdiginin hatasini
+  yakalayabiliyor.
 * **`.pdata` okunmuyor** (yukari bkz.): TCMK'nin PE'lerinde yok.
 * **`RtlUnwindEx` yok.** `RtlUnwind`in x64 karsiligi ve sanal geri
   sarmanin ustune kurulu.
@@ -7930,6 +7927,150 @@ sinav neden sustugunu soyleyemiyordu. `waitpid`in durum kelimesinden
   plan ayrimi, `SIGTTIN`/`SIGTTOU` ve oturum (`setsid`) yok -- onlar
   paylasilan bir denetim terminali kavrami istiyor ve TCMK'de her GUI
   surecinin kendi penceresi var.
+
+## Prologu geri almak: sanal geri sarma
+
+Bir onceki bati tablo tabanli SEH'in **birinci** yarisini getirdi: hata
+adresini iceren fonksiyonu bul, isleyicisini cagir. Orada acikca yarim
+birakilan soru suydu -- o isleyici "sahiplenmiyorum" derse ne olur?
+
+i386'da soru yok. Zincir yiginda duruyor ve her kayit bir oncekini
+gosteriyor: **siradaki cerceve bir isaretci okumakla** bulunuyor. x64'te
+zincir yok. Cagiranin yigin isaretcisini bulmanin tek yolu, callee'nin
+prologunu **geri almak**:
+
+```text
+  push rbx          ->  geri alirken: rbx = [rsp]; rsp += 8
+  sub  rsp, 0x20    ->  geri alirken: rsp += 0x20
+  mov  rbp, rsp     ->  geri alirken: rsp = rbp - offset*16
+```
+
+Derleyici bunlari bir kod dizisi olarak ikiliye yaziyor ve cekirdek o
+diziyi **yurutuyor** -- ters yonde. Onceki bati "maliyet uygulamadan
+cekirdege gecti" diyordu; bu bati o maliyetin faturasi.
+
+### Ucuncu yuz: `__try` artik cagirdiginin hatasini yakaliyor
+
+Asil kazanc D sinavinda. Bir `__try`nin isi kendi satirlarinin degil,
+**cagirdigi kodun** hatasini yakalamaktir -- ve bu batiya kadar x64'te
+o mumkun degildi. Yurume tek cerceveden ileri gitmiyordu.
+
+```text
+  tcmk_outer1  ->  tcmk_leaf     leaf patliyor
+                                 leaf'in isleyicisi yok
+                                 -> geri sar, outer1'in isleyicisi kossun
+```
+
+`EstablisherFrame`in dogrulugu burada **gorunur** hale geliyor. Isleyici
+"devam et" derken iki register duzeltiyor: RIP'i kurtarma noktasina,
+**RSP'yi de** `EstablisherFrame`e. Ikincisi olmadan akis, callee'nin
+cercevesindeki bir yigin isaretcisiyle cagiranin koduna doner ve ilk
+`ret`te dagilir.
+
+### Iki ayri olcum yolu
+
+Sinav iki yoldan bakiyor ve ikisi de gerekli:
+
+* **Dogrudan** (A, B, C, F, G): `RtlVirtualUnwind` elle kurulmus bir
+  yigin uzerinde cagriliyor. Yorumlayicinin her kuralini tek tek
+  olcmenin tek yolu bu -- gercek bir cokme, **hangi** kuralin
+  bozuldugunu soylemez.
+* **Dagitim uzerinden** (D, E): gercek hata, gercek yigin. Yorumlayici
+  dogru olsa bile yurumenin dagitima **baglanmis** olmasi ayri bir sey.
+
+```text
+[winvunw] A cerceve geri sarildi:      gecti (RIP cagirana dondu)
+[winvunw] B register geri yuklendi:    gecti (itilen RBX yigindan geri alindi)
+[winvunw] C EstablisherFrame:          gecti (govdedeki yigin tabani dondu)
+[winvunw] D CAGIRANIN isleyicisi:      gecti (callee patladi, cagiran yakaladi)
+[winvunw] E isleyicisiz cerceve        gecti (ara cerceve atlandi, iki ust
+          atlandi                             yakaladi)
+[winvunw] F prolog ortasi:             gecti (yurutulmemis kod atlandi)
+[winvunw] G SET_FPREG:                 gecti (RSP cerceve registerinden)
+```
+
+![winvunw](docs/screenshot-winvunw.png)
+
+F kolayca atlanabilecek olani. Hata prologun **ortasinda** olustuysa
+kodlarin bir kismi henuz yurutulmemistir; hepsini uygulamak, daha
+itilmemis bir registeri yigindan "geri almak" demek olur ve sonuc
+sessizce yanlis cikar.
+
+G ise `SET_FPREG`in varlik sebebini olcuyor: degisken boyutlu yigin
+ayirmasi (`alloca`) yapan bir fonksiyonda RSP'yi **izlemek imkansizdir**,
+o yuzden dogru taban cerceve registerinden hesaplanir.
+
+### Bir kopya silindi
+
+Onceki batida `handler_of` diye ayri bir fonksiyon vardi ve yalnizca
+isleyiciyi buluyordu. `virtual_unwind` ayni `UNWIND_INFO` kaydini zaten
+bastan sona okuyor -- yani ikisi ayni ABI'nin iki kopyasi haline geldi.
+Bu dosyanin kendi yorumlari tam olarak o duruma karsi uyariyordu, o
+yuzden kopya kaldirildi: isleyici artik geri sarmanin **yan urunu**.
+
+### Dort bozma, ve uc hata
+
+```text
+prolog ofseti yok sayiliyor  ->  F "prologun tamami uygulandi:
+                                    tuzak degeri okundu"
+SET_FPREG uygulanmiyor       ->  G "RSP izlenmeye calisildi"
+isleyicisiz cerceve yurumeyi ->  D ve E "cocuk cevap vermedi"
+durduruyor
+EstablisherFrame geri        ->  C, D, E, G (dordu birden)
+sarilmis RSP'den
+```
+
+Sinav uc hata buldu ve ikisi kendisindeydi.
+
+**Bir (cekirdekte).** Ilk kosumda D geciyor, E ondan sonra **bambaska
+bir adreste** patliyordu. Sebep: yurume durumu dagitimlar **arasinda
+temizlenmiyordu**. Ikinci dagitim, birincinin biraktigi cerceveden
+devam ediyor ve o cerceve coktan yok oluyordu. i386'da bu hata
+olamazdi -- orada yurume durumu diye bir sey yok, zincirin basi her
+seferinde `fs:[0]`dan yeniden okunuyor.
+
+**Iki (sinavda).** A ve B kaliyordu ve teshis "RIP geri sarilmadi"
+diyordu. Sentetik yigin `push rbx` + `sub rsp,0x20` prologunun
+**bittigi** hali taklit ediyordu ama olcum adresi prologun ortasindaydi
+(`+2`): `sub` kodunun prolog ofseti 8 oldugu icin cekirdek onu hakli
+olarak atliyordu. Yani sinav yanlislikla F'nin durumunu kuruyor, sonra
+A'nin cevabini bekliyordu.
+
+**Uc (yine sinavda).** F duzeltildikten sonra bile kaliyordu ve bu kez
+ham degerler konusmadan anlasilmadi: `ip` ve `bx` **ikisi de sifirdi**
+-- ne dogru deger, ne de tuzak degeri. Sebep `write_bytes`in **eleman**
+sayisi almasiydi; `*mut u64` icin verilen `STACK_WORDS * 8`, sahte
+yigini sekiz kat asip hemen ardindaki statikleri (kayit tablosu ve
+`UNWIND_INFO`) sifirliyordu. Teshis metni "prologun tamami uygulandi"
+diyordu ve **dogruydu** ama alakasizdi: uygulanacak kod kalmamisti.
+Ham sayilar raporda birakildi, cunku bir kez tam olarak bu isi gordu.
+
+### Dagitim sinavlari cocuga tasindi
+
+D ve E ilk yazilista ebeveynde kosuyordu. Ucuncu bozmada (isleyicisiz
+cerceve yurumeyi durduruyor) hata sahipsiz kaldi ve sinav C'den sonra
+sustu. Ikisi de cocuk surece tasindi ve cevap cikis kodunda: isaret
+biti ayri tutuluyor, yoksa "her sey basarisiz" ile "cocuk oldu" ayirt
+edilemezdi.
+
+### Bilerek yapilmayanlar
+
+* **`RtlUnwindEx` yok** -- geri sarmanin **ucuncu** yarisi: cerceveleri
+  gercekten cozmek ve yoldaki `__finally` bloklarini kosturmak. Su an
+  yalnizca **sanal** geri sarma var; yani cekirdek cagiran cerceveyi
+  *bulabiliyor* ama yigini *cozmuyor*. i386'daki `RtlUnwind`in x64
+  karsiligi bu.
+* **`ContextPointers` yok sayiliyor.** Gercek `RtlVirtualUnwind`
+  saklanan registerlerin **adreslerini** de doldurur; hata ayiklayicilar
+  onlari degistirmek icin kullanir. TCMK yalnizca degerleri tasiyor.
+* **XMM saklamalari atlaniyor.** `UWOP_SAVE_XMM128` kodlari dogru sayida
+  yuva tuketiyor ama icerikleri okunmuyor: TCMK kayan nokta baglamini
+  hic tasimiyor (bkz. `CONTEXT` bolumleri).
+* **`UWOP_PUSH_MACHFRAME` reddediliyor.** Kesme cercevesi yalnizca
+  cekirdek kipinde olur; Ring 3'te gormek kaydin bozuk oldugunu soyler.
+* **`HandlerType` ayirt edilmiyor.** `RtlVirtualUnwind`in ilk argumani
+  `__except` filtresi mi `__finally` blogu mu arandigini soyler; ikisini
+  ayirmak once `RtlUnwindEx` istiyor.
 
 ## Alfa'nin bilinen sinirlari
 
