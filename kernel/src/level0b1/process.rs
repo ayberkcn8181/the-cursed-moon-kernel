@@ -607,14 +607,29 @@ unsafe fn enter_ring3(
     program: &str,
     args: &str,
 ) -> Result<(), SpawnError> {
-    // Kullanici yigini: imajin bittigi yerden sonra, sayfa hizali. Arada
-    // bir **koruma sayfasi** var (bkz. `STACK_GUARD_SIZE`).
-    let guard = (prepared.end + 0xFFF) & !0xFFF;
-    let stack_bottom = guard + STACK_GUARD_SIZE;
-    let stack_top = stack_bottom + USER_STACK_SIZE;
-    // Sinir, gercekten eslenmis pencere: kendi adres uzayinda 512 KiB,
-    // paylasimli modelde (x86_64) tum bolge.
-    if stack_top > mmu::USER_MEM_START + mmu::USER_MAP_SIZE {
+    // Kullanici yigini pencerenin **tepesine** konuyor; aradaki her sey
+    // bosluk.
+    //
+    // Yigin uzun sure imajin hemen ardindaydi ve o zaman icin
+    // yetiyordu: yigin sabit boyluydu, koruma sayfasi da sabit bir
+    // duvardi. Yigin **buyumeye** baslayinca o yerlesim imkansizlasti --
+    // duvarin hemen altinda program break duruyordu, yani buyume icin
+    // bir sayfa bile yer yoktu. Ilk kosumda sinav bunu hemen gosterdi:
+    // ilk tasma "sayfa-yok" hatasiyla sureci goturuyordu.
+    //
+    // Klasik yerlesim bu sorunu bastan cozuyor: heap asagidan yukari,
+    // yigin yukaridan asagi buyur ve aralarindaki bosluk ikisinin de
+    // payidir.
+    //
+    //   [ imaj ][ heap -> ... bosluk ... <- yigin ][ mmap ]
+    let stack_top = (mmu::USER_MEM_START + mmu::USER_MAP_SIZE) & !0xFFF;
+    let stack_bottom = stack_top - USER_STACK_SIZE;
+    let guard = stack_bottom - STACK_GUARD_SIZE;
+    // Imajin bittigi yer, sayfa hizali: heap buradan baslar.
+    let heap_floor = (prepared.end + 0xFFF) & !0xFFF;
+    // Imaj ile duvar arasinda hic yer kalmadiysa surec zaten
+    // calisamaz: heap'e de yigin buyumesine de pay yok.
+    if guard <= heap_floor {
         return Err(SpawnError::NoRoomForStack);
     }
 
@@ -639,6 +654,11 @@ unsafe fn enter_ring3(
     // sart: aksi halde brk sayfayi asip yiginla bitisirdi ve koruma
     // anlamsizlasirdi.
     kernel_api::set_program_break(prepared.end, guard);
+
+    // Yigin yerlesimi kaydediliyor: buyume buradan okunuyor. Koruma
+    // sayfasi artik sabit bir duvar degil, asagi inebilen bir sinir
+    // (bkz. `level0b1::stack`).
+    crate::level0b1::stack::install(scheduler::current_id(), guard, stack_top);
 
     // Yeni imaj eski sinyal isleyicilerini devralmaz: kayitli adresler
     // artik var olmayan bir programa aittir, calistirilirsa surec kendi

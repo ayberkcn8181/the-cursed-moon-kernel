@@ -60,7 +60,7 @@ artik POSIX yuzunde de **yakalanip duzeltilebiliyor**
 gucte cevap veriyor.
 
 Her yetenek QEMU'da **olculerek** dogrulanmistir: `probe` (16 sinav),
-`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (5), `bigfile` (6), `heap` (5), `swapx` (6), `jobs` (6), `winsusp` (6), `winctx` (7), `sigfault` (7), `winunwind` (7), `altstack` (7), `winnest` (6), `rtsig` (7), `winapc` (7), `sigwait` (7), `winpdata` (7), `sigchld` (7), `winvunw` (7), `bequest`
+`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (5), `bigfile` (6), `heap` (5), `swapx` (6), `jobs` (6), `winsusp` (6), `winctx` (7), `sigfault` (7), `winunwind` (7), `altstack` (7), `winnest` (6), `rtsig` (7), `winapc` (7), `sigwait` (7), `winpdata` (7), `sigchld` (7), `winvunw` (7), `stackgrow` (7), `bequest`
 (6), `nested` (4), `winenv` (4) gibi programlar sonucu hem ekrana hem
 seri gunluge yaziyor. Olcumler yol boyunca gercek hatalar buldu -- dolan
 VFS tablosu, `CreateFileA`'nin cevrilmeyen Windows yollari, `GDT`
@@ -6849,7 +6849,7 @@ POSIX'in cozumu `sigaltstack`: isleyiciye **ayri** bir yigin ver.
 [altstack] B ustunde kostu:  gecti (isleyicinin yigini ayri bolgede)
 [altstack] C SS_ONSTACK:     gecti (isleyici icinde SS_ONSTACK gorundu)
 [altstack] D YIGIN TASMASI:  gecti (tasma yakalandi, isleyici rapor edebildi)
-[altstack] E koruma sayfasi: gecti (tasma yiginin hemen altinda durdu)
+[altstack] E koruma sayfasi: gecti (tasma koruma sayfasinin uzerinde durdu)
 [altstack] F bayraksiz:      gecti (bayraksiz isleyici normal yiginda kostu)
 [altstack] G dar yigin:      gecti (reddedildi ve kurulu yigin bozulmadi)
 ```
@@ -8072,6 +8072,181 @@ edilemezdi.
   `__except` filtresi mi `__finally` blogu mu arandigini soyler; ikisini
   ayirmak once `RtlUnwindEx` istiyor.
 
+## Yigin otomatik buyuyor: duvar hareketli bir sinir
+
+Bir onceki bati yigin tasmasini **gorunur** kildi: yigin ile program
+break arasina Ring 3'e kapali tek bir sayfa konuldu ve tasma oraya
+dokununca sayfa hatasi olustu. Ama o sayfa bir **duvardi** -- tasan
+program yine oluyordu, yalnizca bu kez tanisiyla birlikte.
+
+Gercek sistemlerde yigin **buyur**. Duvara dokunmak bir son degil, bir
+**istek**: "daha fazla yigin lazim".
+
+```text
+  once:   [ brk ... ][ DUVAR ][ yigin ]
+  sonra:  [ brk ... ][ DUVAR ][ yigin + 1 sayfa ]
+                      ^ bir sayfa asagi kaydi
+```
+
+```
+[stackgrow] A yigin BUYUDU:       gecti (derin ozyineleme sonrasi yigin buyudu)
+[stackgrow] B sayfa sayfa:        gecti (artis sayfa katlarinda ve sayacla tutarli)
+[stackgrow] C duvar asagi indi:   gecti (koruma sayfasi buyume kadar asagi indi)
+[stackgrow] D brk tavani da indi: gecti (brk eski duvara kadar buyuyemedi)
+[stackgrow] E SINIRDA SIGSEGV:    gecti (ozyineleme TAM STACK_MAX'te durdu)
+[stackgrow] F si_addr duvarda:    gecti (hata adresi koruma sayfasinin icinde)
+[stackgrow] G cocuk da buyuyor:   gecti (fork cocugunun yigini da buyudu)
+[stackgrow] yigin 16384 -> 36864 bayt  duvar 0xc7b000 -> 0xc76000  tavan 128 KiB
+```
+
+![stackgrow](docs/screenshot-stackgrow.png)
+
+### Once yerlesim degismek zorundaydi
+
+Yigin uzun sure imajin hemen ardindaydi ve sabit boylu oldugu surece bu
+yetiyordu:
+
+```text
+  [ imaj ][ DUVAR ][ yigin 16 KiB ]
+```
+
+Yigin buyumeye baslayinca bu yerlesim imkansizlasti: duvarin hemen
+altinda program break duruyordu, yani buyume icin **bir sayfa bile** yer
+yoktu. Sinav bunu ilk kosumda gosterdi -- ilk tasma "sayfa-yok"
+hatasiyla sureci goturdu.
+
+Klasik yerlesim sorunu bastan cozuyor: heap asagidan yukari, yigin
+yukaridan asagi buyur ve aralarindaki bosluk ikisinin de payidir.
+
+```text
+  [ imaj ][ heap -> ...... bosluk ...... <- yigin ][ mmap ]
+```
+
+### Buyume: once yeni duvar, sonra eskisi
+
+```text
+  1. hata adresi su anki duvarin icinde mi?        degilse: kacik isaretci
+  2. yeni olcu STACK_MAX'i asar mi?                asarsa:  SIGSEGV
+  3. yeni duvar program break'in altina duser mi?  duserse: SIGSEGV
+  4. bir asagiya YENI duvar kur
+  5. eskisini Ring 3'e ac (artik yiginin parcasi)
+  6. brk tavanini da yeni duvara indir
+```
+
+Sira onemli: 4 ile 5 ters olsaydi arada duvarsiz bir an olurdu ve tam o
+anda gelen ikinci bir tasma hatasiz gecerdi.
+
+Alti numarali adim kolayca atlanabilecek olani, ve D sinavi tam onu
+olcuyor: tavan birakilsaydi `brk` artik yigina ait olan bir adrese kadar
+buyuyebilir, iki bolge sessizce birbirinin verisini ezerdi.
+
+### Iki ABI, iki sozlesme
+
+Mekanizma iki yuzde de ayni, sozlesme degil:
+
+```text
+  POSIX    cekirdek SESSIZCE buyutur.
+           Program hicbir sey gormez; sinirda SIGSEGV gelir.
+
+  Windows  ilk dokunusta STATUS_GUARD_PAGE_VIOLATION atilir.
+           Program onu GORUR -- "yigin sonuna yaklasiyorum" diye
+           okuyabilir ve koruma sayfasini kendi yeniden kurabilir.
+```
+
+TCMK su an POSIX'in sessiz bicimini iki yuze de uyguluyor.
+
+### Sinav once kendi olcusunu kaybetti
+
+E sinavinin ilk yazilisi "sinirsiz ozyineleme yakalandi mi" diye
+soruyordu. `STACK_MAX` denetimi cekirdekten **kaldirildiginda** sinav
+yine 7/7 verdi.
+
+Sebebi: buyumenin **iki** sinir var. Tavan gidince asagidaki sinir (heap
+carpismasi) ozyinelemeyi yine durdurdu ve E "yakalandi" dedi. Yani E
+"bir sinir var" olcuyordu, "tavan var" degil -- dogru cevap, yanlis
+olcu.
+
+Cozum tavani Ring 3'e acmak oldu (yeni bir `kstat`). E artik yiginin
+**tam nerede** durdugunu soruyor: tavan calisiyorsa olcu tam
+`STACK_MAX`'tir, calismiyorsa heap'e kadar buyur ve cok daha buyuk
+cikar. Ayni bozma simdi su cevabi veriyor:
+
+```
+[stackgrow] E SINIRDA SIGSEGV: KALDI (yigin tavani ASTI: sinir STACK_MAX degil, heap carpismasi)
+```
+
+### Bozma sinavlari
+
+Bes bozma denendi; dordu yakalandi ve besincisi bir bulgu:
+
+```text
+  STACK_MAX denetimi kaldirildi   ->  E KALDI  (tavan asildi)
+  brk tavani indirilmedi          ->  D KALDI  (brk yigina girdi)
+  fork yerlesimi devretmedi       ->  G KALDI  (cocugun kaydi yok)
+  tek hamlede iki sayfa           ->  B KALDI  (artis sayacla uyusmuyor)
+  hata adresi denetimi kaldirildi ->  yakalanmadi
+```
+
+Sonuncusu kaydedilmeye deger. `grow` yalnizca **korumali** bir sayfaya
+dusen hatalar icin cagriliyor, ve bugunku TCMK'de bir kullanici adres
+uzayindaki tek korumali sayfa surecin yigin duvari. Yani Ring 3'ten o
+denetime uyusmayan bir adresle gelmek mumkun degil: kacik isaretciler
+eslenmemis sayfalara duser ve o kod yolunu hic gormez. Denetim yine de
+duruyor, cunku kodladigi sart iplik yiginlari kendi duvarlarini aldigi
+anda ulasilabilir olacak.
+
+### Iki sinav kendi olcusunu kaybetmisti
+
+Regresyon iki eski sinavi da duzeltti, ve ikisi de ayni sinifta: dogru
+soru, bozulmus vekil.
+
+**`altstack` E** hata adresinin yiginin 24 KiB'lik bir penceresine
+dusup dusmedigine bakiyordu. Yigin 16 KiB'de sabitken bu "duvarin
+uzerinde mi" demenin iyi bir vekiliydi. Yigin buyumeye baslayinca vekil
+bozuldu: tasma artik duvara tam ustunde carpmasina ragmen kayittan 100
+KiB'den fazla uzakta oluyor, ve sinav "tasma .bss'i ezerek ILERLEDI"
+dedi. Duvarin yeri artik Ring 3'ten okunabildigi icin vekile gerek
+kalmadi.
+
+**`heap` E** "512 KiB'lik bir pencere acilabiliyor mu" diye soruyordu.
+Ayni acilista once baska uygulamalar kostugunda cevap "hayir" cikiyordu
+ve sinav kirmizi veriyordu. Olcum once bu batinin sucu sanildi; ayni
+dizi bati **oncesindeki** cekirdekte kosulunca sayilar birebir ayni
+cikti (`en buyuk bos: 482368`), yani eskiden beri duran bir zayifliktir.
+
+Asil sebebi yeni olcu gosterdi: 482 KiB bos parca varken 64 KiB'lik bir
+pencere de acilmiyordu. Engel heap degil, `wm::MAX_WINDOWS` -- pencere
+tablosu sekiz yuvali ve onceki uygulamalarin pencereleri hala acikti.
+Yani sinav adinin iddia ettigi seyi hic olcmuyordu; olctugu sey iki
+kaynagin birlesimiydi.
+
+Simdi kapasite **iki kez** yoklaniyor -- turlardan once ve sonra -- ve
+sinav turlarin kapasiteyi dusurup dusurmedigine bakiyor. Adi da o:
+`E kapasite korunuyor`. Pencere yuvasi yoksa kapasite iki olcumde de
+sifirdir, turlar sucsuzdur ve sinav bunu **soyleyerek** geciyor. Kendi
+bozma sinavi da var: pencere kapanirken tampon geri verilmezse
+
+```
+[heap] E kapasite korunuyor: KALDI (turlar kapasiteyi DUSURDU: tek parca kuculdu)
+[heap] ... tek parca pencere: 256 -> 96 satir
+```
+
+### Bu batida olmayanlar
+
+* **`RLIMIT_STACK` yok.** Tavan `STACK_MAX` sabiti; surec basina
+  ayarlanamaz ve `setrlimit`/`getrlimit` yok.
+* **Windows'un gorunur bicimi yok.** `STATUS_GUARD_PAGE_VIOLATION`
+  atilmiyor; iki yuzde de POSIX'in sessiz buyumesi uygulaniyor. Windows
+  programlarinin koruma sayfasini kendi yeniden kurmasi (`VirtualProtect`
+  + `PAGE_GUARD`) da bu yuzden yok.
+* **Iplik yiginlari buyumuyor.** `CreateThread` yigini hala sabit 8 KiB
+  ve duvari yok; buyume yalnizca surecin ana yiginina ait.
+* **Yigin kuculmuyor.** Buyuyen yigin bir daha daralmiyor; derinlikten
+  cikan bir program sayfalari geri vermiyor. Gercek Linux da oyle yapar.
+* **`__chkstk` yok.** Buyume sayfa sayfa ve yalnizca duvarin kendisine
+  dokunan erisimler kabul ediliyor; buyuk bir yerel diziyle duvari
+  **atlayan** bir `sub rsp, N` buyume degil, kacik isaretci sayilir.
+
 ## Alfa'nin bilinen sinirlari
 
 Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
@@ -8120,7 +8295,9 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
   tarafi: `tcsetpgrp`/`tcgetpgrp`, on plan/arka plan ayrimi,
   `SIGTTIN`/`SIGTTOU` ve oturum (`setsid`) yok. `SIGCHLD` bu batiyla
   geldi (yukari bkz.), yani ebeveyn artik sormadan ogreniyor.
-- **Is-parcacigi yigini sabit 8 KiB**: `dwStackSize` yok sayiliyor.
+- **Is-parcacigi yigini sabit 8 KiB**: `dwStackSize` yok sayiliyor ve
+  **duvari yok** -- otomatik buyume yalnizca surecin ana yiginina ait
+  (yukari bkz.).
   Beklemenin iki yolu da artik var (`futex` / `WaitOnAddress`, yukari
   bkz.), ama uzerlerine kurulacak `CRITICAL_SECTION`/`SRWLOCK` katmani
   yok -- o katman kullanici tarafina aittir. Oncelik devralma da yok:

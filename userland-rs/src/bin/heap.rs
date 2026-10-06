@@ -40,7 +40,7 @@
 //!   B  bloklar birlesiyor  -> en buyuk bos blok da ayni
 //!   C  blok sayisi ayni    -> heap parcalara bolunmedi
 //!   D  surec sizdirmiyor   -> fork + execve turlari heap'i buyutmuyor
-//!   E  buyuk tahsis olur   -> turlardan sonra 512 KiB'lik pencere aciliyor
+//!   E  kapasite korunuyor  -> turlar tek parca kapasitesini DUSURMEDI
 //! ```
 //!
 //! Pencere yalnizca sahibi **cikinca** kapaniyor (kapatma cagrisi yok),
@@ -51,6 +51,8 @@
 
 #![no_std]
 #![no_main]
+
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use tcmk::gui::Window;
 use tcmk::io::Stdout;
@@ -80,6 +82,69 @@ const LEAK_PER_ROUND: usize = W * H * 4;
 /// E sinavindaki buyuk pencere: 512x256x4 = 512 KiB tek parca.
 const BIG_W: usize = 512;
 const BIG_H: usize = 256;
+
+/// E'nin yokladigi pencere yukseklikleri -- buyukten kucuge.
+///
+/// ## Neden sabit bir olcu yetmedi
+///
+/// E uzun sure tek bir sey soruyordu: 512x256'lik (512 KiB) bir pencere
+/// acilabiliyor mu. Ayni acilista once baska uygulamalar kostugunda
+/// cevap "hayir" oluyordu ve sinav "buyuk tampon AYRILAMADI" diyordu --
+/// oysa sebep bu sinavin turlari degil, hala acik duran sekiz baska
+/// pencereydi. Olculmesi gereken sey turlarin heap'i parcalayip
+/// parcalamadigi; olculen sey heap'in **mutlak** durumuydu. (Ayni
+/// sayilar yigin buyume batisi oncesindeki cekirdekte de birebir cikti,
+/// yani bu bir gerileme degil, eskiden beri duran zayif bir olcuydu.)
+///
+/// ## Hata sinavin **adindaydi**
+///
+/// Yeni olcu bir sey daha gosterdi: 482 KiB bos parca varken 64 KiB'lik
+/// bir pencere de acilmiyordu. Sebebi heap degil, `wm::MAX_WINDOWS`:
+/// pencere tablosu sekiz yuvali ve ondan once kosan uygulamalarin
+/// pencereleri hala aciktir. Yani E, adinin iddia ettigi seyi ("buyuk
+/// tahsis olur") hic olcmuyordu; olctugu sey iki kaynagin **birlesimiydi**
+/// -- bos pencere yuvasi ve tek parca bellek.
+///
+/// Dogru olcu bir **karsilastirma**, ve sinavin adi da o: kapasite
+/// turlardan once ve sonra yoklaniyor, sinav turlarin kapasiteyi
+/// dusurup dusurmedigine bakiyor. Yuva yoksa kapasite iki olcumde de
+/// sifirdir -- turlar sucsuzdur ve sinav bunu **soyleyerek** geciyor.
+/// Boylece sizintiyi olcen soru her durumda cevaplaniyor, ve rapora
+/// kapasitenin kendisi de giriyor.
+const LADDER: [usize; 7] = [256, 192, 128, 96, 64, 48, 32];
+
+/// Yoklama cocugunun denedigi yukseklik (`fork`tan once yaziliyor).
+static PROBE_H: AtomicUsize = AtomicUsize::new(0);
+
+/// Acilabilen en buyuk pencere yuksekligi; hicbiri acilmazsa 0.
+///
+/// Her deneme ayri bir **cocukta** yapiliyor ve sebebi somut: acilan
+/// pencere surec bitince kapanir, yani yoklama kendi olctugu seyi
+/// bozmaz. Ayni surecte acilsa, basarili ilk deneme heap'ten bir parca
+/// tutar ve sonraki olcumu kaydirirdi.
+fn probe_capacity() -> usize {
+    for &h in LADDER.iter() {
+        PROBE_H.store(h, Ordering::SeqCst);
+        match sys::fork() {
+            0 => {
+                let want = PROBE_H.load(Ordering::SeqCst);
+                let opened = Window::open("heap yoklama", 40, 40, BIG_W, want).is_some();
+                sys::exit(if opened { 0 } else { 1 });
+            }
+            id if id > 0 => {
+                let mut status = 0u32;
+                let ok = sys::waitpid(id as usize, &mut status, 0) >= 0
+                    && sys::exited(status)
+                    && sys::exit_status(status) == 0;
+                if ok {
+                    return h;
+                }
+            }
+            _ => return 0,
+        }
+    }
+    0
+}
 
 #[derive(Clone, Copy)]
 struct Check {
@@ -141,6 +206,8 @@ fn main() {
     let used0 = sys::heap_used();
     let largest0 = sys::heap_largest_free();
     let blocks0 = sys::heap_blocks();
+    // Kapasite temel cizgisi: turlar **once** ne kadarina izin veriyordu.
+    let cap0 = probe_capacity();
 
     // --- A/B/C: pencere ac-kapat turlari ---
     let mut rounds_ok = 0usize;
@@ -217,33 +284,26 @@ fn main() {
         passed: d,
     };
 
-    // --- E: buyuk tahsis hala mumkun ---
+    // --- E: kapasite turlardan sonra da ayni ---
     //
     // A-D sayilarla olcuyor; bu, ayni seyi **sonucla** olcuyor. Heap
     // kullanilamaz parcalara bolunmus olsaydi sayilar yine geri gelmis
-    // gorunebilirdi ama 512 KiB'lik tek parca bulunamazdi.
-    let e = match sys::fork() {
-        0 => {
-            let opened = Window::open("heap buyuk", 40, 40, BIG_W, BIG_H).is_some();
-            sys::exit(if opened { 0 } else { 1 });
-        }
-        id if id > 0 => {
-            let mut status = 0u32;
-            // `exited` olmadan: sinyalle olen bir cocuk da "kod 0" gibi
-            // gorunur, cunku cikis kodu durum kelimesinin ust baytinda
-            // duruyor ve sinyalle olumde orasi sifirdir.
-            sys::waitpid(id as usize, &mut status, 0) >= 0
-                && sys::exited(status)
-                && sys::exit_status(status) == 0
-        }
-        _ => false,
-    };
+    // gorunebilirdi ama tek parca bir tampon bulunamazdi.
+    //
+    // Olcu bir **karsilastirma** (bkz. `LADDER`): turlardan once
+    // acilabilen en buyuk pencere, turlardan sonra da acilabilmeli.
+    let cap1 = probe_capacity();
+    let e = cap1 >= cap0;
     checks[4] = Check {
-        name: "E buyuk tahsis olur",
-        detail: if e {
-            "512 KiB'lik pencere aciliyor"
+        name: "E kapasite korunuyor",
+        detail: if e && cap1 >= BIG_H {
+            "512 KiB'lik pencere turlardan sonra da aciliyor"
+        } else if e && cap0 == 0 {
+            "bos pencere yuvasi yok: kapasite ikisinde de sifir"
+        } else if e {
+            "turlardan sonra kapasite aynen duruyor"
         } else {
-            "buyuk tampon AYRILAMADI"
+            "turlar kapasiteyi DUSURDU: tek parca kuculdu"
         },
         passed: e,
     };
@@ -259,8 +319,8 @@ fn main() {
     }
     let _ = writeln!(
         out,
-        "[heap] kullanilan: {} -> {} bayt, en buyuk bos: {} -> {} bayt, blok: {} -> {}",
-        used0, used1, largest0, largest1, blocks0, blocks1
+        "[heap] kullanilan: {} -> {} bayt, en buyuk bos: {} -> {} bayt, blok: {} -> {}, tek parca pencere: {} -> {} satir",
+        used0, used1, largest0, largest1, blocks0, blocks1, cap0, cap1
     );
 
     let mut win = match Window::open("heap -- geri alinan bellek", 250, 150, 470, 190) {

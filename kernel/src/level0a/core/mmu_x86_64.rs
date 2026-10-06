@@ -260,9 +260,71 @@ pub fn is_user_or_demand(addr: usize) -> bool {
 /// Yalnizca kullanici bolgesindeki bir adres icin cagrilmalidir ve
 /// cagrildigi anda o adres uzayi etkin olmalidir.
 pub unsafe fn guard_user_page(addr: usize) -> bool {
-    match user_pte((read_cr3() & ADDR_MASK) as usize, addr) {
+    // Talep sayfasi once **gerceklestiriliyor**.
+    //
+    // Henuz eslenmemis bir sayfada `PTE_USER` zaten kapali: biti bir
+    // daha kapatmak hicbir sey yapmaz ve sayfa ilk dokunusta siradan
+    // bellek olarak aciliverir -- yani koruma hic kurulmamis olur.
+    //
+    // Bu, yigin pencerenin tepesine tasinana kadar gorunmuyordu: eski
+    // yerlesimde duvar imajin son sayfasiydi ve yukleyici oraya zaten
+    // yazmis oluyordu. Duvar imajdan uzaklasinca koruma sessizce
+    // kayboldu.
+    let cr3 = (read_cr3() & ADDR_MASK) as usize;
+    match user_pte(cr3, addr) {
         Some(entry) => {
-            entry.write(entry.read() & !PTE_USER);
+            if entry.read() & PTE_PRESENT == 0 && !handle_demand_fault(addr) {
+                return false;
+            }
+            match user_pte((read_cr3() & ADDR_MASK) as usize, addr) {
+                Some(entry) => {
+                    entry.write(entry.read() & !PTE_USER);
+                    flush_tlb();
+                    true
+                }
+                None => false,
+            }
+        }
+        None => false,
+    }
+}
+
+/// Bu sayfa Ring 3'e **kapatilmis** mi?
+///
+/// `is_user_accessible`in tersi degil, ondan **daha dar** bir soru.
+/// Erisilememenin iki ayri sebebi var ve ikisi bambaska seyler:
+///
+/// ```text
+///   eslenmemis (talep sayfasi)  ->  ilk dokunusta acilacak, normal
+///   eslenmis ama USER kapali    ->  bilerek kapatilmis: KORUMA
+/// ```
+///
+/// Ikisini ayirt etmemek, yiginin daha hic dokunulmamis sayfalarini da
+/// koruma sayfasi saymak demekti.
+pub fn is_guarded(addr: usize) -> bool {
+    unsafe {
+        user_pte((read_cr3() & ADDR_MASK) as usize, addr).map_or(false, |e| {
+            let value = e.read();
+            value & PTE_PRESENT != 0 && value & PTE_USER == 0
+        })
+    }
+}
+
+/// Koruma sayfasini **yeniden acar** -- yigin buyurken.
+///
+/// `guard_user_page`in tersi ve varlik sebebi tek bir cumlede: koruma
+/// sayfasi bir duvar degil, **hareketli bir sinir**. Tasma oraya
+/// dokundugunda sayfa yigina katiliyor ve bir asagisi yeni duvar
+/// oluyor (bkz. `level0b1::stack`).
+///
+/// Doner: sayfa bulundu ve acildi mi.
+///
+/// # Safety
+/// `guard_user_page` ile ayni kosul.
+pub unsafe fn unguard_user_page(addr: usize) -> bool {
+    match user_pte(read_cr3() as usize, addr) {
+        Some(entry) => {
+            entry.write(entry.read() | PTE_USER);
             flush_tlb();
             true
         }

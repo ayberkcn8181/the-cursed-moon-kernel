@@ -451,6 +451,9 @@ fn spawn_inner(
         // tasirdi (bkz. yukarida TEB icin anlatilan cokme).
         #[cfg(target_arch = "x86_64")]
         crate::level0b1::nt_subsystem::pdata::reset(index);
+        // Yigin yerlesimi de yuvaya bagli: yeni gorev kendi imajini
+        // yukleyene kadar buyume kaydi olmamali.
+        crate::level0b1::stack::forget(index);
         (*tasks.add(index)).parent = CURRENT.load(Ordering::Relaxed);
         (*tasks.add(index)).waitable = waitable;
         // Siradan bir gorev kendi grubunun lideridir. Is parcaciklari

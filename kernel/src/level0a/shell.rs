@@ -916,6 +916,20 @@ fn execute(line: &str) {
             // sayaci `SA_NOCLDSTOP`un, toplanan sayaci da `SIG_IGN`in
             // izi -- ikisi de sessizce calisiyor, o yuzden gorunur
             // olmalari onemli.
+            // Yigin buyumesi: kac sayfa eklendi, kac istek reddedildi,
+            // ve gorulen en buyuk yigin. Reddedilen sayisi sifirdan
+            // buyukse bir surec ya sinira dayandi ya da heap'e carpti.
+            let (grown, refused, peak) = crate::level0b1::stack::stats();
+            write_str("yigin: eklenen sayfa ");
+            write_num(grown);
+            write_str("  reddedilen ");
+            write_num(refused);
+            write_str("  en buyuk ");
+            write_num(peak / 1024);
+            write_str(" KiB / ");
+            write_num(crate::level0b1::stack::STACK_MAX / 1024);
+            write_str(" KiB");
+            newline();
             let (chld_sent, chld_suppressed, chld_reaped) = signal::child_stats();
             write_str("SIGCHLD: gonderilen ");
             write_num(chld_sent as usize);

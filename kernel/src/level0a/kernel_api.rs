@@ -115,6 +115,29 @@ pub fn clone_program_break(child: usize) {
     target.limit.store(parent.limit.load(Ordering::Relaxed), Ordering::Relaxed);
 }
 
+/// Calisan gorevin su anki program break'i.
+///
+/// Yigin buyumesi buna bakiyor: duvar heap'in ustune inemez (bkz.
+/// `level0b1::stack`).
+pub fn program_break() -> usize {
+    current_break().current.load(Ordering::Relaxed)
+}
+
+/// Break'in **tavanini** asagi ceker.
+///
+/// Yigin bir sayfa buyudugunde duvar bir asagi iner ve brk'nin tavani
+/// onunla birlikte inmek zorunda: birakilsaydi `brk` artik yigina ait
+/// olan bir adrese kadar buyuyebilirdi.
+///
+/// Yalnizca **asagi** cekiyor; yukari acmak, yigina verilmis bir yeri
+/// geri almak olurdu.
+pub fn lower_break_limit(limit: usize) {
+    let b = current_break();
+    if limit < b.limit.load(Ordering::Relaxed) {
+        b.limit.store(limit, Ordering::Relaxed);
+    }
+}
+
 /// `sys_brk` semantigi: 0 verilirse mevcut break dondurulur; gecerli bir
 /// adres verilirse break oraya tasinir. Basarisizlikta break DEGISMEZ ve
 /// eski deger dondurulur (Linux davranisi).

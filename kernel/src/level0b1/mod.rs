@@ -19,6 +19,8 @@ pub mod nt_subsystem;
 pub mod fork;
 pub mod process;
 pub mod signal;
+/// Yigin otomatik buyume: koruma sayfasi hareketli bir sinir.
+pub mod stack;
 /// Is parcaciklari: clone ve CreateThread.
 pub mod thread;
 /// Adres uzerinde bekleme: futex ve WaitOnAddress.

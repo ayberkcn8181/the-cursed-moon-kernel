@@ -1388,6 +1388,26 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
             /// kendi sayacini goremiyordu -- yani "uyudu mu" sorusunu
             /// ancak bir insan cevaplayabiliyordu.
             const KSTAT_SELF_CPU: usize = 17;
+            /// Cagiran gorevin yiginin **su anki** olcusu (bayt).
+            ///
+            /// Yigin artik buyudugu icin bu sayi sabit degil, ve
+            /// buyumeyi Ring 3'ten olcmenin tek yolu. Olcmeden "derin
+            /// ozyineleme coktu mu" diye sormak, buyumeyi degil
+            /// yalnizca hayatta kalmayi olcerdi.
+            const KSTAT_STACK_SIZE: usize = 18;
+            /// Koruma sayfasinin su anki adresi.
+            const KSTAT_STACK_GUARD: usize = 19;
+            /// Sistemde yigina eklenen toplam sayfa.
+            const KSTAT_STACK_GROWN: usize = 20;
+            /// Bir yiginin buyuyebilecegi en buyuk olcu (`STACK_MAX`).
+            ///
+            /// Sabiti Ring 3'e vermenin sebebi somut: buyumenin **iki**
+            /// sinir vardir (tavan ve heap carpismasi) ve bir sinav
+            /// "sinirsiz ozyineleme yakalandi" diyerek ikisini
+            /// ayirt edemez. Tavani okuyan bir sinav, yiginin tam
+            /// **nerede** durdugunu sorabilir -- ve tavan kaldirilinca
+            /// heap carpismasinin onu gizlemesine izin vermez.
+            const KSTAT_STACK_MAX: usize = 21;
 
             let value = match arg1 {
                 KSTAT_ADDRESS_WAITS => crate::level0a::core::scheduler::address_waits(),
@@ -1399,6 +1419,14 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
                 KSTAT_SELF_CPU => crate::level0a::core::scheduler::cpu_ticks_of(
                     crate::level0a::core::scheduler::current_id(),
                 ) as usize,
+                KSTAT_STACK_SIZE => crate::level0b1::stack::size_of(
+                    crate::level0a::core::scheduler::current_id(),
+                ),
+                KSTAT_STACK_GUARD => crate::level0b1::stack::guard_of(
+                    crate::level0a::core::scheduler::current_id(),
+                ),
+                KSTAT_STACK_GROWN => crate::level0b1::stack::stats().0,
+                KSTAT_STACK_MAX => crate::level0b1::stack::STACK_MAX,
                 // Dosya sistemi sayaclari: bir sinavin "blok sizdi mi"
                 // sorusunu Ring 3'ten cevaplayabilmesi icin. Disk yoksa
                 // ucu de sifir doner.

@@ -1467,6 +1467,14 @@ pub mod kstat {
     pub const SWAP_IN: usize = 16;
     /// Cagiran gorevin **kendi** CPU tiki.
     pub const SELF_CPU: usize = 17;
+    /// Cagiran gorevin yiginin su anki olcusu (bayt).
+    pub const STACK_SIZE: usize = 18;
+    /// Koruma sayfasinin su anki adresi.
+    pub const STACK_GUARD: usize = 19;
+    /// Sistemde yigina eklenen toplam sayfa.
+    pub const STACK_GROWN: usize = 20;
+    /// Bir yiginin buyuyebilecegi en buyuk olcu.
+    pub const STACK_MAX: usize = 21;
 }
 
 /// Bir cekirdek sayacini okur.
@@ -1487,6 +1495,37 @@ pub fn address_wakes() -> usize {
 /// PIT tik sayaci -- 10 ms cozunurluk.
 pub fn ticks() -> usize {
     kstat(kstat::TICKS)
+}
+
+/// Cagiran gorevin yiginin **su anki** olcusu (bayt).
+///
+/// Yigin otomatik buyudugu icin bu sayi sabit degil. Buyumeyi Ring
+/// 3'ten olcmenin tek yolu bu: "derin ozyineleme coktu mu" diye sormak
+/// buyumeyi degil yalnizca hayatta kalmayi olcer.
+pub fn stack_size() -> usize {
+    kstat(kstat::STACK_SIZE)
+}
+
+/// Koruma sayfasinin su anki adresi.
+///
+/// Buyudukce **asagi** iner: yigin ile heap arasindaki sinir hareketli.
+pub fn stack_guard() -> usize {
+    kstat(kstat::STACK_GUARD)
+}
+
+/// Sistemde yigina eklenen toplam sayfa.
+pub fn stack_grown() -> usize {
+    kstat(kstat::STACK_GROWN)
+}
+
+/// Bir yiginin buyuyebilecegi en buyuk olcu -- cekirdegin ilan ettigi tavan.
+///
+/// Buyumenin **iki** sinir var: bu tavan ve asagidan heap carpismasi.
+/// Sinirsiz ozyinelemenin yakalandigini gormek ikisini ayirt etmez --
+/// tavan kaldirilsa bile heap carpismasi ozyinelemeyi durdurur. Tavani
+/// okumak, "nerede durdu" diye sormayi mumkun kiliyor.
+pub fn stack_max() -> usize {
+    kstat(kstat::STACK_MAX)
 }
 
 /// Cagiran gorevin **kendi** CPU tiki.

@@ -35,6 +35,17 @@
 //! tasmayi fark etmez bile, otekinde tasmayi **gorur** ve ne yapacagina
 //! kendisi karar verir.
 //!
+//! ## Sonraki bati bu sayfayi hareketlendirdi
+//!
+//! `stackgrow` batisinda koruma sayfasi bir **duvar** olmaktan cikip
+//! hareketli bir sinir oldu: ona dokunmak artik bir son degil, bir
+//! istek, ve cekirdek yigina bir sayfa katip duvari bir asagi indiriyor.
+//! Bu sinav yine gecerli, cunku buyumenin de bir tavani var
+//! (`STACK_MAX`) ve orada duvar yerinde kaliyor -- tasma hala
+//! **gorunur**. Degisen tek sey: tasma artik yiginin 16 KiB'lik ilk
+//! olcusunde degil, 128 KiB'de duruyor. E sinavi bu yuzden duzeltildi
+//! (bkz. `on_overflow`).
+//!
 //! ## Isleyici geri donemez
 //!
 //! Tasmayi yakalayan bir isleyici kaldigi yerden devam **edemez**:
@@ -49,7 +60,7 @@
 //!   B  ustunde kostu -> SA_ONSTACK isleyicisinin sp'si ALT yiginda
 //!   C  SS_ONSTACK    -> isleyici icinde sorulunca "ustundeyim" diyor
 //!   D  YIGIN TASMASI -> tasma yakalandi ve isleyici rapor edebildi
-//!   E  koruma sayfasi-> tasma yiginin HEMEN ALTINDA durdu
+//!   E  koruma sayfasi-> tasma KORUMA SAYFASININ uzerinde durdu
 //!   F  bayraksiz     -> SA_ONSTACK olmayan isleyici normal yiginda
 //!   G  dar yigin     -> MINSIGSTKSZ altinda reddediliyor
 //! ```
@@ -57,8 +68,8 @@
 //! D bu sinavin sebebi. E onun tamamlayicisi ve ayri bir sey olcuyor:
 //! tasmanin **nerede** durdugu. "Surec oldu mu" diye sormak koruma
 //! sayfasini olcmez -- koruma olmasa da surec olurdu, yalnizca once
-//! .bss'i ezerek. Olcen soru, hata adresinin yiginin hemen altinda
-//! olmasi.
+//! .bss'i ezerek. Olcen soru, hata adresinin koruma sayfasinin
+//! **icinde** olmasi.
 //!
 //! Ikisi de cocuk surecte kosuyor: tasmayi yakalayan bir isleyici
 //! kaldigi yerden devam edemez, yani surec her halukarda biter.
@@ -106,18 +117,11 @@ static HANDLER_FLAGS: AtomicUsize = AtomicUsize::new(usize::MAX);
 static PLAIN_SP: AtomicUsize = AtomicUsize::new(0);
 
 /// Cocugun cevabi cikis kodunda: taban "isleyici kostu", +1 "hata
-/// adresi yiginin hemen altinda".
+/// adresi koruma sayfasinin icinde".
 const CAUGHT_BASE: i32 = 70;
 
-/// Hata adresinin yigina ne kadar yakin olmasi gerektigi.
-///
-/// Yigin 16 KiB, koruma sayfasi onun hemen altinda. Koruma calisiyorsa
-/// hata adresi bu pencereye duser; calismiyorsa tasma .bss'i ezerek
-/// ilerler ve cok daha asagida bir yerde patlar.
-const GUARD_WINDOW: usize = 24 * 1024;
-
-/// Cocugun tasmadan **once** kaydettigi bir yigin adresi.
-static STACK_MARK: AtomicUsize = AtomicUsize::new(0);
+/// Sayfa olcusu -- koruma sayfasi bir sayfa genis.
+const PAGE: usize = 4096;
 
 #[derive(Clone, Copy)]
 struct Check {
@@ -196,11 +200,21 @@ fn devour(depth: usize) -> usize {
 /// kurtarmak degil, raporlamak.
 extern "C" fn on_overflow(_signo: u32, info: *const SigInfo, _context: *mut UContext) {
     // Hata **adresi** koruma sayfasinin calisip calismadigini soyluyor.
-    // Calisiyorsa tasma yiginin hemen altinda durmus; calismiyorsa
-    // .bss'i ezerek ilerlemis ve cok daha asagida patlamistir.
+    // Calisiyorsa tasma duvarin uzerinde durmus; calismiyorsa .bss'i
+    // ezerek ilerlemis ve cok daha asagida patlamistir.
+    //
+    // Ilk yazilista olcu bir **vekildi**: hata adresi, tasmadan once
+    // kaydedilen bir yigin adresinin 24 KiB altinda mi. Yigin 16 KiB'de
+    // sabitken bu dogruydu. Yigin otomatik buyumeye baslayinca vekil
+    // bozuldu -- tasma artik `STACK_MAX`'e kadar iniyor, yani duvara
+    // tam ustunde carpmasina ragmen kayittan 100 KiB'den fazla uzakta.
+    // Sinav o zaman "tasma .bss'i ezerek ILERLEDI" dedi: dogru bir
+    // olcunun yanlis bir vekille verdigi yanlis cevap.
+    //
+    // Duvarin yeri artik Ring 3'ten okunabiliyor, yani vekile gerek yok.
     let addr = unsafe { (*info).addr() };
-    let mark = STACK_MARK.load(Ordering::SeqCst);
-    let near = addr < mark && mark - addr < GUARD_WINDOW;
+    let guard = sys::stack_guard();
+    let near = guard != 0 && addr >= guard && addr < guard + PAGE;
     sys::exit(CAUGHT_BASE + i32::from(near));
 }
 
@@ -325,8 +339,6 @@ fn main() {
     // olduruyor (basarisizlik). Ebeveyn ikisini cikis koduyla ayiriyor.
     let child = sys::fork();
     if child == 0 {
-        let mark = 0u8;
-        STACK_MARK.store(&mark as *const u8 as usize, Ordering::SeqCst);
         signal::action_info(signal::SIGSEGV, on_overflow, signal::SA_ONSTACK, 0);
         devour(0);
         sys::exit(1);
@@ -359,14 +371,14 @@ fn main() {
     // uretmeden .bss'e girer, programin kendi verisini ezer ve ancak cok
     // asagida, eslenmemis bir yerde patlardi. Surec yine olurdu -- yani
     // "oldu mu" diye sormak koruma sayfasini olcmez. Olcen soru: hata
-    // adresi yiginin **hemen altinda** mi.
+    // adresi koruma sayfasinin **icinde** mi.
     let stopped_early = code == CAUGHT_BASE + 1;
     checks[4] = Check {
         name: NAMES[4],
         detail: if !caught {
             "isleyici kosmadi, adres okunamadi"
         } else if stopped_early {
-            "tasma yiginin hemen altinda durdu"
+            "tasma koruma sayfasinin uzerinde durdu"
         } else {
             "tasma .bss'i ezerek ILERLEDI"
         },

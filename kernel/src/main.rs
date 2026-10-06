@@ -174,6 +174,9 @@ static SIGWAIT_ELF: &[u8] = include_bytes!("../../userland/sigwait.elf");
 /// Cocugun durumu: SIGCHLD ile itilen bilgi.
 #[cfg(target_arch = "x86")]
 static SIGCHLD_ELF: &[u8] = include_bytes!("../../userland/sigchld.elf");
+/// Yigin otomatik buyume: duvar asagi iniyor.
+#[cfg(target_arch = "x86")]
+static STACKGROW_ELF: &[u8] = include_bytes!("../../userland/stackgrow.elf");
 /// Sayilan aski: CREATE_SUSPENDED, SuspendThread/ResumeThread.
 #[cfg(target_arch = "x86")]
 static WINSUSP_EXE: &[u8] = include_bytes!("../../userland/winsusp.exe");
@@ -311,6 +314,8 @@ static RTSIG64: &[u8] = include_bytes!("../../userland/rtsig.elf64");
 static SIGWAIT64: &[u8] = include_bytes!("../../userland/sigwait.elf64");
 #[cfg(target_arch = "x86_64")]
 static SIGCHLD64: &[u8] = include_bytes!("../../userland/sigchld.elf64");
+#[cfg(target_arch = "x86_64")]
+static STACKGROW64: &[u8] = include_bytes!("../../userland/stackgrow.elf64");
 
 /// **Windows (PE32+) uygulamalari** -- i386'dakilerle ayni kaynak, ayni
 /// ithal kutuphaneleri; degisen yalnizca hedef. Taban 0x140000000
@@ -408,6 +413,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/rtsig", RTSIG_ELF),
     ("/bin/sigwait", SIGWAIT_ELF),
     ("/bin/sigchld", SIGCHLD_ELF),
+    ("/bin/stackgrow", STACKGROW_ELF),
     ("/bin/winclock.exe", WINCLOCK_EXE),
     ("/bin/winpad.exe", WINPAD_EXE),
     ("/bin/winfiles.exe", WINFILES_EXE),
@@ -472,6 +478,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/rtsig", RTSIG64),
     ("/bin/sigwait", SIGWAIT64),
     ("/bin/sigchld", SIGCHLD64),
+    ("/bin/stackgrow", STACKGROW64),
     ("/bin/winclock.exe", WINCLOCK_EXE64),
     ("/bin/winpad.exe", WINPAD_EXE64),
     ("/bin/winfiles.exe", WINFILES_EXE64),

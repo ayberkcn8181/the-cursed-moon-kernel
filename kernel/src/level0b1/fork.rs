@@ -94,6 +94,14 @@ pub unsafe fn fork(frame: &SyscallFrame, from_interrupt: bool) -> Result<usize, 
     // Program break de kopyalanir: adres uzayi kopyalandigi icin degerler
     // oldugu gibi gecerlidir.
     crate::level0a::kernel_api::clone_program_break(child);
+    // Yigin yerlesimi de devrediliyor. Adres uzayi kopyalandigi icin
+    // adresler oldugu gibi gecerli; devretmemek, cocugun yigininin
+    // **hic** buyuyememesi olurdu -- ve bu, yalnizca derin ozyineleme
+    // yapan bir cocukta ortaya cikardi.
+    crate::level0b1::stack::clone_into(
+        crate::level0a::core::scheduler::current_id(),
+        child,
+    );
 
     // Yuva geri kazanilmis olabilir; onceki sahibinden kalan bir exec
     // istegi cocuga ait degildir.

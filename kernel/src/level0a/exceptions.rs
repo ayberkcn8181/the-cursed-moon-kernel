@@ -138,8 +138,26 @@ pub unsafe fn dispatch(frame: &mut crate::arch::cpu::regs::ExceptionFrame, fault
         //
         // Olcum bunu boyle buldu: cocuk surecte tasma koruma sayfasinda
         // durmuyor, .bss'i ezerek ilerliyordu.
-        let guarded = error_code & USER != 0
-            && !crate::level0a::core::mmu::is_user_accessible(fault_addr);
+        // Olcu `is_user_accessible`in tersi **degil**: erisilememenin
+        // iki ayri sebebi var ve biri tamamen normal. Daha hic
+        // dokunulmamis bir talep sayfasi da "erisilemez" gorunur, ama o
+        // kapatilmis degil -- yalnizca henuz eslenmemis. Ikisini
+        // ayirmamak, yiginin kendi sayfalarini koruma sayfasi saymak
+        // olurdu (bkz. `mmu::is_guarded`).
+        let guarded =
+            error_code & USER != 0 && crate::level0a::core::mmu::is_guarded(fault_addr);
+
+        // Duvara dokunmak bir son degil, bir **istek**: "daha fazla
+        // yigin lazim". Buyume basarirsa hata kurtarildi -- koruma
+        // sayfasi bir asagi indi ve tasan komut yeniden kosacak.
+        //
+        // Denetim `guarded`in hemen ardinda, cunku yalnizca kapali bir
+        // sayfaya dokunan erisim buyume istegi olabilir; ve
+        // kurtarmalardan **once**, cunku COW yolu ayni hatayi yanlis
+        // sebeple kurtarmaya calisirdi (bkz. yukarida).
+        if guarded && unsafe { crate::level0b1::stack::grow(fault_addr) } {
+            return;
+        }
 
         let recovered = if guarded {
             false
