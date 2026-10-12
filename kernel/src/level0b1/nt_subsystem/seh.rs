@@ -87,11 +87,10 @@ pub const EXCEPTION_NONCONTINUABLE: u32 = 0x1;
 /// Derleyicinin `__finally` icin urettigi kod tam olarak bu dalda
 /// calisir. Bayrak olmadan `__try`/`__finally` diye bir sey olamaz --
 /// yikilan cercevelerin temizligi hic yapilmazdi.
-#[cfg(target_arch = "x86")]
 pub const EXCEPTION_UNWINDING: u32 = 0x2;
 
-/// Hedefsiz geri sarma: zincirin **tamami** cozuluyor.
-#[cfg(target_arch = "x86")]
+/// Hedefsiz geri sarma: zincirin (x64'te cerceve yurumesinin) **tamami**
+/// cozuluyor.
 pub const EXCEPTION_EXIT_UNWIND: u32 = 0x4;
 
 /// Bir isleyicinin **kendisi** cokerse olusan istisna bu bayrakla gelir.
@@ -103,7 +102,6 @@ pub const EXCEPTION_EXIT_UNWIND: u32 = 0x4;
 pub const EXCEPTION_NESTED_CALL: u32 = 0x10;
 
 /// Geri sarmanin kendi istisna kodu (`STATUS_UNWIND`).
-#[cfg(target_arch = "x86")]
 const STATUS_UNWIND: u32 = 0xC000_0027;
 
 // --- Isleyici donus degerleri -----------------------------------------
@@ -334,11 +332,9 @@ static UNWIND_TARGET: [AtomicUsize; scheduler::MAX_TASKS] =
 static UNWIND_NEXT: [AtomicUsize; scheduler::MAX_TASKS] =
     [const { AtomicUsize::new(0) }; scheduler::MAX_TASKS];
 /// Geri sarma kayitlarinin kullanici yiginindaki tabani.
-#[cfg(target_arch = "x86")]
 static UNWIND_BASE: [AtomicUsize; scheduler::MAX_TASKS] =
     [const { AtomicUsize::new(0) }; scheduler::MAX_TASKS];
 /// Geri sarmaya ozel `EXCEPTION_RECORD`in adresi.
-#[cfg(target_arch = "x86")]
 static UNWIND_RECORD_AT: [AtomicUsize; scheduler::MAX_TASKS] =
     [const { AtomicUsize::new(0) }; scheduler::MAX_TASKS];
 /// Kac adim atildi (bozuk zincire karsi).
@@ -350,9 +346,35 @@ static UNWIND_STEPS: [AtomicUsize; scheduler::MAX_TASKS] =
 /// `RtlUnwind`in sozlesmesi burada: yurutme **cagiranin** baglamiyla
 /// surer. Hedef adres verilmisse yalnizca `EIP` degisir, verilmemisse o
 /// bile degismez -- yani cagri siradan bir cagri gibi doner.
-#[cfg(target_arch = "x86")]
 static mut UNWIND_RESUME: [UserContext; scheduler::MAX_TASKS] =
     [UserContext::ZERO; scheduler::MAX_TASKS];
+
+/// Geri sarmada isleyiciye verilen `CONTEXT` kaydinin adresi.
+///
+/// i386'da bu alan yok ve olamazdi: oradaki geri sarma isleyicisine
+/// `ContextRecord` olarak sifir veriliyor, cunku zincir kaydi zaten
+/// cercevenin kendisini gosteriyor. x64'te isleyicinin dordunculen
+/// argumani `DISPATCHER_CONTEXT`tir ve o kayit bir `CONTEXT`
+/// **gosterir** -- bos gecilemez.
+#[cfg(target_arch = "x86_64")]
+static UNWIND_CONTEXT_AT: [AtomicUsize; scheduler::MAX_TASKS] =
+    [const { AtomicUsize::new(0) }; scheduler::MAX_TASKS];
+
+/// Geri sarma yurumesinin **sanal olarak geri sarilmis** durumu.
+///
+/// Dagitimin `UNWIND_STATE`inden **ayri** bir dizi ve ayri olmasi sart:
+/// geri sarma neredeyse her zaman bir dagitimin *icinden* baslatiliyor
+/// (`__except`in yaptigi tam olarak budur) ve ikisi ayni yuvayi
+/// paylassaydi geri sarmanin her adimi, dagitimin kaldigi yeri silerdi.
+/// i386'da sorun kendiliginden yok: orada yurume durumu bir isaretci
+/// ve zaten iki ayri degiskende duruyor (`UNWIND_NEXT` / `NEXT_RECORD`).
+#[cfg(target_arch = "x86_64")]
+static mut UNWIND_EX_STATE: [pdata::UnwindState; scheduler::MAX_TASKS] =
+    [pdata::UnwindState {
+        rip: 0,
+        rsp: 0,
+        regs: [0; 16],
+    }; scheduler::MAX_TASKS];
 
 /// Kac geri sarma yapildi, kac isleyici `EXCEPTION_UNWINDING` ile
 /// cagrildi -- kabuktaki `faults` raporu.
@@ -971,20 +993,284 @@ pub unsafe fn unwind(
     true
 }
 
-/// x86_64'te zincir yok, dolayisiyla geri sarilacak bir sey de yok.
+/// `RtlUnwindEx` -- x64'te geri sarmanin **ucuncu** yarisi.
 ///
-/// Sessizce basarili donmek yanlis olurdu: `__finally` bloklari
-/// kosmadigi halde kosmus sayilirdi. 64-bit Windows'un cozumu tablo
-/// tabanlidir (`.pdata`) ve TCMK'de yok -- bkz. README.
+/// Tablo tabanli SEH uc parcadan olusuyor ve ucu de ayri sorular:
+///
+/// ```text
+///   1. arama          hata adresini iceren fonksiyon hangisi?
+///   2. sanal geri sarma  cagiran cerceve nerede?
+///   3. GERI SARMA     aradaki cerceveler NASIL COZULUR, ve
+///                     yoldaki temizlik kodu nasil kosar?
+/// ```
+///
+/// Ilk ikisi vardi: cekirdek cagiran cerceveyi **bulabiliyordu** ama
+/// yigini **cozmuyordu**. Bu, `__try`/`__finally` iceren hicbir x64
+/// ikilisinin dogru calismamasi demekti -- derleyicinin `__finally`
+/// icin urettigi kod yalnizca bu yolda kosar, ve o yapi C++
+/// yikicilarindan kaynak temizligine kadar her yerde.
+///
+/// ## i386 ile ayni sozlesme, bambaska mekanizma
+///
+/// ```text
+///   i386   zincirdeki her kaydi hedefe kadar yuru; her birinin
+///          isleyicisini EXCEPTION_UNWINDING ile cagir.
+///          "Siradaki" = bir isaretci okumak.
+///
+///   x64    her cerceveyi prologunu geri alarak coz; UHANDLER
+///          bayragi olanin isleyicisini cagir.
+///          "Siradaki" = kucuk bir yorumlayici kosturmak.
+/// ```
+///
+/// Hedefin kimligi de degisiyor: i386'da hedef bir **zincir kaydinin
+/// adresi**, x64'te bir **`EstablisherFrame`** -- yani hedef
+/// fonksiyonun govdesindeki yigin tabani.
+///
+/// ## `UHANDLER`, `EHANDLER` degil
+///
+/// Dagitim `EHANDLER` ariyor ("bu istisnayi kim sahipleniyor"), geri
+/// sarma `UHANDLER` ("yoldaki hangi cercevenin temizlenecek isi var").
+/// Ikisini tek maskeyle aramak, yalnizca `__except` filtresi olan bir
+/// cerceveyi geri sarmada da cagirmak olurdu: derleyicinin o is icin
+/// uretmedigi kodu kosturmak.
+///
+/// Doner: `true` ise cerceve guncellendi. `false` ise istek reddedildi
+/// ve cagirana hicbir sey yapilmadan donulur.
+///
+/// # Safety
+/// `frame` Ring 3'ten gelen gecerli bir syscall cercevesi olmalidir.
 #[cfg(target_arch = "x86_64")]
 pub unsafe fn unwind(
-    _frame: &mut crate::arch::cpu::regs::SyscallFrame,
-    _from_interrupt: bool,
-    _target_frame: usize,
-    _target_ip: usize,
-    _return_value: usize,
+    frame: &mut crate::arch::cpu::regs::SyscallFrame,
+    from_interrupt: bool,
+    target_frame: usize,
+    target_ip: usize,
+    return_value: usize,
 ) -> bool {
-    false
+    let task = scheduler::current_id();
+    if task >= scheduler::MAX_TASKS {
+        return false;
+    }
+    if teb::address(task) == 0 {
+        return false;
+    }
+    // Ic ice geri sarma (`ExceptionCollidedUnwind`) desteklenmiyor: bir
+    // geri sarma isleyicisi yeniden `RtlUnwindEx` cagirirsa reddediliyor.
+    // i386 yuzuyle ayni sinir ve ayni sebep.
+    if UNWINDING[task].load(Ordering::Relaxed) != 0 {
+        return false;
+    }
+
+    let context = frame.user_context_via(from_interrupt);
+
+    // Kayitlar **mevcut yiginin altina** kuruluyor. Geri sarma bir
+    // dagitimin icinden baslatildiginda bu, dagitimin kendi
+    // kayitlarinin da altidir -- yani ikisi birbirini ezmiyor.
+    let sp = context.stack_pointer();
+    if sp < sizes::FRAME {
+        return false;
+    }
+    let base = (sp - sizes::FRAME) & !0xF;
+    if !writable(base, sizes::FRAME) {
+        return false;
+    }
+
+    let record_at = base;
+    core::ptr::write_bytes(record_at as *mut u8, 0, sizes::RECORD);
+    let flags = if target_frame == 0 {
+        EXCEPTION_UNWINDING | EXCEPTION_EXIT_UNWIND
+    } else {
+        EXCEPTION_UNWINDING
+    };
+    ((record_at + rec::CODE) as *mut u32).write_unaligned(STATUS_UNWIND);
+    ((record_at + rec::FLAGS) as *mut u32).write_unaligned(flags);
+    ((record_at + rec::ADDRESS) as *mut usize).write_unaligned(context.instruction_pointer());
+    ((record_at + rec::PARAM_COUNT) as *mut u32).write_unaligned(0);
+
+    // Isleyiciye verilecek `CONTEXT`. Cagiranin verdigi `ContextRecord`
+    // **yok sayiliyor**, `ExceptionRecord` ile ayni gerekceyle: kayit
+    // her adimda geri sarilmis duruma guncelleniyor ve cagiranin
+    // tamponunu yerinde degistirmek, onu okuyan baska kodu bozardi.
+    let context_at = (record_at + sizes::RECORD + 0xF) & !0xF;
+    write_context(context_at, &context);
+    let mut state = pdata::load_state(context_at);
+
+    // Yurume `RtlUnwindEx`in **cagiranindan** basliyor.
+    //
+    // Cekirdegin gordugu baglam thunk'un icidir ve thunk tabloda yok --
+    // atlanmasaydi ilk arama bos doner, yurume hic baslamadan biterdi.
+    // Atlamak serbest, cunku thunk gercek bir **yaprak**: yigina hic
+    // dokunmuyor (bkz. `dll::emit_thunk`), yani cagirana gecmek donus
+    // adresini okumaktan ibaret.
+    //
+    // Gercek Windows ayni seyi bastan yapar: `RtlUnwindEx` ilk isi
+    // olarak `RtlCaptureContext` cagirir ve o da cagiranin baglamini
+    // verir. Burada "cagiranin baglami" cekirdege zaten gelmis
+    // durumda; eksik olan tek adim thunk cercevesini cozmek.
+    let ret_at = state.rsp as usize;
+    if !mmu::is_user_accessible(ret_at) || !mmu::is_user_accessible(ret_at + 7) {
+        return false;
+    }
+    state.rip = (ret_at as *const u64).read_unaligned();
+    state.rsp = state.rsp.wrapping_add(8);
+    state.regs[4] = state.rsp;
+
+    (core::ptr::addr_of_mut!(UNWIND_EX_STATE) as *mut pdata::UnwindState)
+        .add(task)
+        .write(state);
+
+    // Donus baglami. Hedef verildiyse yurutme oraya geciyor ve yigin
+    // isaretcisi hedef cercevenin **govdesindeki** degere cekiliyor --
+    // `EstablisherFrame`in tanimi zaten odur. Cekmemek, hedef kodu
+    // cozulmus cercevelerin ustunde calistirmak olurdu.
+    let mut resume = context;
+    if target_ip != 0 {
+        resume.rip = target_ip as u64;
+        // Yigin isaretcisi ancak **atlanirken** cekiliyor.
+        //
+        // Atlamayan bir cagri (hedef adres yok) siradan bir cagri gibi
+        // doner ve onun yigini zaten yerindedir; yine de cekmek,
+        // thunk'u kendi donus adresi artik orada olmayan bir yiginin
+        // uzerinde `ret` ettirmek olurdu.
+        if target_frame != 0 {
+            resume.rsp = target_frame as u64;
+        }
+    }
+    resume.rax = return_value as u64;
+
+    (core::ptr::addr_of_mut!(UNWIND_RESUME) as *mut UserContext)
+        .add(task)
+        .write(resume);
+
+    UNWIND_TARGET[task].store(target_frame, Ordering::Relaxed);
+    UNWIND_BASE[task].store(base, Ordering::Relaxed);
+    UNWIND_RECORD_AT[task].store(record_at, Ordering::Relaxed);
+    UNWIND_CONTEXT_AT[task].store(context_at, Ordering::Relaxed);
+    UNWIND_STEPS[task].store(0, Ordering::Relaxed);
+    UNWINDING[task].store(1, Ordering::Relaxed);
+    UNWINDS.fetch_add(1, Ordering::Relaxed);
+
+    let next = match unwind_step(task) {
+        Some(handler_frame) => handler_frame,
+        None => unwind_finish(task),
+    };
+    frame.set_user_context_via(from_interrupt, &next);
+    true
+}
+
+/// Geri sarmada siradaki `__finally` isleyicisini secer.
+///
+/// `table_handler` ile ayni desen, uc farkla: aranan bayrak `UHANDLER`,
+/// yurume **hedefe kadar** gidiyor, ve kayitta `EXCEPTION_UNWINDING`
+/// kurulu.
+#[cfg(target_arch = "x86_64")]
+unsafe fn unwind_step(task: usize) -> Option<UserContext> {
+    let base = UNWIND_BASE[task].load(Ordering::Relaxed);
+    let record_at = UNWIND_RECORD_AT[task].load(Ordering::Relaxed);
+    let context_at = UNWIND_CONTEXT_AT[task].load(Ordering::Relaxed);
+    let target = UNWIND_TARGET[task].load(Ordering::Relaxed);
+    let state_at =
+        (core::ptr::addr_of_mut!(UNWIND_EX_STATE) as *mut pdata::UnwindState).add(task);
+
+    loop {
+        let steps = UNWIND_STEPS[task].fetch_add(1, Ordering::Relaxed);
+        if steps >= MAX_CHAIN {
+            return None;
+        }
+
+        let pc = (*state_at).rip as usize;
+        // Tabloda kaydi olmayan bir cerceve: prologunu yorumlamanin yolu
+        // yok, yurume burada biter. Yaprak fonksiyonlarda normaldir.
+        let (entry_at, function, image_base) = pdata::lookup(task, pc)?;
+
+        let mut next = *state_at;
+        let (establisher, found) = pdata::virtual_unwind(
+            image_base,
+            &function,
+            pc,
+            &mut next,
+            pdata::UNW_FLAG_UHANDLER,
+        )?;
+
+        // Hedefe varildi. Bu cerceve **cozulmuyor**: hedef kod onun
+        // govdesinde calisacak. Denetimin geri sarmadan once gelmesi
+        // sart -- sonra gelseydi hedef cerceve de cozulur ve yurutme
+        // artik var olmayan bir yigin uzerinde surerdi.
+        if target != 0 && establisher == target {
+            return None;
+        }
+
+        state_at.write(next);
+        // Isleyiciye verilen kayit **geri sarilmis** durumu gostermeli:
+        // Windows'ta `__finally` blogu kendi cercevesinin degil, bir
+        // ustunun baglamini gorur.
+        pdata::store_state(context_at, &next);
+        FRAMES_UNWOUND.fetch_add(1, Ordering::Relaxed);
+
+        let Some((handler, handler_data)) = found else {
+            // Bu cercevenin `__finally`si yok -- yalnizca geri sarma
+            // bilgisi tasiyor. Bir ust cerceveye gecilir.
+            continue;
+        };
+
+        // `DISPATCHER_CONTEXT` `CONTEXT`in hemen ustune yaziliyor;
+        // `sizes::FRAME` ucu icin de yer ayirdi.
+        let dispatcher_at = (context_at + sizes::CONTEXT + 0xF) & !0xF;
+        if !writable(dispatcher_at, sizes::DISPATCHER) {
+            return None;
+        }
+        pdata::write_dispatcher(
+            dispatcher_at,
+            pc,
+            image_base,
+            entry_at,
+            establisher,
+            context_at,
+            handler,
+            handler_data,
+        );
+
+        FINALLY_CALLS.fetch_add(1, Ordering::Relaxed);
+        return build_frame(
+            task,
+            base,
+            handler,
+            &[record_at, establisher, context_at, dispatcher_at],
+        );
+    }
+}
+
+/// Yurume bitti: donus baglami hazir.
+#[cfg(target_arch = "x86_64")]
+unsafe fn unwind_finish(task: usize) -> UserContext {
+    UNWINDING[task].store(0, Ordering::Relaxed);
+    // Dagitim suruyorsa onun yurume durumu artik **cozulmus**
+    // cerceveleri gosteriyor. Sifirlanmazsa, sahiplenen isleyici
+    // "sirakine gec" derse cekirdek artik var olmayan bir cercevenin
+    // prologunu yorumlamaya calisirdi.
+    UNWIND_READY[task].store(0, Ordering::Relaxed);
+    CHAIN_STEPS[task].store(0, Ordering::Relaxed);
+    (core::ptr::addr_of!(UNWIND_RESUME) as *const UserContext)
+        .add(task)
+        .read()
+}
+
+/// Bir geri sarma isleyicisi dondu: siradakine gec ya da bitir.
+///
+/// Donus degeri **yok sayiliyor**; i386 yuzuyle ayni gerekce
+/// (`ExceptionCollidedUnwind` bastan reddediliyor).
+#[cfg(target_arch = "x86_64")]
+unsafe fn unwind_continue(
+    frame: &mut crate::arch::cpu::regs::SyscallFrame,
+    from_interrupt: bool,
+    task: usize,
+) -> bool {
+    let next = match unwind_step(task) {
+        Some(handler_frame) => handler_frame,
+        None => unwind_finish(task),
+    };
+    frame.set_user_context_via(from_interrupt, &next);
+    true
 }
 
 /// Hedef kayit zincirde duruyor mu?
@@ -1166,7 +1452,7 @@ unsafe fn table_handler(
 
         let mut next = *state_at;
         let (establisher, found) =
-            pdata::virtual_unwind(image_base, &function, pc, &mut next)?;
+            pdata::virtual_unwind(image_base, &function, pc, &mut next, pdata::UNW_FLAG_EHANDLER)?;
         // Durum **simdi** ilerletiliyor: bu isleyici "sahiplenmiyorum"
         // derse cekirdege geri donulecek ve yurume cagiranin
         // cercevesinden surecek.
@@ -1331,7 +1617,6 @@ pub unsafe fn continue_dispatch(
     // sarma bir dagitim olmadan da baslatilabiliyor (`RtlUnwind`
     // siradan koddan da cagrilabilir), ve bir dagitimin icinden
     // baslatildiginda da o dagitim hala acik duruyor.
-    #[cfg(target_arch = "x86")]
     if UNWINDING[task].load(Ordering::Relaxed) != 0 {
         let _ = disposition;
         return unwind_continue(frame, from_interrupt, task);

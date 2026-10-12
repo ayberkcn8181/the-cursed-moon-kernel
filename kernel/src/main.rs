@@ -363,6 +363,9 @@ static WINPDATA_EXE64: &[u8] = include_bytes!("../../userland/winpdata.exe64");
 /// Sanal geri sarma: prologu geri almak.
 #[cfg(target_arch = "x86_64")]
 static WINVUNW_EXE64: &[u8] = include_bytes!("../../userland/winvunw.exe64");
+/// Geri sarma: cerceveleri cozmek ve `__finally` kosturmak.
+#[cfg(target_arch = "x86_64")]
+static WINUNWEX_EXE64: &[u8] = include_bytes!("../../userland/winunwex.exe64");
 
 /// Kullanici programlarinin VFS uzerinden okudugu test dosyasi.
 static BOOT_MSG: &[u8] = b"/boot/msg.txt: VFS uzerinden okundu (RAMFS).\n";
@@ -499,6 +502,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/winapc.exe", WINAPC_EXE64),
     ("/bin/winpdata.exe", WINPDATA_EXE64),
     ("/bin/winvunw.exe", WINVUNW_EXE64),
+    ("/bin/winunwex.exe", WINUNWEX_EXE64),
     ("/boot/msg.txt", BOOT_MSG),
 ];
 

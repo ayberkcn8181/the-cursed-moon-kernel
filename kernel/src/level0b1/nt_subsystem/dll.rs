@@ -515,6 +515,14 @@ static KERNEL32: &[Export] = &[
         stack_bytes: 32,
     },
     Export {
+        name: "RtlUnwindEx",
+        ordinal: 72,
+        service: nt::NT_RTL_UNWIND_EX,
+        // TargetFrame, TargetIp, ExceptionRecord, ReturnValue,
+        // ContextRecord, HistoryTable
+        stack_bytes: 24,
+    },
+    Export {
         name: "GetExitCodeThread",
         ordinal: 50,
         service: nt::NT_GET_EXIT_CODE_THREAD,

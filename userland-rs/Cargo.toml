@@ -148,6 +148,10 @@ path = "src/win/pdata.rs"
 name = "winvunw"
 path = "src/win/vunwind.rs"
 
+[[bin]]
+name = "winunwex"
+path = "src/win/unwindex.rs"
+
 [profile.dev]
 panic = "abort"
 opt-level = 1

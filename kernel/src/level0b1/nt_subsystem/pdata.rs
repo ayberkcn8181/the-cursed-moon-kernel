@@ -54,8 +54,15 @@ pub const MAX_TABLES: usize = 4;
 /// `EHANDLER` "bu fonksiyonun bir `__except` filtresi var", `UHANDLER`
 /// "bir `__finally` blogu var". Bir fonksiyonda ikisi de olabilir ve o
 /// zaman ayni isleyici iki kez cagrilir -- bayrak, hangi soru icin
-/// cagrildigini soyler. TCMK su an yalnizca birinci yariyi (dagitim)
-/// yaptigi icin `EHANDLER` araniyor.
+/// cagrildigini soyler.
+///
+/// Hangisinin arandigi `virtual_unwind`e **disaridan** veriliyor
+/// (`want`), cunku iki yarim iki ayri soru soruyor: dagitim "bu
+/// istisnayi kim sahipleniyor" (`EHANDLER`), geri sarma "yoldaki hangi
+/// cercevenin temizlenecek isi var" (`UHANDLER`). Ikisini tek maskeyle
+/// aramak, yalnizca `__except`i olan bir cerceveyi geri sarmada da
+/// cagirmak olurdu -- derleyicinin `__finally` icin uretmedigi kodu
+/// kosturmak.
 pub const UNW_FLAG_EHANDLER: u8 = 0x1;
 pub const UNW_FLAG_UHANDLER: u8 = 0x2;
 /// Kayit kendi bilgisini tasimiyor, **baska bir kaydi** gosteriyor.
@@ -407,6 +414,7 @@ pub unsafe fn virtual_unwind(
     function: &RuntimeFunction,
     pc: usize,
     state: &mut UnwindState,
+    want: u8,
 ) -> Option<(usize, Option<(usize, usize)>)> {
     let mut rva = function.unwind;
     // Prolog icindeki konum: fonksiyonun basindan kac bayt ileride.
@@ -507,7 +515,15 @@ pub unsafe fn virtual_unwind(
 
         // `EstablisherFrame`: cerceve registeri varsa ondan, yoksa
         // fonksiyonun govdesindeki RSP.
-        if handler.is_none() && flags & (UNW_FLAG_EHANDLER | UNW_FLAG_UHANDLER) != 0 {
+        // Isleyici **istenen soru icin** aranir. `want` sifirsa hic
+        // aranmaz: cagiran yalnizca cerceveyi geri sarmak istiyor.
+        //
+        // Isleyici RVA'sinin kodlardan sonra durup durmadigi iki
+        // bayragin **herhangi** biriyle belirleniyor, hangisinin
+        // istendigiyle degil -- yerlesim ayri bir soru, cagrilip
+        // cagrilmayacagi ayri.
+        let has_any = flags & (UNW_FLAG_EHANDLER | UNW_FLAG_UHANDLER) != 0;
+        if handler.is_none() && has_any && want != 0 && flags & want != 0 {
             let codes = (count + 1) & !1;
             let after = info + 4 + codes * 2;
             if readable(after, 4) {

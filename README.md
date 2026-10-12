@@ -27,8 +27,8 @@ masaustu sunuyor.
 | Mimariler | i386 (Multiboot1, `int 0x80`) · x86_64 (Multiboot2, `syscall`) |
 | Ikili bicimleri | ELF32/ELF64 · PE32/PE32+ (ithal tablosu cozulur) |
 | POSIX cagrilari | 74 (+ ELF yardimci vektoru, dosya destekli `mmap`, `clone`, `futex`, `SIGPIPE`, `EINTR`/`SA_RESTART`, is denetimi, `SA_SIGINFO`, `sigaltstack`, gercek-zamanli sinyaller, `sigtimedwait`) |
-| NT/Win32 cagrilari | 94 (`KERNEL32.dll` 71 ihracat + `TCMKGUI.dll`) |
-| Ring 3 uygulamalari | 42 ELF + 20 PE (ikisi yalnizca x86_64) |
+| NT/Win32 cagrilari | 95 (`KERNEL32.dll` 72 ihracat + `TCMKGUI.dll`) |
+| Ring 3 uygulamalari | 42 ELF + 21 PE (ucu yalnizca x86_64) |
 | Kalici depolama | ATA PIO + MBR + TCMKFS (yazilabilir, iki mimari) + takas |
 | Kod | ~30 bin satir cekirdek + ~17 bin satir userland |
 
@@ -60,7 +60,7 @@ artik POSIX yuzunde de **yakalanip duzeltilebiliyor**
 gucte cevap veriyor.
 
 Her yetenek QEMU'da **olculerek** dogrulanmistir: `probe` (16 sinav),
-`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (5), `bigfile` (6), `heap` (5), `swapx` (6), `jobs` (6), `winsusp` (6), `winctx` (7), `sigfault` (7), `winunwind` (7), `altstack` (7), `winnest` (6), `rtsig` (7), `winapc` (7), `sigwait` (7), `winpdata` (7), `sigchld` (7), `winvunw` (7), `stackgrow` (7), `bequest`
+`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (5), `bigfile` (6), `heap` (5), `swapx` (6), `jobs` (6), `winsusp` (6), `winctx` (7), `sigfault` (7), `winunwind` (7), `altstack` (7), `winnest` (6), `rtsig` (7), `winapc` (7), `sigwait` (7), `winpdata` (7), `sigchld` (7), `winvunw` (7), `stackgrow` (7), `winunwex` (7), `bequest`
 (6), `nested` (4), `winenv` (4) gibi programlar sonucu hem ekrana hem
 seri gunluge yaziyor. Olcumler yol boyunca gercek hatalar buldu -- dolan
 VFS tablosu, `CreateFileA`'nin cevrilmeyen Windows yollari, `GDT`
@@ -6826,8 +6826,9 @@ yigindir.
 * **Geri sarma isleyicisinin donus degeri yok sayiliyor.** Windows'ta
   yalnizca `ExceptionCollidedUnwind` anlamlidir ve o da yukaridaki
   kalemle birlikte gelecek.
-* **`RtlUnwindEx` ve `RtlRestoreContext` yok.** Ikisi de 64-bit yuzun
-  parcasi.
+* ~~**`RtlUnwindEx` yok**~~ -- geldi (asagi bkz.), 64-bit yuzun geri
+  sarmasi. `RtlRestoreContext` hala yok: `RtlUnwindEx` onun isini kendi
+  icinde yapiyor ama ayri bir cagri olarak sunmuyor.
 
 ## Yigin tasmasini yakalamak: koruma sayfasi + ayri yigin
 
@@ -7783,11 +7784,12 @@ tasiyor.
   artik cerceveleri geziyor: bir `__try` cagirdiginin hatasini
   yakalayabiliyor.
 * **`.pdata` okunmuyor** (yukari bkz.): TCMK'nin PE'lerinde yok.
-* **`RtlUnwindEx` yok.** `RtlUnwind`in x64 karsiligi ve sanal geri
-  sarmanin ustune kurulu.
-* **`UNW_FLAG_UHANDLER` ayirt edilmiyor.** Bayrak taniniyor ama iki hal
-  ayni yolu izliyor; ayirmak icin once geri sarma yarisinin olmasi
-  gerekiyor.
+* ~~**`RtlUnwindEx` yok.**~~ Geldi -- bkz.
+  [Bulmak yetmez](#bulmak-yetmez-yigin-cozulmeli-rtlunwindex). Sanal
+  geri sarmanin ustune kurulu ve cerceveleri gercekten cozuyor.
+* ~~**`UNW_FLAG_UHANDLER` ayirt edilmiyor.**~~ Ediliyor (yukaridaki
+  bati): dagitim `EHANDLER` ariyor, geri sarma `UHANDLER`. Ayrim ancak
+  geri sarma yarisi gelince anlam kazandi.
 * **`UNWIND_INFO` surum 2 reddediliyor.** Daha yeni derleyicilerin
   urettigi bir bicim; duzeni farkli olabilir, ve okumaya calismak kod
   adresi yerine cop dondurmek olurdu.
@@ -8055,11 +8057,8 @@ edilemezdi.
 
 ### Bilerek yapilmayanlar
 
-* **`RtlUnwindEx` yok** -- geri sarmanin **ucuncu** yarisi: cerceveleri
-  gercekten cozmek ve yoldaki `__finally` bloklarini kosturmak. Su an
-  yalnizca **sanal** geri sarma var; yani cekirdek cagiran cerceveyi
-  *bulabiliyor* ama yigini *cozmuyor*. i386'daki `RtlUnwind`in x64
-  karsiligi bu.
+* ~~**`RtlUnwindEx` yok**~~ -- geldi (asagi bkz.): cerceveler artik
+  gercekten cozuluyor ve yoldaki `__finally` bloklari kosuyor.
 * **`ContextPointers` yok sayiliyor.** Gercek `RtlVirtualUnwind`
   saklanan registerlerin **adreslerini** de doldurur; hata ayiklayicilar
   onlari degistirmek icin kullanir. TCMK yalnizca degerleri tasiyor.
@@ -8068,9 +8067,154 @@ edilemezdi.
   hic tasimiyor (bkz. `CONTEXT` bolumleri).
 * **`UWOP_PUSH_MACHFRAME` reddediliyor.** Kesme cercevesi yalnizca
   cekirdek kipinde olur; Ring 3'te gormek kaydin bozuk oldugunu soyler.
-* **`HandlerType` ayirt edilmiyor.** `RtlVirtualUnwind`in ilk argumani
-  `__except` filtresi mi `__finally` blogu mu arandigini soyler; ikisini
-  ayirmak once `RtlUnwindEx` istiyor.
+* ~~**`HandlerType` ayirt edilmiyor.**~~ Ediliyor (asagi bkz.):
+  `RtlVirtualUnwind`in ilk argumani artik okunuyor ve dagitim
+  `EHANDLER`, geri sarma `UHANDLER` ariyor.
+
+## Bulmak yetmez: yigin cozulmeli (`RtlUnwindEx`)
+
+Tablo tabanli SEH uc parcadan olusuyor ve ucu de ayri sorular:
+
+```text
+  1. arama             hata adresini iceren fonksiyon hangisi?
+  2. sanal geri sarma  cagiran cerceve nerede?
+  3. GERI SARMA        aradaki cerceveler NASIL COZULUR, ve
+                       yoldaki temizlik kodu nasil kosar?
+```
+
+Ilk ikisi onceki iki batida geldi. Orada yarim kalan sey suydu:
+cekirdek cagiran cerceveyi **bulabiliyordu** ama yigini **cozmuyordu**.
+Yani `__try`/`__finally` iceren hicbir x64 ikilisi dogru calisamazdi --
+derleyicinin `__finally` icin urettigi kod yalnizca bu yolda kosar, ve
+o yapi C++ yikicilarindan kaynak temizligine kadar her yerde.
+
+```
+[winunwex] A hedefe atladi:       gecti (TargetIp'te surdu ve RAX = ReturnValue)
+[winunwex] B __finally KOSTU:     gecti (yoldaki iki UHANDLER de cagrildi)
+[winunwex] C EXCEPTION_UNWINDING: gecti (kayitta EXCEPTION_UNWINDING kurulu)
+[winunwex] D hedefte DURDU:       gecti (hedef cercevenin isleyicisi cagrilmadi)
+[winunwex] E UHANDLER sart:       gecti (yalnizca EHANDLER'i olan cerceve atlandi)
+[winunwex] F sira: icten disa:    gecti (once ic cerceve, sonra dis)
+[winunwex] G atlamasiz geri sarma:gecti (TargetIp=0 ile cagri normal dondu)
+```
+
+![winunwex](docs/screenshot-winunwex.png)
+
+### i386 ile ayni sozlesme, bambaska mekanizma
+
+```text
+  i386   zincirdeki her kaydi hedefe kadar yuru.
+         "Siradaki" = bir isaretci okumak.
+         Hedef      = bir zincir KAYDININ ADRESI.
+
+  x64    her cerceveyi prologunu geri alarak coz.
+         "Siradaki" = kucuk bir yorumlayici kosturmak.
+         Hedef      = bir EstablisherFrame.
+```
+
+Hedefin kimliginin degismesi bir ayrinti degil: x64'te gosterilecek bir
+kayit yoktur, cunku zincir yoktur. Hedef ancak "hangi cercevenin
+govdesinde duracagiz" diye tarif edilebilir -- yani bir yigin adresi.
+
+### `UHANDLER`, `EHANDLER` degil
+
+`UNWIND_INFO`nun bayrak alaninda duran iki bayrak, iki ayri soru:
+
+```text
+  EHANDLER   "bu fonksiyonun bir __except filtresi var"
+  UHANDLER   "bir __finally blogu var"
+```
+
+Dagitim birincisini ariyor, geri sarma ikincisini. TCMK uzun sure
+ikisini **tek maskeyle** ariyordu, cunku yalnizca dagitim vardi ve fark
+hic ortaya cikmamisti. Geri sarma gelince fark anlam kazandi: iki
+bayragi ayirmamak, yalnizca `__except` filtresi olan bir cerceveyi geri
+sarmada da cagirmak olurdu -- derleyicinin o is icin **uretmedigi**
+kodu kosturmak. Bu yuzden `RtlVirtualUnwind`in ilk argumani
+(`HandlerType`) artik okunuyor; README'de "ayirt edilmiyor" diye duran
+kalem bu batiyla kapandi.
+
+### Yurume `RtlUnwindEx`in **cagiranindan** basliyor
+
+Kolayca atlanabilecek bir adim, ve atlanirsa geri sarma hic baslamiyor.
+
+Cekirdegin gordugu baglam thunk'un icidir, ve thunk islev tablosunda
+yoktur. Ilk arama bos doner, yurume biter, hicbir `__finally` kosmaz --
+ama cagri **basarili gorunur**, cunku hedefe atlama yine de yapilir.
+Atlamak serbest, cunku x64 thunk'u gercek bir **yaprak**: yigina hic
+dokunmuyor, yani cagirana gecmek donus adresini okumaktan ibaret.
+
+Gercek Windows ayni seyi bastan yapar: `RtlUnwindEx` ilk isi olarak
+`RtlCaptureContext` cagirir ve o da cagiranin baglamini verir.
+
+### Yigin isaretcisi yalnizca **atlanirken** cekilir
+
+`TargetIp` verildiginde yurutme oraya gecer ve `RSP` hedef cerceveye
+cekilir -- `EstablisherFrame`in tanimi zaten odur. Ama `TargetIp`
+sifirsa cagri siradan bir cagri gibi **doner**, ve o zaman `RSP`ye
+dokunmak thunk'u kendi donus adresi artik orada olmayan bir yiginin
+uzerinde `ret` ettirmek olurdu. Bozma sinavi bunu hemen gosterdi: cocuk
+`0xC0000005` ile coktu.
+
+### Bozma sinavlari
+
+Alti bozma denendi, altisi da yakalandi:
+
+```text
+  thunk cercevesi cozulmuyor      ->  B/C/F/G KALDI, D/E "olculemedi"
+  geri sarmada EHANDLER araniyor  ->  E KALDI (EHANDLER CAGRILDI)
+  hedef gozetilmiyor              ->  D KALDI (hedef cerceve de cozuldu)
+  RSP hedefe cekilmiyor           ->  cocuk coktu, sinav tanisini verdi
+  EXCEPTION_UNWINDING kurulmuyor  ->  C KALDI
+  RSP atlamasiz cagrida da cekiliyor -> cocuk coktu (G yolunda)
+```
+
+### Sinav iki kez kendi olcusunu kaybetti
+
+Birincisi klasik: D ve E "su isleyici **cagrilmadi**" bicimindedir ve
+bu bicimin bilinen bir zayifligi var -- hicbir sey kosmazsa cevap bos
+yere dogru cikar. Ilk bozma sinavinda (thunk adimi kaldirildi) yurume
+hic baslamadi ve ikisi de gecti. Ikisi artik yurumenin gerceklesmis
+olmasini **sart** kosuyor; kosmamissa sinav "olculemedi" diyor.
+
+Ikincisi daha ince ve ilkinin duzeltmesinde gizliydi: "yurume
+gerceklesti mi" olcusu once "`__finally` kostu mu" diye bakiyordu.
+Ikinci bozmada (geri sarmada `EHANDLER` aranmasi) yurume **yurudu** ve
+ara cerceveyi cagirdi, ama hicbir `__finally` kosmadigi icin sinav
+"yurume hic baslamadi" dedi -- oysa elindeki tani tam tersiydi. Dogru
+olcu: yolda **herhangi** bir isleyici cagrildi mi.
+
+Ucuncu bir ayrinti da bozmadan dogdu: cocugun cevabi yalnizca bir
+isaret bitiyle dogrulaniyordu, ve coken cocugun cikis kodu bir
+`NTSTATUS` (`0xC0000005`). O sayida bit tesaduf eseri sifirdi; baska
+bir cokme kodunda olmayabilirdi ve sinav bir cokmeyi "cocuk cevap
+verdi" diye okurdu. Artik ust yarinin bos olmasi da araniyor.
+
+A'nin ayni zayifligi **yok** ve sebebi kaydedilmeye deger: olctugu sey
+ayri -- yurutmenin hedefte surup surmedigi. Yurume hic olmasa bile
+cekirdek hedefe atlayabilir, ve A o zaman hakli olarak geciyor.
+"Atladi ama hicbir seyi temizlemedi" tanisini veren B'dir.
+
+### Bu batida olmayanlar
+
+* **`ExceptionCollidedUnwind` yok.** Bir geri sarma isleyicisi yeniden
+  `RtlUnwindEx` cagirirsa istek reddediliyor -- i386 yuzuyle ayni sinir
+  ve ayni gerekce.
+* **Hedef cercevenin isleyicisi cagrilmiyor.** Gercek Windows hedefe
+  varinca o cerceveyi `EXCEPTION_TARGET_UNWIND` ile bir kez daha
+  cagirir, boylece ayni fonksiyonun **ic** `__finally` bloklari da
+  kosar. TCMK kapsam tablosunu (`scope table`) yorumlamadigi icin
+  oradan ayirt edecek bilgisi yok ve hedefte duruyor.
+* **`ContextRecord` ve `HistoryTable` yok sayiliyor.** Birincisi
+  `ExceptionRecord` ile ayni gerekceyle (cekirdek her adimda kendi
+  kaydini geri sarilmis duruma guncelliyor), ikincisi yalnizca bir
+  arama onbellegi.
+* **`RtlRestoreContext` yok.** Geri sarmanin acik yuzunun ucuncu
+  parcasi; `RtlUnwindEx` onun isini kendi icinde yapiyor ama ayri bir
+  cagri olarak sunmuyor.
+* **Isleyicinin donus degeri yok sayiliyor.** Windows'ta yalnizca
+  `ExceptionCollidedUnwind` anlamlidir ve o da yukaridaki kalemle
+  birlikte gelecek.
 
 ## Yigin otomatik buyuyor: duvar hareketli bir sinir
 

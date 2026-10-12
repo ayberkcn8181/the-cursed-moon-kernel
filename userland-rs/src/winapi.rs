@@ -369,6 +369,34 @@ extern "system" {
         return_value: usize,
     );
 
+    /// Geri sarmanin x64 bicimi: cerceveleri **gercekten** cozer.
+    ///
+    /// `RtlUnwind` ile ayni isi yapar, ama hedefin kimligi degisir ve
+    /// degismesi zorunludur: i386'da hedef bir **zincir kaydinin
+    /// adresi**, x64'te bir **`EstablisherFrame`** -- hedef
+    /// fonksiyonun govdesindeki yigin tabani. x64'te zincir yok, yani
+    /// gosterilecek bir kayit da yok.
+    ///
+    /// Yoldaki her cercevenin `UHANDLER` bayrakli isleyicisi
+    /// `EXCEPTION_UNWINDING` ile cagrilir -- derleyicinin `__finally`
+    /// icin urettigi kod yalnizca burada kosar.
+    ///
+    /// `target_ip` sifirsa yalnizca geri sarma yapilir ve cagri
+    /// **normal doner**; sifirdan farkliysa yurutme oraya gecer ve
+    /// yigin isaretcisi `target_frame`e cekilir.
+    ///
+    /// Son iki arguman TCMK'de yok sayilir: `context_record` cekirdegin
+    /// kendi kaydiyla, `history` ise zaten kucuk olan tablo aramasiyla
+    /// karsilaniyor.
+    pub fn RtlUnwindEx(
+        target_frame: *mut c_void,
+        target_ip: *mut c_void,
+        exception_record: *mut crate::seh::ExceptionRecord,
+        return_value: usize,
+        context_record: *mut c_void,
+        history: *mut c_void,
+    );
+
     /// Yuklu bir modulun taniticisi. `NULL` verilirse surecin **kendi**
     /// imaj tabani doner.
     ///

@@ -114,6 +114,9 @@ pub const NT_RTL_DELETE_FUNCTION_TABLE: u32 = 0x304D;
 pub const NT_RTL_LOOKUP_FUNCTION_ENTRY: u32 = 0x304E;
 /// `RtlVirtualUnwind(...)` -- bir cerceveyi **sanal olarak** geri sarar.
 pub const NT_RTL_VIRTUAL_UNWIND: u32 = 0x304F;
+/// `RtlUnwindEx(TargetFrame, TargetIp, ExceptionRecord, ReturnValue,
+///              ContextRecord, HistoryTable)` -- x64 geri sarmasi.
+pub const NT_RTL_UNWIND_EX: u32 = 0x3050;
 pub const NT_SLEEP_MS: u32 = 0x3001;
 pub const NT_GET_TICK_COUNT: u32 = 0x3002;
 pub const NT_WIN32_CLOSE_HANDLE: u32 = 0x3003;
@@ -1114,6 +1117,13 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
         NT_RTL_VIRTUAL_UNWIND => {
             #[cfg(target_arch = "x86_64")]
             {
+                // Ilk arguman uzun sure yok sayiliyordu ve bu bir
+                // eksiklikti: `HandlerType` hangi sorunun soruldugunu
+                // soyler -- `__except` filtresi mi (`EHANDLER`),
+                // `__finally` blogu mu (`UHANDLER`). Ikisini ayirmak
+                // ancak geri sarmanin kendisi gelince anlam kazandi.
+                let handler_type = arg_ptr(args, 0).unwrap_or(0) as u8
+                    & (pdata::UNW_FLAG_EHANDLER | pdata::UNW_FLAG_UHANDLER);
                 let image_base = arg_ptr(args, 1).unwrap_or(0);
                 let control_pc = arg_ptr(args, 2).unwrap_or(0);
                 let entry_at = arg_ptr(args, 3).unwrap_or(0);
@@ -1139,7 +1149,13 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
                     };
                     let mut state = unsafe { pdata::load_state(context_at) };
                     match unsafe {
-                        pdata::virtual_unwind(image_base, &function, control_pc, &mut state)
+                        pdata::virtual_unwind(
+                            image_base,
+                            &function,
+                            control_pc,
+                            &mut state,
+                            handler_type,
+                        )
                     } {
                         None => {
                             set_last_error(ERROR_INVALID_PARAMETER);
@@ -2618,6 +2634,44 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
         // baglami degistirip baska bir yere doner, ya da reddedilip
         // siradan bir cagri gibi. Ikinci durumda cagiran hicbir sey
         // olmamis gibi devam eder; `GetLastError` sebebi soyler.
+        // RtlUnwindEx(TargetFrame, TargetIp, ExceptionRecord,
+        //             ReturnValue, ContextRecord, HistoryTable)
+        //
+        // `RtlUnwind`in x64 bicimi ve geri sarmanin **ucuncu** yarisi:
+        // cerceveleri gercekten cozmek ve yoldaki `__finally`
+        // bloklarini kosturmak (bkz. `seh::unwind`).
+        //
+        // Son iki arguman **yok sayiliyor**. `ContextRecord`
+        // `ExceptionRecord` ile ayni gerekceyle: cekirdek her adimda
+        // geri sarilmis durumu kendi kaydina yaziyor ve cagiranin
+        // tamponunu yerinde degistirmek, onu okuyan baska kodu bozardi.
+        // `HistoryTable` yalnizca bir arama onbellegidir; TCMK'nin
+        // tablo aramasi zaten dort kayitlik bir dizide dolasiyor.
+        //
+        // i386'da bu cagri yok: orada `RtlUnwind` yeterli, cunku hedef
+        // bir zincir kaydidir ve fazladan baglam gerekmez.
+        NT_RTL_UNWIND_EX => {
+            #[cfg(target_arch = "x86_64")]
+            {
+                let target_frame = arg_ptr(args, 0).unwrap_or(0);
+                let target_ip = arg_ptr(args, 1).unwrap_or(0);
+                let return_value = arg_ptr(args, 3).unwrap_or(0);
+                if unsafe {
+                    seh::unwind(frame, from_interrupt, target_frame, target_ip, return_value)
+                } {
+                    // Baglam degisti; donus degeri yazilmamali.
+                    return;
+                }
+                set_last_error(ERROR_INVALID_PARAMETER);
+                WIN32_FALSE
+            }
+            #[cfg(target_arch = "x86")]
+            {
+                set_last_error(ERROR_CALL_NOT_IMPLEMENTED);
+                WIN32_FALSE
+            }
+        }
+
         NT_RTL_UNWIND => {
             let target_frame = arg_ptr(args, 0).unwrap_or(0);
             let target_ip = arg_ptr(args, 1).unwrap_or(0);
