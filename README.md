@@ -26,9 +26,9 @@ masaustu sunuyor.
 |---|---|
 | Mimariler | i386 (Multiboot1, `int 0x80`) · x86_64 (Multiboot2, `syscall`) |
 | Ikili bicimleri | ELF32/ELF64 · PE32/PE32+ (ithal tablosu cozulur) |
-| POSIX cagrilari | 74 (+ ELF yardimci vektoru, dosya destekli `mmap`, `clone`, `futex`, `SIGPIPE`, `EINTR`/`SA_RESTART`, is denetimi, `SA_SIGINFO`, `sigaltstack`, gercek-zamanli sinyaller, `sigtimedwait`) |
+| POSIX cagrilari | 77 (+ ELF yardimci vektoru, dosya destekli `mmap`, `clone`, `futex`, `SIGPIPE`, `EINTR`/`SA_RESTART`, is denetimi ve terminal (`setsid`, `tcsetpgrp`, `SIGTTIN`/`SIGTTOU`), `SA_SIGINFO`, `sigaltstack`, gercek-zamanli sinyaller, `sigtimedwait`) |
 | NT/Win32 cagrilari | 95 (`KERNEL32.dll` 72 ihracat + `TCMKGUI.dll`) |
-| Ring 3 uygulamalari | 42 ELF + 21 PE (ucu yalnizca x86_64) |
+| Ring 3 uygulamalari | 43 ELF + 21 PE (ucu yalnizca x86_64) |
 | Kalici depolama | ATA PIO + MBR + TCMKFS (yazilabilir, iki mimari) + takas |
 | Kod | ~30 bin satir cekirdek + ~17 bin satir userland |
 
@@ -60,7 +60,7 @@ artik POSIX yuzunde de **yakalanip duzeltilebiliyor**
 gucte cevap veriyor.
 
 Her yetenek QEMU'da **olculerek** dogrulanmistir: `probe` (16 sinav),
-`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (5), `bigfile` (6), `heap` (5), `swapx` (6), `jobs` (6), `winsusp` (6), `winctx` (7), `sigfault` (7), `winunwind` (7), `altstack` (7), `winnest` (6), `rtsig` (7), `winapc` (7), `sigwait` (7), `winpdata` (7), `sigchld` (7), `winvunw` (7), `stackgrow` (7), `winunwex` (7), `bequest`
+`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (6), `bigfile` (6), `heap` (5), `swapx` (6), `jobs` (6), `winsusp` (6), `winctx` (7), `sigfault` (7), `winunwind` (7), `altstack` (7), `winnest` (6), `rtsig` (7), `winapc` (7), `sigwait` (7), `winpdata` (7), `sigchld` (7), `winvunw` (7), `stackgrow` (7), `winunwex` (7), `jobctl` (11), `bequest`
 (6), `nested` (4), `winenv` (4) gibi programlar sonucu hem ekrana hem
 seri gunluge yaziyor. Olcumler yol boyunca gercek hatalar buldu -- dolan
 VFS tablosu, `CreateFileA`'nin cevrilmeyen Windows yollari, `GDT`
@@ -5627,11 +5627,16 @@ sonlanirdi.
 [stdin] A O_NONBLOCK:  gecti (tus yokken beklemeden -EAGAIN)
 [stdin] B poll:        gecti (tus yokken hazir degil dedi)
 [stdin] C bloke etti:  gecti (bekledi ve sinyalle bolundu)
-[stdin] D penceresiz:  gecti (penceresiz surecte 0 (dosya sonu))
+[stdin] D terminalsiz: gecti (terminalsiz surecte 0 (dosya sonu))
 [stdin] E bayrak:      gecti (fd 0 bayragi yazilip geri okundu)
+[stdin] F bayrak mirasi: gecti (ebeveynden devraldi; ayni yuvanin eski bayragini gormedi)
 [stdin] gorev yuvasi: 5/12
-[stdin] bekleme: 13 tik (en az 10), penceresiz okuma: 0
+[stdin] bekleme: 12 tik (en az 10), terminalsiz okuma: 0
 ```
+
+(D ve F sonradan degisti: D ilk yazilista "penceresiz surec" diyordu ve
+is denetimi batisinda olcusu dogru modele gecti; F ayni batinin buldugu
+bir hatayi olcuyor -- bkz. [Terminali kim okur](#terminali-kim-okur-oturum-on-plan-sigttin).)
 
 ![stdin](docs/screenshot-stdin.png)
 
@@ -8391,6 +8396,181 @@ bozma sinavi da var: pencere kapanirken tampon geri verilmezse
   dokunan erisimler kabul ediliyor; buyuk bir yerel diziyle duvari
   **atlayan** bir `sub rsp, N` buyume degil, kacik isaretci sayilir.
 
+## Terminali kim okur: oturum, on plan, `SIGTTIN`
+
+Surec gruplari onceki bir batida geldi: `setpgid`, `kill(-pgid)`,
+`waitpid(-pgid)`, `SIGSTOP`/`SIGCONT`. Eksik kalan **terminal**
+tarafiydi, ve is denetiminin asil anlami orada:
+
+```text
+  $ make &          <- arka plan isi
+  $ vim             <- on plan isi, klavyeyi o okuyor
+```
+
+Iki is ayni terminali paylasiyor. Klavyenin `vim`e gitmesi, `make`in ise
+ona **dokunamamasi** gerekiyor. POSIX'in cevabi uc parcali:
+
+```text
+  oturum (sid)         bir terminali paylasan islerin kumesi
+  on plan grubu        terminali OKUYABILEN tek grup
+  SIGTTIN / SIGTTOU    arka plandan okumaya / ayara dokunmaya
+                       calisan grubu durdurur
+```
+
+```
+[jobctl] A setsid:              gecti (lider EPERM aldi, cocuk yeni oturum kurdu)
+[jobctl] B oturum mirasi:       gecti (oturum devralindi; setsid sonrasi terminal yok)
+[jobctl] C on plan sahibi:      gecti (on plan kendi grubum; baska oturuma devir EPERM)
+[jobctl] D ON PLAN okur:        gecti (on plandaki cocugun okumasi izinli)
+[jobctl] E ARKA PLAN DURUR:     gecti (arka plandan okuyan cocuk SIGTTIN ile durdu)
+[jobctl] F yok sayilinca EIO:   gecti (SIGTTIN yok sayili: durmadi, okuma EIO)
+[jobctl] G SIGTTOU:             gecti (SIGTTOU ile durdu; engelliyken izin verildi)
+[jobctl] H yeniden baslar:      gecti (on plana alinip devam edince okuma yeniden calisti)
+[jobctl] I SIGCHLD bolmez:      gecti (cocuk oldu, bekleme bolunmedi; suresi doldu)
+[jobctl] J akis grubu:          gecti (akis surecin grubunda ve terminali okuyabildi)
+[jobctl] K olen on plan:        gecti (ayni numarali yeni is arka planda kaldi)
+```
+
+![jobctl](docs/screenshot-jobctl.png)
+
+### Once paylasilan bir terminal olmaliydi
+
+TCMK'de seri bir tty yok; klavye pencerelere gidiyor. Uzun sure
+`read(0)` gorevin **kendi** penceresini okuyordu ve penceresi olmayan
+bir `fork` cocugu dosya sonu aliyordu. Bu, paylasilan bir terminalin
+olmamasi demekti -- yani is denetiminin uzerine kurulacagi zemin de
+yoktu.
+
+Model artik su: **bir oturumun terminali liderinin penceresi**.
+Kabuktan baslatilan bir program kendi oturumunun lideri; actigi ilk
+pencere onun terminali, ve `fork` cocuklari -- kendi pencereleri yoksa
+-- o terminali okuyor. Gercek bir sistemde bir kabugun cocuklari da
+tam olarak boyle ayni tty'yi paylasir.
+
+Bunun bir sonucu oldu ve dogrusu oydu: `stdin` sinavinin D'si
+"penceresiz bir cocuk dosya sonu alir" diye olcuyordu. Ayni cocuk artik
+ebeveyninin terminalini okuyor -- on planda, izinli, tus bekliyor. D'nin
+niyeti ("klavyesi olmayan surec sonsuza kadar uyumamali") korundu,
+olcusu degisti: cocuk once `setsid` ile terminalinden kopuyor.
+
+### Iki karar, zit yonlerde
+
+```text
+  arka plandan OKUMA        SIGTTIN yok sayili/engelli -> EIO
+                            degilse grup SIGTTIN ile durur
+
+  arka plandan AYAR         SIGTTOU yok sayili/engelli -> IZIN VER
+  (tcsetpgrp)               degilse grup SIGTTOU ile durur
+```
+
+Asimetri bilincli ve kabuklar ona dayaniyor: bir isi on plana verdikten
+sonra kabuk **kendisi** arka plandadir, ve terminali geri almak icin
+`SIGTTOU`yu engelleyip `tcsetpgrp` cagirir. Okumada ayni kural olsaydi
+arka plan isleri sinyali engelleyerek klavyeyi calabilirdi.
+
+Is denetimi **veri olup olmadigindan once** yapiliyor. Yoksa arka plan
+isi, tampon doluyken okuyabilir ve yalnizca bos oldugunda durdurulurdu:
+kullanicinin yazdigi satirlar rastgele iki is arasinda bolunurdu.
+
+### Batinin buldugu bes eski hata
+
+Is denetimi bes ayri yerde eskiden beri duran bir hatayi gorunur kildi.
+Hicbiri terminal gelene kadar gorunmuyordu.
+
+**Durduran sinyal cagriyi `EINTR` ile birakiyordu.** `restart_after_signal`
+varsayilan eylemli her sinyalde "surec olecek, yeniden baslatmanin
+anlami yok" diyordu. Durduran sinyaller (`SIGTSTP`, `SIGTTIN`) oldurmez;
+`SIGCONT` gelince surec geri doner ve Linux cagriyi sessizce yeniden
+baslatir. TCMK `EINTR` donduruyordu: Ctrl-Z + `fg` yapilan her program
+klavye beklerken istemedigi bir hata aliyordu. H bunu olcuyor -- ve is
+denetiminin kalbinde: arka plandan okuyan bir is `fg` ile on plana
+gelince okumasi kaldigi yerden surmeli.
+
+**Varsayilani yok saymak olan sinyal cagriyi boluyordu.** Cocugu olan
+ve bir sey bekleyen her surec, cocuk bittiginde `EINTR` aliyordu --
+hicbir isleyici kurmamisken. Bu hata **iki katmandan** kapandi, ve
+sinavin buna takildigi yer ogretici: ilk yazilista I terminal
+okumasiyla olcuyordu, ve `interrupts_call` duzeltmesi geri alininca
+sinav **yine gecti**. Cunku okuma yeniden baslatma yolundan geciyor ve
+ustteki duzeltme onu sessizce yeniden baslatiyordu. I artik
+`sigtimedwait` ile olcuyor: o cagri yeniden baslamaz, bolunmesi
+dogrudan `EINTR`dir.
+
+**Is parcaciklari kendi grubundaydi.** `spawn_thread` her akisa kendi
+numarasini surec grubu olarak veriyordu. Terminal gelince sonucu
+belirdi: ana akis disindaki bir akis klavyeyi okuyunca kendini arka
+planda sanip `SIGTTIN` aliyordu (J).
+
+**Stdin bayragi yuvada kaliyordu.** Yonlendirilmemis 0/1/2'nin
+bayraklari yuva numarasiyla tutuluyordu, `fork`ta kopyalanmiyordu ve
+yalnizca `execve`de sifirlaniyordu. I'nin ilk kosumu bunu gosterdi: hic
+`O_NONBLOCK` koymamis bir cocugun "bloke eden" okumasi beklemeden
+`EAGAIN` dondu, cunku ayni yuvayi daha once kullanan cocuk o bayragi
+koymustu. Sinavin ilk teshisi de yanlisti -- "SIGCHLD cagriyi kesti"
+diyordu, elindeki veri `EAGAIN` iken. Duzeltme `stdin` sinavinin F'siyle
+olculuyor.
+
+**Olen on plan grubu on plani birakmiyordu.** Bir bozma sinavinda
+ebeveyn terminali geri alamadi ve on plan olmus bir cocugun grubunda
+kaldi. Sonraki cocuk o yuvayi -- dolayisiyla o grup numarasini -- alinca
+**kimse `tcsetpgrp` cagirmadan** on plana gecti. Linux'ta terminal olu
+grubu bir referansla tutar, numara yeniden kullanilsa da eslesmez.
+TCMK'de grup bir sayi oldugu icin ayni sonucu bir bekci deger veriyor
+(K).
+
+### Sinav uc kez sustu ya da yanlis yeri gosterdi
+
+* **Ebeveyn kendini durdurdu.** Engelli `SIGTTOU`ya izin vermeyen
+  cekirdekte ebeveyn terminali geri alamadi, sonra bir cocuga on plani
+  vermek isterken `SIGTTOU` ile **kendisi** durdu; ikinci denemede bu
+  kez kendi grubundaki bir cocugun `SIGTTIN`i onu da durdurdu. Ikisinde
+  de sinav tek satir yazmadan sustu. Etkilesimli kabuklar is denetimi
+  sinyallerini tam bu yuzden engeller/yok sayar ve sinav da artik
+  oyle yapiyor: terminali yoneten taraf hicbir zaman durdurulmamali.
+* **Pencere acilmadi.** 500x270x4 = 540 000 bayt, tek pencere
+  tamponunun 512 KiB sinirinin uzerinde. Sinav bunu kendi soyledi
+  ("pencere acilamadi: terminal yok") -- ilk is olarak pencere acmanin
+  bir faydasi.
+* **Gereksiz bir duzeltme.** Yuva yeniden kullanilirken stdin
+  bayraklarini sifirlayan satir geri alininca hicbir sinav kalmadi:
+  `fork` artik kopyaliyor, `execve` sifirliyor, yani her yol zaten
+  uzerine yaziyordu. Satir cikarildi.
+
+### Bozma sinavlari
+
+```text
+  durdurma sonrasi yeniden baslatma yok  ->  H KALDI (EINTR)
+  SIGCHLD varsayilani boluyor            ->  I KALDI (10 tikte EINTR)
+  okuma hep izinli (is denetimi yok)     ->  E/F/H KALDI
+  engelli SIGTTOU da durduruyor          ->  G KALDI (devir reddedildi)
+  tcsetpgrp oturum denetimi yok          ->  C KALDI
+  grup lideri setsid yapabiliyor         ->  A KALDI
+  fork oturumu devretmiyor               ->  B KALDI (ve zincirleme)
+  akis kendi grubunda                    ->  J KALDI (durduruldu)
+  olen on plan birakilmiyor              ->  K KALDI (miras aldi)
+  stdin bayragi fork'ta kopyalanmiyor    ->  stdin F KALDI
+```
+
+### Bu batida olmayanlar
+
+* **Lider cikinca `SIGHUP` yok.** Oturumun terminali kopuyor (uyeler
+  artik onu okuyamiyor) ama on plan grubuna `SIGHUP` gitmiyor.
+* **Yetim grup kurali yok.** Linux, ebeveyni oturumun disinda kalmis
+  bir gruptan gelen arka plan okumasina `SIGTTIN` yerine `EIO` verir
+  (durdurulursa onu kimse devam ettiremez). TCMK ayrim yapmiyor.
+* **`termios` yok, `TOSTOP` dahil.** Arka plandan terminale **yazmak**
+  serbest; `SIGTTOU` yalnizca `tcsetpgrp`da gonderiliyor.
+* **`TIOCSCTTY`/`TIOCNOTTY` yok.** Terminal her zaman liderin ilk
+  penceresi; secmenin ya da birakmanin yolu yok. `setsid` cagiran bir
+  surecin penceresi varsa o pencere yeni oturumun terminali olur --
+  POSIX'te yeni oturum terminalsiz baslar.
+* **Grup numaralari yeniden kullaniliyor.** On plan icin bekci deger
+  var (K), ama genel sorun duruyor: `kill(-pgid)` olmus bir grubun
+  numarasini alan yeni bir surece ulasabilir.
+* **Stdin bayragi `fork`ta kopyalaniyor, paylasilmiyor.** POSIX'te
+  `O_NONBLOCK` acik dosya tanimina aittir ve ebeveyn ile cocuk onu
+  paylasir; TCMK'de cocugun koydugu bayrak ebeveyni etkilemiyor.
+
 ## Alfa'nin bilinen sinirlari
 
 Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
@@ -8424,8 +8604,10 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
   **bekliyor** (yukari bkz.); beklememek isteyen `poll` ile sorar ya da
   `O_NONBLOCK` koyar. Terminal disiplini (satir tamponu, yankilama,
   `termios`) hala yok -- yankiyi uygulama kendi yapar. `read(0, ...)`
-  surecin **ilk** penceresinin kuyruguna bakiyor; hangi pencerenin
-  "konsol" oldugunu secme yolu yok.
+  surecin **kendi** ilk penceresine, yoksa **oturumunun terminaline**
+  (liderin penceresi) bakiyor -- yani kabugun cocuklari terminali
+  paylasiyor (yukari bkz. is denetimi). Hangi pencerenin terminal
+  oldugunu secme yolu (`TIOCSCTTY`) yok.
 - **Sinyal teslimi syscall donusune baglidir.** Hicbir syscall yapmayan
   saf hesap dongusu sinyali gormez (`spin` boyle); `SIGKILL` ise
   isbirligi gerektirmedigi icin her zaman calisir. Maskeleme
@@ -8434,11 +8616,13 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
   var; maske 64 bit. `SIGSTOP` ve `SIGKILL` yakalanamaz ve maskelenemez
   (yukari bkz.).
 - ~~**Surec gruplari yok**~~ -- var (yukari bkz.): `setpgid`/`getpgid`,
-  `kill(-pgid)`, `waitpid(-pgid)`, `WUNTRACED`/`WCONTINUED` ve
-  `SIGSTOP`/`SIGCONT`/`SIGTSTP` calisiyor. Eksik olan **terminal**
-  tarafi: `tcsetpgrp`/`tcgetpgrp`, on plan/arka plan ayrimi,
-  `SIGTTIN`/`SIGTTOU` ve oturum (`setsid`) yok. `SIGCHLD` bu batiyla
-  geldi (yukari bkz.), yani ebeveyn artik sormadan ogreniyor.
+  `kill(-pgid)`, `waitpid(-pgid)`, `WUNTRACED`/`WCONTINUED`,
+  `SIGSTOP`/`SIGCONT`/`SIGTSTP` ve `SIGCHLD` calisiyor. ~~Terminal
+  tarafi yok~~ -- o da geldi: oturum (`setsid`/`getsid`), on plan
+  grubu (`tcsetpgrp`/`tcgetpgrp`) ve `SIGTTIN`/`SIGTTOU`. Eksik
+  kalanlar: lider cikinca `SIGHUP`, yetim grup kurali, `TIOCSCTTY`/
+  `TIOCNOTTY` ve `termios`'un tamami (`TOSTOP` dahil -- arka plandan
+  **yazmak** serbest).
 - **Is-parcacigi yigini sabit 8 KiB**: `dwStackSize` yok sayiliyor ve
   **duvari yok** -- otomatik buyume yalnizca surecin ana yiginina ait
   (yukari bkz.).

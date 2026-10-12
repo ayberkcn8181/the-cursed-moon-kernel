@@ -120,6 +120,27 @@ pub fn clone_into(child: usize) {
             }
         }
     });
+    // Yonlendirilmemis 0/1/2'nin bayraklari da devrediliyor.
+    //
+    // Uzun sure devredilmiyordu, ve daha kotusu cocugun yuvasinda
+    // **onceki sahibinin** bayraklari duruyordu: sifirlama yalnizca
+    // `execve`de yapiliyordu, `fork`ta degil. Is denetimi sinavi bunu
+    // buldu -- hic `O_NONBLOCK` koymamis bir cocugun "bloke eden"
+    // okumasi beklemeden `EAGAIN` dondu, cunku ayni yuvayi daha once
+    // kullanan cocuk o bayragi koymustu.
+    //
+    // POSIX'te `O_NONBLOCK` acik dosya tanimina aittir ve `fork`tan
+    // sonra **paylasilir** (cocuk koyarsa ebeveyn de gorur). TCMK
+    // kopyaliyor: yonlendirilmemis stdin bir dosya degil, ve paylasim
+    // bir cocugun ebeveyninin okumasini bloke etmeyen hale getirmesine
+    // izin verirdi -- Linux'ta bilinen bir tuzak.
+    let parent_group = scheduler::current_group();
+    if parent_group < scheduler::MAX_TASKS {
+        for fd in 0..FIRST_FREE_FD {
+            let value = STD_FLAGS[parent_group][fd].load(Ordering::Relaxed);
+            STD_FLAGS[child][fd].store(value, Ordering::Relaxed);
+        }
+    }
 }
 
 /// Gorev sonlanirken tum tanimlayicilarini birakir.

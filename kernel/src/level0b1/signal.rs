@@ -142,6 +142,29 @@ pub const SIGSTOP: u32 = 19;
 /// Ctrl-Z'yi yakalayip once dosyasini kaydedebilsin diye.
 pub const SIGTSTP: u32 = 20;
 
+/// Arka plandaki bir surec **terminalden okumaya** calisti.
+///
+/// Is denetiminin klavye yarisi: terminali okuyabilen tek grup on
+/// plandaki gruptur. Arka plandan okuyan bir isin grubu bu sinyalle
+/// durdurulur ve kabuk ona "durdu (tty girdisi)" der; kullanici `fg`
+/// deyince okuma **yeniden baslar** (bkz. `restart_after_signal`).
+///
+/// Sinyal olmasaydi iki kotu secenek kalirdi: ya arka plan isi
+/// klavyeyi **calar** (kullanicinin yazdigi kabuga degil ona gider) ya
+/// da okuma sessizce basarisiz olur.
+pub const SIGTTIN: u32 = 21;
+
+/// Arka plandaki bir surec terminalin **ayarini degistirmeye**
+/// calisti (`tcsetpgrp` gibi).
+///
+/// `SIGTTIN`in ikizi ama bir yerde tersine davraniyor ve fark onemli:
+/// `SIGTTIN` yok sayilirsa okuma `EIO` ile **reddedilir**; `SIGTTOU`
+/// yok sayilir ya da engellenirse degisiklik **izin verilir**. Kabuklar
+/// tam olarak buna dayanir -- bir isi on plana alip geri donerken
+/// kabuk kendisi arka plandadir, ve `SIGTTOU`yu engelleyerek terminali
+/// geri alir (bkz. `level0b1::tty`).
+pub const SIGTTOU: u32 = 22;
+
 /// **Standart** sinyallerin en buyugu. Bu sinira kadar olanlar bit
 /// maskesinde birlesir (bkz. modul basi).
 pub const MAX_STANDARD: u32 = 31;
@@ -715,7 +738,7 @@ pub enum DefaultAction {
 
 pub fn default_action(signo: u32) -> DefaultAction {
     match signo {
-        SIGSTOP | SIGTSTP => DefaultAction::Stop,
+        SIGSTOP | SIGTSTP | SIGTTIN | SIGTTOU => DefaultAction::Stop,
         SIGCONT => DefaultAction::Continue,
         SIGCHLD => DefaultAction::Ignore,
         _ => DefaultAction::Terminate,
@@ -1127,12 +1150,44 @@ pub fn interrupts_call(task: usize) -> bool {
             if mask & (1u64 << signo) == 0 {
                 continue;
             }
-            if table.add(task * SLOTS + signo as usize).read().handler != SIG_IGN {
-                return true;
+            let handler = table.add(task * SLOTS + signo as usize).read().handler;
+            if handler == SIG_IGN {
+                continue;
             }
+            // Varsayilani **hicbir sey yapmamak** olan bir sinyal de
+            // bolmez: `SIGCHLD` ve kosan bir surec icin `SIGCONT`.
+            //
+            // Uzun sure bolerdi, ve sonucu her yerdeydi ama gorunmezdi:
+            // bir cocugu olan ve klavyeyi bekleyen her surec, cocuk
+            // bittiginde `EINTR` aliyordu -- kendisi hicbir isleyici
+            // kurmamisken. Linux bu sinyalleri gonderim aninda dusurur;
+            // ne bekleyeni uyandirir ne de cagriyi boler.
+            if handler == SIG_DFL
+                && matches!(
+                    default_action(signo),
+                    DefaultAction::Ignore | DefaultAction::Continue
+                )
+            {
+                continue;
+            }
+            return true;
         }
     }
     false
+}
+
+/// Sinyal **yok sayiliyor ya da engelli** mi.
+///
+/// Is denetiminin iki karari buna bakiyor ve ikisi zit yonde (bkz.
+/// `SIGTTOU`): okumada "evet" `EIO` demek, terminal ayarinda "izin
+/// ver". Ortak olan, ikisinde de sinyalin **gonderilmemesi** --
+/// gonderilseydi engelli bir sinyal hic teslim edilmez ve surec
+/// sonsuza kadar ayni cagriyi tekrar ederdi.
+pub fn ignored_or_blocked(task: usize, signo: u32) -> bool {
+    if task >= scheduler::MAX_TASKS || !valid(signo) {
+        return false;
+    }
+    handler_of(task, signo) == SIG_IGN || BLOCKED[task].load(Ordering::Relaxed) & (1u64 << signo) != 0
 }
 
 /// Bolunen cagri, isleyici dondukten sonra yeniden calistirilmali mi?
@@ -1159,10 +1214,23 @@ pub fn restart_after_signal(task: usize) -> bool {
             if d.handler == SIG_IGN {
                 continue;
             }
-            // Varsayilan davranis sureci oldurecek: yeniden baslatmanin
-            // anlami yok, zaten geri donulmeyecek.
+            // Varsayilan davranis: sinyalin **ne yapacagina** gore.
+            //
+            // Uzun sure tek bir satirdi -- "varsayilan sureci oldurur,
+            // yeniden baslatmanin anlami yok" -- ve oldurmeyen
+            // varsayilanlar gelene kadar dogruydu. Durduran bir sinyal
+            // (`SIGTSTP`, `SIGTTIN`) cagriyi bolup sureci durduruyor;
+            // `SIGCONT` gelince surec **geri donuyor**, ve o zaman
+            // cagriya ne olacagi onemli. Linux onu sessizce yeniden
+            // baslatir (`ERESTARTSYS` + isleyici yok). TCMK `EINTR`
+            // donduruyordu: Ctrl-Z + `fg` yapilan her program klavye
+            // beklerken hic istemedigi bir hata aliyordu.
+            //
+            // Is denetimi bu yolun **kalbinde**: arka plandan okuyan bir
+            // is `SIGTTIN` ile durur, `fg` ile on plana gelir ve okumasi
+            // kaldigi yerden -- bu kez izinli olarak -- surmeli.
             if d.handler == SIG_DFL {
-                return false;
+                return !matches!(default_action(signo), DefaultAction::Terminate);
             }
             return d.flags & SA_RESTART != 0;
         }
@@ -1556,6 +1624,8 @@ pub fn name_of(signo: u32) -> &'static str {
         SIGCONT => "SIGCONT",
         SIGSTOP => "SIGSTOP",
         SIGTSTP => "SIGTSTP",
+        SIGTTIN => "SIGTTIN",
+        SIGTTOU => "SIGTTOU",
         SIGCHLD => "SIGCHLD",
         // Gercek-zamanlilarin tek tek adi yok; POSIX onlari zaten
         // `SIGRTMIN+n` diye adlandirir, yani ad bir **sayi ifadesi**.

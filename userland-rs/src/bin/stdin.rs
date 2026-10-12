@@ -34,14 +34,22 @@
 //! ucu de bilincli:
 //!
 //! ```text
-//!   pencere yok        -> 0 (dosya sonu) -- kimse tus gonderemez
+//!   terminal yok       -> 0 (dosya sonu) -- kimse tus gonderemez
 //!   uyutulamaz gorev   -> 0 -- masaustu/kabuk uyursa sistem donar
 //!   O_NONBLOCK         -> -EAGAIN
 //! ```
 //!
-//! Ilki onemli: penceresi olmayan bir surecin klavyesi yoktur, onu
+//! Ilki onemli: terminali olmayan bir surecin klavyesi yoktur, onu
 //! uyutmak sonsuza kadar uyutmak olurdu. Bu yuzden orada `0` dogru
 //! cevap -- gercekten girdi yok.
+//!
+//! "Terminal yok" uzun sure "pencere yok" demekti ve D sinavi onu
+//! penceresiz bir `fork` cocuguyla olcuyordu. Is denetimi batisiyla
+//! model dogru haline geldi: kabugun cocuklari **ayni terminali
+//! paylasir** (bkz. `jobctl`), yani penceresiz bir cocuk artik
+//! ebeveyninin terminalini okuyor -- gercek bir sistemde oldugu gibi.
+//! D'nin niyeti degismedi, olcusu degisti: cocuk once `setsid` ile
+//! terminalinden kopuyor, sonra okuyor.
 //!
 //! ## Windows'ta karsiligi
 //!
@@ -50,14 +58,16 @@
 //! icin `WaitForSingleObject` + `ReadConsoleInput`. Yani "varsayilan
 //! bekler" iki dunyada da ayni; ayrilan, beklemekten kacinma yolu.
 //!
-//! ## Bes sinav
+//! ## Alti sinav
 //!
 //! ```text
 //!   A  O_NONBLOCK   -> tus yokken -EAGAIN doner, beklemez
 //!   B  poll         -> tus yokken "hazir degil" der
 //!   C  bloke etti   -> bekleyen okuma sinyalle bolundu, >=100 ms surdu
-//!   D  penceresiz   -> pencere olmayan surecte 0 (dosya sonu)
+//!   D  terminalsiz  -> terminali olmayan surecte 0 (dosya sonu)
 //!   E  bayrak       -> fd 0'in bayragi yazilip geri okunabiliyor
+//!   F  bayrak mirasi-> fork cocugu bayragi EBEVEYNINDEN devraliyor,
+//!                      yuvanin onceki sahibinden degil
 //! ```
 //!
 //! C sinavin kalbi: `-EINTR` tek basina yetmez, cunku okuma hic
@@ -154,7 +164,7 @@ extern "C" fn late_signaller(_param: usize) -> usize {
 fn main() {
     use core::fmt::Write;
     let mut out = Stdout;
-    let mut checks = [EMPTY; 5];
+    let mut checks = [EMPTY; 6];
 
     // Pencere **once** aciliyor, sinavlardan sonra degil.
     //
@@ -275,11 +285,16 @@ fn main() {
         passed: c,
     };
 
-    // --- D: penceresiz surecte dosya sonu ---
+    // --- D: terminalsiz surecte dosya sonu ---
     //
-    // Cocuk `fork` ile yaratildigi icin kendi gorev numarasina sahip ve
-    // hicbir pencerenin sahibi degil. Klavyesi olmayan bir surec
-    // uyutulsaydi sonsuza kadar uyurdu; dogru cevap `0`.
+    // Cocuk `fork` ile yaratildi ve once `setsid` ile **terminalinden
+    // kopuyor**. Klavyesi olmayan bir surec uyutulsaydi sonsuza kadar
+    // uyurdu; dogru cevap `0`.
+    //
+    // `setsid` olmadan cocuk ebeveyninin terminalini okurdu: ayni
+    // oturumda ve on plan grubunda, yani okumaya **izinli** ve tus
+    // bekliyor. Ilk yazilista D tam olarak o durumu "dosya sonu"
+    // diye olcuyordu -- TCMK'de paylasilan bir terminal olmadigi icin.
     //
     // Sonuc boru uzerinden geliyor ve ebeveyn `poll` ile **zaman
     // asimli** bekliyor: cekirdek yanlissa cocuk asili kalir, ve bu
@@ -292,6 +307,7 @@ fn main() {
         Some((read_end, write_end)) => match sys::fork() {
             0 => {
                 sys::close(read_end);
+                tcmk::signal::setsid();
                 let mut child_buf = [0u8; 8];
                 let n = sys::read(sys::STDIN, &mut child_buf);
                 // Tek bayta sigsin diye 128 kaydirmali: 128 = 0,
@@ -333,21 +349,75 @@ fn main() {
         }
     };
     checks[3] = Check {
-        name: "D penceresiz",
+        name: "D terminalsiz",
         detail: if d {
-            "penceresiz surecte 0 (dosya sonu)"
+            "terminalsiz surecte 0 (dosya sonu)"
         } else if child_raw == NO_FORK {
             "catallanamadi -- gorev yuvasi kalmadi"
         } else if child_raw == NO_PIPE {
             "boru acilamadi -- sinav kurulamadi"
         } else if child_raw == NO_ANSWER {
-            "penceresiz surec ASILI kaldi"
+            "terminalsiz surec ASILI kaldi"
         } else if child_raw < 0 {
-            "penceresiz surecte okuma HATA dondu"
+            "terminalsiz surecte okuma HATA dondu"
         } else {
-            "penceresiz surec VERI gordu"
+            "terminalsiz surec VERI gordu"
         },
         passed: d,
+    };
+
+    // --- F: bayrak mirasi ---
+    //
+    // Is denetimi batisinin buldugu bir hata. Yonlendirilmemis 0/1/2'nin
+    // bayraklari **yuva numarasiyla** tutuluyordu, `fork`ta
+    // kopyalanmiyordu ve yalnizca `execve`de sifirlaniyordu. Sonucu:
+    // bir cocugun yuvasinda, ayni yuvayi daha once kullanmis bir cocugun
+    // `O_NONBLOCK`u duruyordu. Hic bayrak koymamis bir surecin "bloke
+    // eden" okumasi beklemeden `EAGAIN` donuyordu.
+    //
+    // Iki yari: (1) ebeveynin bayragi cocuga geciyor mu; (2) bayrak
+    // koyup cikan bir cocugun yuvasini alan sonraki cocuk o bayragi
+    // gormuyor mu.
+    let inherited = {
+        sys::set_flags(sys::STDIN, sys::O_NONBLOCK);
+        let child = sys::fork();
+        if child == 0 {
+            let has = sys::get_flags(sys::STDIN) as usize & sys::O_NONBLOCK != 0;
+            sys::exit(if has { 1 } else { 2 });
+        }
+        sys::set_flags(sys::STDIN, 0);
+        child > 0 && reap_code(child as usize) == Some(1)
+    };
+    let (clean, reused) = {
+        let first = sys::fork();
+        if first == 0 {
+            sys::set_flags(sys::STDIN, sys::O_NONBLOCK);
+            sys::exit(0);
+        }
+        if first > 0 {
+            let _ = reap_code(first as usize);
+        }
+        let second = sys::fork();
+        if second == 0 {
+            let has = sys::get_flags(sys::STDIN) as usize & sys::O_NONBLOCK != 0;
+            sys::exit(if has { 1 } else { 2 });
+        }
+        let code = if second > 0 { reap_code(second as usize) } else { None };
+        (code == Some(2), first > 0 && second == first)
+    };
+    let f = inherited && clean;
+    checks[5] = Check {
+        name: "F bayrak mirasi",
+        detail: if f && reused {
+            "ebeveynden devraldi; ayni yuvanin eski bayragini gormedi"
+        } else if f {
+            "ebeveynden devraldi; yuva yeniden kullanilmadi"
+        } else if !inherited {
+            "cocuk ebeveynin bayragini DEVRALMADI"
+        } else {
+            "cocuk yuvanin ONCEKI SAHIBININ bayragini gordu"
+        },
+        passed: f,
     };
 
     for check in &checks {
@@ -367,7 +437,7 @@ fn main() {
     );
     let _ = writeln!(
         out,
-        "[stdin] bekleme: {} tik (en az {}), penceresiz okuma: {}",
+        "[stdin] bekleme: {} tik (en az {}), terminalsiz okuma: {}",
         waited_c,
         MIN_TICKS,
         match child_raw {
@@ -388,7 +458,25 @@ fn main() {
     }
 }
 
-fn draw(win: &mut Window, checks: &[Check; 5], waited: usize) {
+/// Cocugun cikis kodunu **sinirli** sure bekler; cikmazsa oldurur.
+fn reap_code(child: usize) -> Option<u32> {
+    let mut status = 0u32;
+    for _ in 0..100 {
+        if sys::waitpid(child, &mut status, sys::WNOHANG) > 0 {
+            return if sys::exited(status) {
+                Some(sys::exit_status(status))
+            } else {
+                None
+            };
+        }
+        sys::sleep_ms(20);
+    }
+    tcmk::signal::kill(child, tcmk::signal::SIGKILL);
+    sys::waitpid(child, &mut status, 0);
+    None
+}
+
+fn draw(win: &mut Window, checks: &[Check; 6], waited: usize) {
     let (w, h) = (win.width(), win.height());
     win.clear(BG);
     win.fill(0, 0, w, 22, PANEL);

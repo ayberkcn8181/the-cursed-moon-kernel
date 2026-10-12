@@ -152,6 +152,7 @@ static KNOWN_APPS: &[(&str, &str, &str)] = &[
     ("sigwait", "/bin/sigwait", "sigwait"),
     ("sigchld", "/bin/sigchld", "sigchld"),
     ("stackgrow", "/bin/stackgrow", "stackgrow"),
+    ("jobctl", "/bin/jobctl", "jobctl"),
     // Windows ikilisi: yol .exe ile biter, cekirdek bicimi magic'ten
     // anlar (bkz. vfs::format) ve PE yukleyicisine yonlendirir. Yol iki
     // mimaride de aynidir; VFS'te duran ikilinin PE32 mi PE32+ mi oldugu

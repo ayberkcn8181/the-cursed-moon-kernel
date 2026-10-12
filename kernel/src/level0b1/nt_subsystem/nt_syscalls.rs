@@ -215,6 +215,8 @@ const INVALID_HANDLE_VALUE: usize = usize::MAX;
 const STATUS_SUCCESS: u32 = 0x0000_0000;
 const STATUS_INVALID_HANDLE: u32 = 0xC000_0008;
 const STATUS_ACCESS_VIOLATION: u32 = 0xC000_0005;
+/// Erisim reddedildi -- is denetiminde arka plandan terminal okumasi.
+const STATUS_ACCESS_DENIED: u32 = 0xC000_0022;
 const STATUS_OBJECT_NAME_NOT_FOUND: u32 = 0xC000_0034;
 const STATUS_TOO_MANY_OPENED_FILES: u32 = 0xC000_011F;
 const STATUS_NOT_IMPLEMENTED: u32 = 0xC000_0002;
@@ -640,6 +642,10 @@ fn win32_error_of(err: KernelError) -> u32 {
         // yok. Bir PE sureci POSIX cagrisiyla isleyici kurmussa buraya
         // dusebilir; en yakin kod "islem iptal edildi".
         KernelError::Interrupted => ERROR_OPERATION_ABORTED,
+        // Windows'ta is denetimi yok; bir PE sureci buraya ancak bir
+        // POSIX ebeveyni onu arka plana attiysa duser. En yakin anlam
+        // "erisim reddedildi".
+        KernelError::TerminalIo => ERROR_ACCESS_DENIED,
     }
 }
 
@@ -661,6 +667,7 @@ fn ntstatus_of(err: KernelError) -> u32 {
         KernelError::WouldBlock => STATUS_PIPE_EMPTY,
         KernelError::BrokenPipe => STATUS_PIPE_BROKEN,
         KernelError::Interrupted => STATUS_CANCELLED,
+        KernelError::TerminalIo => STATUS_ACCESS_DENIED,
     }
 }
 

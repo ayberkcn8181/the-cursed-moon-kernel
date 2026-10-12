@@ -184,6 +184,32 @@ pub struct Task {
     /// Varsayilan olarak gorev kendi grubunun lideridir; `fork` cocugu
     /// ebeveynin grubunu **devralir** ve `setpgid` onu degistirebilir.
     pub pgid: usize,
+    /// **Oturum** (POSIX sid).
+    ///
+    /// Ucuncu katman ve en genis olani:
+    ///
+    /// ```text
+    ///   group  is parcacigi grubu  -> ayni surecin akislari
+    ///   pgid   surec grubu         -> kabugun "is" dedigi sey
+    ///   sid    oturum              -> bir TERMINALI paylasan isler
+    /// ```
+    ///
+    /// Oturumun var olma sebebi terminal: bir oturumun en fazla bir
+    /// denetleyen terminali vardir ve o terminali **okuyabilen** tek
+    /// grup on plandaki gruptur (bkz. `level0b1::tty`). Kabugun
+    /// arka plana attigi bir isin klavyeyi calmamasi buna dayanir.
+    ///
+    /// `fork` cocugu oturumu devralir; kabuktan baslatilan yeni bir
+    /// imaj kendi oturumunun lideridir.
+    pub sid: usize,
+    /// Oturum terminalini **kaybetti** mi.
+    ///
+    /// Oturum lideri olunce oturumun terminali kopar -- Linux'ta da
+    /// boyledir. Bayrak olmasaydi daha tehlikeli bir sey olurdu: liderin
+    /// yuvasi yeniden kullanildiginda yetim kalan uyeler, `sid`leri
+    /// hala o numarayi gosterdigi icin **yeni ve ilgisiz** bir surecin
+    /// penceresini kendi terminalleri sanirdi.
+    pub ctty_lost: bool,
     /// Durmus gorevin durma sebebi olan sinyal (`WSTOPSIG`).
     ///
     /// Cikis sinyalinden ayri tutuluyor: bir gorev once durup sonra
@@ -252,6 +278,8 @@ impl Task {
             exit_signal: 0,
             group: 0,
             pgid: 0,
+            sid: 0,
+            ctty_lost: false,
             stop_signal: 0,
             stop_pending: false,
             cont_pending: false,
@@ -340,12 +368,24 @@ pub fn spawn_child(name: &'static str, entry: extern "C" fn() -> !) -> Option<us
 /// Grup yaratanin grubudur, yani `getpid`/`GetCurrentProcessId` ayni
 /// sayiyi dondurmeye devam eder; degisen `gettid`/`GetCurrentThreadId`.
 pub fn spawn_thread(name: &'static str, entry: extern "C" fn() -> !) -> Option<usize> {
+    let creator = current_id();
     let group = current_group();
-    let space = address_space_of(current_id());
+    let space = address_space_of(creator);
     let index = spawn_inner(name, entry, true)?;
     crate::arch::cpu::without_interrupts(|| unsafe {
         let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
         (*tasks.add(index)).group = group;
+        // Surec grubu ve oturum **surece** aittir, akisa degil.
+        //
+        // Uzun sure `spawn_inner`in verdigi deger kaliyordu: her is
+        // parcacigi kendi numarasini grup olarak tasiyordu. Is denetimi
+        // gelene kadar gorunmuyordu -- `kill(-pgid)` akislara
+        // ulasmiyordu ama kimse sormamisti. Terminal geldiginde
+        // gorunur oldu: ana akis disindaki bir akis klavyeyi okuyunca
+        // kendini **arka planda** sanip `SIGTTIN` alirdi.
+        (*tasks.add(index)).pgid = (*tasks.add(creator)).pgid;
+        (*tasks.add(index)).sid = (*tasks.add(creator)).sid;
+        (*tasks.add(index)).ctty_lost = (*tasks.add(creator)).ctty_lost;
         // Adres uzayi **kopyalanmaz**, ayni CR3 paylasilir. Yikim
         // `address_space_users` ile korunuyor: son gorev cikana kadar
         // uzay ayakta kalir.
@@ -462,6 +502,12 @@ fn spawn_inner(
         // Surec grubu: `fork` cocugu bunu ebeveynden devralir
         // (bkz. `inherit_pgid`), yeni bir imaj ise kendi grubunu kurar.
         (*tasks.add(index)).pgid = index;
+        // Yeni bir imaj kendi oturumunun lideri ve terminalinin on
+        // planinda. `fork` bunu `inherit_pgid` icinde ebeveyninkiyle
+        // degistirir.
+        (*tasks.add(index)).sid = index;
+        (*tasks.add(index)).ctty_lost = false;
+        SESSION_FG[index].store(index, Ordering::Relaxed);
         (*tasks.add(index)).stop_signal = 0;
         (*tasks.add(index)).stop_pending = false;
         (*tasks.add(index)).cont_pending = false;
@@ -521,6 +567,8 @@ fn release_slot(index: usize) {
         (*tasks.add(index)).wait_timed = false;
         (*tasks.add(index)).clear_child_tid = 0;
         (*tasks.add(index)).pgid = index;
+        (*tasks.add(index)).sid = index;
+        (*tasks.add(index)).ctty_lost = false;
         (*tasks.add(index)).stop_signal = 0;
         (*tasks.add(index)).stop_pending = false;
         (*tasks.add(index)).cont_pending = false;
@@ -905,6 +953,9 @@ pub fn terminate_current() -> ! {
     if group_members(group) == 1 {
         crate::level0a::core::fd::close_all(group);
     }
+    // Yuva asagida birakilabilir ve birakilinca sifirlanir; oturum ve
+    // grup simdiden aliniyor (bkz. `release_dead_foreground`).
+    let (leaving_sid, leaving_pgid) = (sid_of(leaving), pgid_of(leaving));
 
     crate::arch::cpu::without_interrupts(|| unsafe {
         let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
@@ -941,6 +992,8 @@ pub fn terminate_current() -> ! {
     // Bildirim kritik bolumun **disinda**: `raise_with` ebeveyni
     // uyandirabiliyor ve uyandirma kesmeler kapaliyken yapilacak bir
     // is degil.
+    detach_session(leaving, leaving_sid);
+    release_dead_foreground(leaving_sid, leaving_pgid);
     notify_parent_exit(leaving);
 
     loop {
@@ -1147,10 +1200,177 @@ pub fn set_pgid(index: usize, pgid: usize) -> bool {
     }
 }
 
-/// `fork` cocugu ebeveynin surec grubunu devralir.
+/// `fork` cocugu ebeveynin surec grubunu **ve oturumunu** devralir.
+///
+/// Ikisinin birlikte devredilmesi sart: grup oturumun icindedir. Yalnizca
+/// grubu devretmek, cocugu ebeveyninin grubuna ama **kendi** oturumuna
+/// koymak olurdu -- POSIX'te imkansiz bir durum, cunku bir grup iki
+/// oturuma yayilamaz.
 pub fn inherit_pgid(child: usize, parent: usize) {
     let pgid = pgid_of(parent);
     set_pgid(child, pgid);
+    if child >= MAX_TASKS || parent >= MAX_TASKS {
+        return;
+    }
+    crate::arch::cpu::without_interrupts(|| unsafe {
+        let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+        (*tasks.add(child)).sid = (*tasks.add(parent)).sid;
+        (*tasks.add(child)).ctty_lost = (*tasks.add(parent)).ctty_lost;
+    });
+}
+
+// --- Oturumlar ---------------------------------------------------------
+
+/// Oturum basina **on plan** surec grubu, oturum numarasiyla indeksli.
+///
+/// Gercek bir cekirdekte bu bilgi terminale aittir (`tty->pgrp`).
+/// TCMK'de bir oturumun terminali liderinin penceresi oldugu icin
+/// (bkz. `level0b1::tty`) ikisi birebir ortusuyor ve oturum numarasi
+/// yeterli bir anahtar.
+static SESSION_FG: [AtomicUsize; MAX_TASKS] = [const { AtomicUsize::new(0) }; MAX_TASKS];
+
+/// Gorevin oturumu (sid).
+pub fn sid_of(index: usize) -> usize {
+    if index >= MAX_TASKS {
+        return 0;
+    }
+    unsafe {
+        let tasks = core::ptr::addr_of!(TASKS) as *const Task;
+        (*tasks.add(index)).sid
+    }
+}
+
+/// Gorevin oturumu terminalini kaybetti mi.
+pub fn ctty_lost(index: usize) -> bool {
+    if index >= MAX_TASKS {
+        return true;
+    }
+    unsafe {
+        let tasks = core::ptr::addr_of!(TASKS) as *const Task;
+        (*tasks.add(index)).ctty_lost
+    }
+}
+
+/// `setsid`in cekirdegi: gorev yeni bir oturumun ve grubun lideri olur.
+///
+/// Reddedilen tek durum POSIX'in ta kendisi: cagiran **zaten bir grup
+/// lideriyse** (`pgid == pid`). Sebep somut -- izin verilseydi grubun
+/// geri kalani eski oturumda kalir, lider yenisine gecerdi ve ayni
+/// grup iki oturuma yayilmis olurdu.
+pub fn new_session(index: usize) -> bool {
+    if index >= MAX_TASKS || pgid_of(index) == index {
+        return false;
+    }
+    crate::arch::cpu::without_interrupts(|| unsafe {
+        let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+        (*tasks.add(index)).sid = index;
+        (*tasks.add(index)).pgid = index;
+        (*tasks.add(index)).ctty_lost = false;
+        SESSION_FG[index].store(index, Ordering::Relaxed);
+    });
+    true
+}
+
+/// "On planda kimse yok" -- olmus bir on plan grubunun yerine gecen deger.
+///
+/// Hicbir grup numarasiyla eslesmiyor (gruplar `MAX_TASKS`in altinda) ve
+/// birden buyuk: POSIX `tcgetpgrp`in on plan grubu yokken dondurecegi
+/// degeri tam olarak boyle tarif ediyor.
+pub const NO_FOREGROUND: usize = MAX_TASKS;
+
+/// Oturumun on plan grubu.
+pub fn foreground_of(sid: usize) -> usize {
+    if sid >= MAX_TASKS {
+        return usize::MAX;
+    }
+    SESSION_FG[sid].load(Ordering::Relaxed)
+}
+
+/// Oturumun on plan grubunu degistirir.
+pub fn set_foreground(sid: usize, pgid: usize) {
+    if sid < MAX_TASKS {
+        SESSION_FG[sid].store(pgid, Ordering::Relaxed);
+    }
+}
+
+/// Oturumda bu numarali bir surec grubu **canli** mi.
+///
+/// `tcsetpgrp` ve `setpgid` ikisi de buna bakiyor: on plani baska bir
+/// oturumdaki gruba vermek ya da bir sureci baska bir oturumdaki gruba
+/// tasimak, iki oturumun terminalini birbirine karistirmak olurdu.
+pub fn session_has_group(sid: usize, pgid: usize) -> bool {
+    let count = TASK_COUNT.load(Ordering::Relaxed);
+    for i in 0..count {
+        if i == IDLE_TASK {
+            continue;
+        }
+        match state_of(i) {
+            TaskState::Unused | TaskState::Terminated => continue,
+            _ => {}
+        }
+        if sid_of(i) == sid && pgid_of(i) == pgid {
+            return true;
+        }
+    }
+    false
+}
+
+/// Bu numarali canli bir surec grubu var mi (hangi oturumda olursa).
+pub fn group_exists(pgid: usize) -> bool {
+    let mut scratch = [0usize; MAX_TASKS];
+    group_tasks(pgid, &mut scratch) > 0
+}
+
+/// Cikan gorev on plan grubunun **son** uyesiyse on plan bosalir.
+///
+/// Bir bozma sinavinin buldugu hata. On plan grubu oldugunde oturum hala
+/// onun numarasini gosteriyordu; ayni oturumda baslatilan bir sonraki is
+/// o yuvayi -- dolayisiyla o grup numarasini -- alinca **kimse
+/// `tcsetpgrp` cagirmadan** on plana gecmis oluyordu. Arka plana atilmis
+/// bir isin klavyeyi tesadufen kazanmasi demek.
+///
+/// Linux'ta terminal olu grubu bir referansla tutar; numara yeniden
+/// kullanilsa bile yeni grup o referansla eslesmez, yani on planda kimse
+/// yoktur. TCMK'de grup bir sayi oldugu icin ayni sonucu bekci deger
+/// veriyor.
+///
+/// Oturum ve grup **disaridan** veriliyor ve sebebi bir sira tuzagi:
+/// cikis yolu yuvayi kritik bolumde birakabiliyor (`release_slot`), o da
+/// `sid`/`pgid`i yuva numarasina sifirliyor. Bu fonksiyon ondan **sonra**
+/// calistigi icin yuvadan okusaydi olen gorevin degil, sifirlanmis
+/// yuvanin degerlerini gorurdu.
+fn release_dead_foreground(sid: usize, pgid: usize) {
+    if sid >= MAX_TASKS || foreground_of(sid) != pgid {
+        return;
+    }
+    if !group_exists(pgid) {
+        SESSION_FG[sid].store(NO_FOREGROUND, Ordering::Relaxed);
+    }
+}
+
+/// Oturum lideri cikti: oturumun terminali kopuyor.
+///
+/// Linux da boyle yapar (ve on plan grubuna `SIGHUP` gonderir; TCMK
+/// gondermiyor -- bkz. README). Burada asil korunan sey yuva
+/// yeniden kullanimi: liderin numarasi bir sonraki `spawn`da baska bir
+/// surece gidebilir, ve o zaman yetim uyelerin `sid`i **ilgisiz** bir
+/// surecin penceresini gosterirdi.
+///
+/// `sid` disaridan veriliyor; `release_dead_foreground` ile ayni sira
+/// tuzagi.
+fn detach_session(leader: usize, sid: usize) {
+    if sid != leader {
+        return;
+    }
+    let count = TASK_COUNT.load(Ordering::Relaxed);
+    crate::arch::cpu::without_interrupts(|| unsafe {
+        let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+        for i in 0..count {
+            if i != leader && (*tasks.add(i)).sid == leader {
+                (*tasks.add(i)).ctty_lost = true;
+            }
+        }
+    });
 }
 
 /// Bir surec grubundaki canli gorevleri `out`a yazar; sayiyi doner.
@@ -1910,6 +2130,7 @@ pub fn terminate(index: usize) -> Result<(), &'static str> {
     if index == current_id() {
         return Err("calisan gorev bu yoldan sonlandirilamaz");
     }
+    let (index_sid, index_pgid) = (sid_of(index), pgid_of(index));
     let space = crate::arch::cpu::without_interrupts(|| unsafe {
         let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
         match (*tasks.add(index)).state {
@@ -1949,6 +2170,8 @@ pub fn terminate(index: usize) -> Result<(), &'static str> {
     // bunu yakaladi: `kill` ile oldurulen cocuk icin **hicbir sinyal
     // gelmiyordu**. Iki cikis yolu var (kendi cikan ve oldurulen) ve
     // ikisinin de ayni sozu vermesi gerekiyor.
+    detach_session(index, index_sid);
+    release_dead_foreground(index_sid, index_pgid);
     notify_parent_exit(index);
 
     // Gorevin izleri: penceresi ekranda kalirsa artik kimsenin cizmedigi

@@ -82,6 +82,17 @@ pub const SIGCONT: u32 = 18;
 pub const SIGSTOP: u32 = 19;
 /// Terminalden gelen durdurma istegi (Ctrl-Z) -- **yakalanabilir**.
 pub const SIGTSTP: u32 = 20;
+/// Arka plandaki bir surec terminali okumaya calisti.
+///
+/// Varsayilani **durdurmak**; kabuk ona "durdu (tty girdisi)" der.
+/// Yok sayilirsa okuma `EIO` ile reddedilir.
+pub const SIGTTIN: u32 = 21;
+/// Arka plandaki bir surec terminalin ayarina dokundu (`tcsetpgrp`).
+///
+/// `SIGTTIN`in ikizi ama yok sayildiginda ya da engellendiginde
+/// tersine davranir: degisiklik **izin verilir**. Kabuklar bir isi on
+/// plana verip terminali geri alirken buna dayanir.
+pub const SIGTTOU: u32 = 22;
 
 // --- Gercek-zamanli sinyaller -----------------------------------------
 
@@ -690,6 +701,49 @@ pub fn setpgid(pid: usize, pgid: usize) -> isize {
 /// Surecin grubunu okur (POSIX `getpgid`); `pid = 0` "kendim".
 pub fn getpgid(pid: usize) -> isize {
     unsafe { sys::syscall1(sys::SYS_GETPGID, pid) as isize }
+}
+
+/// Yeni bir oturum kurar (POSIX `setsid`). Doner: yeni oturumun
+/// numarasi, ya da negatif hata (`-EPERM`: cagiran zaten grup lideri).
+///
+/// Cagiran eski terminalinden kopar. Grup lideri cagiramaz; gercek
+/// programlar bu yuzden once `fork` eder.
+pub fn setsid() -> isize {
+    unsafe { sys::syscall0(sys::SYS_SETSID) as isize }
+}
+
+/// Surecin oturumu (POSIX `getsid`); `pid = 0` "kendim".
+pub fn getsid(pid: usize) -> isize {
+    unsafe { sys::syscall1(sys::SYS_GETSID, pid) as isize }
+}
+
+/// `ioctl` istekleri -- yalnizca on plan grubu.
+const TIOCGPGRP: usize = 0x540F;
+const TIOCSPGRP: usize = 0x5410;
+
+/// Terminalin on plan grubu (POSIX `tcgetpgrp`).
+///
+/// `fd` cagiranin terminali degilse `-ENOTTY`.
+pub fn tcgetpgrp(fd: usize) -> isize {
+    let mut pgid: i32 = -1;
+    let r = unsafe {
+        sys::syscall3(sys::SYS_IOCTL, fd, TIOCGPGRP, &mut pgid as *mut i32 as usize) as isize
+    };
+    if r < 0 {
+        r
+    } else {
+        pgid as isize
+    }
+}
+
+/// Terminalin on plan grubunu degistirir (POSIX `tcsetpgrp`).
+///
+/// Arka plandan cagrilirsa grup `SIGTTOU` ile durur -- o sinyal
+/// engelli ya da yok sayili degilse. Kabuk bir isi on plana verip
+/// terminali geri alirken tam olarak bunu yapar.
+pub fn tcsetpgrp(fd: usize, pgid: usize) -> isize {
+    let value = pgid as i32;
+    unsafe { sys::syscall3(sys::SYS_IOCTL, fd, TIOCSPGRP, &value as *const i32 as usize) as isize }
 }
 
 /// Calisan surecin kimligi.

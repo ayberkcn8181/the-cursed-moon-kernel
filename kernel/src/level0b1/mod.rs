@@ -21,6 +21,8 @@ pub mod process;
 pub mod signal;
 /// Yigin otomatik buyume: koruma sayfasi hareketli bir sinir.
 pub mod stack;
+/// Denetleyen terminal ve is denetimi: oturum, on plan, SIGTTIN/SIGTTOU.
+pub mod tty;
 /// Is parcaciklari: clone ve CreateThread.
 pub mod thread;
 /// Adres uzerinde bekleme: futex ve WaitOnAddress.

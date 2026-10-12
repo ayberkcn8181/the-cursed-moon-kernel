@@ -143,6 +143,11 @@ mod i386_numbers {
     /// Surec grubunu degistirir / okur -- numaralar mimariye gore ayri.
     pub const SYS_SETPGID: u32 = 57;
     pub const SYS_GETPGID: u32 = 132;
+    /// Oturum: yeni kur / sor (bkz. `level0b1::tty`).
+    pub const SYS_SETSID: u32 = 66;
+    pub const SYS_GETSID: u32 = 147;
+    /// Terminal denetimi -- yalnizca `TIOCGPGRP` / `TIOCSPGRP`.
+    pub const SYS_IOCTL: u32 = 54;
     /// i386 Linux'ta klasik `signal(2)`. TCMK ucuncu bir arguman ister
     /// (tramplen); gercek Linux'ta o deger `sigaction.sa_restorer`
     /// alanindan gelir -- yani fikir ayni, tasima yolu farkli.
@@ -223,6 +228,9 @@ mod x86_64_numbers {
     pub const SYS_KILL: u32 = 62;
     pub const SYS_SETPGID: u32 = 109;
     pub const SYS_GETPGID: u32 = 121;
+    pub const SYS_SETSID: u32 = 112;
+    pub const SYS_GETSID: u32 = 124;
+    pub const SYS_IOCTL: u32 = 16;
     /// x86_64'te 13 **gercekten** `rt_sigaction`dir. Sadelestirilmis
     /// `signal` yuzu icin ayri bir numara ayrildi: kullanici tarafi
     /// zaten libc gibi `signal`i `sigaction` uzerine kuruyor.
@@ -285,6 +293,11 @@ const EINTR: i32 = 4;
 const ERANGE: i32 = 34;
 /// Izin yok -- TCMK'de tek kaynagi RAMFS'in salt okunur olmasi.
 const EACCES: i32 = 13;
+/// Girdi/cikti hatasi. Is denetiminde: arka plandan okuma ve `SIGTTIN`
+/// yok sayili.
+const EIO: i32 = 5;
+/// Tanimlayici bir terminal degil (ya da cagiranin terminali degil).
+const ENOTTY: i32 = 25;
 
 /// `clock_gettime` saat kimlikleri (Linux ile ayni sayilar).
 const CLOCK_MONOTONIC: usize = 1;
@@ -808,6 +821,7 @@ fn errno_of(err: KernelError) -> i32 {
         KernelError::WouldBlock => -EAGAIN,
         KernelError::BrokenPipe => -EPIPE,
         KernelError::Interrupted => -EINTR,
+        KernelError::TerminalIo => -EIO,
     }
 }
 
@@ -2553,13 +2567,127 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
         // "kendim", `pgid = 0` "kendi numaramla yeni bir grup kur".
         // Kabuk her yeni is icin tam olarak bunu yapar.
         SYS_SETPGID => {
-            let me = crate::level0a::core::scheduler::current_id();
+            use crate::level0a::core::scheduler as sched;
+            let me = sched::current_id();
             let pid = if arg1 == 0 { me } else { arg1 };
             let pgid = if arg2 == 0 { pid } else { arg2 };
-            if crate::level0a::core::scheduler::set_pgid(pid, pgid) {
+            // Oturum sinirlari. Uzun sure hic denetlenmiyordu, cunku
+            // oturum diye bir sey yoktu; artik iki kural var ve ikisi
+            // de "bir grup iki oturuma yayilamaz"in sonucu:
+            //
+            //   * oturum lideri grubunu degistiremez -- lider kendi
+            //     grubundan cikarsa oturumun adini tasiyan grup lidersiz
+            //     kalir;
+            //   * bir surec ancak **kendi oturumundaki** bir gruba
+            //     gecebilir (ya da kendi numarasiyla yeni bir grup
+            //     kurabilir).
+            if pid < sched::MAX_TASKS && sched::sid_of(pid) == pid {
+                -EPERM
+            } else if pgid != pid
+                && !sched::session_has_group(sched::sid_of(me), pgid)
+            {
+                -EPERM
+            } else if pid < sched::MAX_TASKS && sched::sid_of(pid) != sched::sid_of(me) {
+                -EPERM
+            } else if sched::set_pgid(pid, pgid) {
                 0
             } else {
                 -ESRCH
+            }
+        }
+
+        // setsid() -- yeni bir oturum kurar.
+        //
+        // Cagiran yeni oturumun **ve** yeni grubunun lideri olur ve
+        // eski terminalinden kopar. Grup lideri cagiramaz (`EPERM`):
+        // grubun geri kalani eski oturumda kalir, ayni grup iki oturuma
+        // yayilirdi. Bu yuzden gercek programlar once `fork` eder --
+        // cocuk hicbir grubun lideri degildir.
+        SYS_SETSID => {
+            let me = crate::level0a::core::scheduler::current_id();
+            if crate::level0a::core::scheduler::new_session(me) {
+                frame.set_return(me);
+                return;
+            }
+            -EPERM
+        }
+
+        // getsid(pid) -- sifir "kendim".
+        SYS_GETSID => {
+            let me = crate::level0a::core::scheduler::current_id();
+            let pid = if arg1 == 0 { me } else { arg1 };
+            match crate::level0a::core::scheduler::state_of(pid) {
+                crate::level0a::core::scheduler::TaskState::Unused => -ESRCH,
+                _ if pid >= crate::level0a::core::scheduler::task_count() => -ESRCH,
+                _ => {
+                    frame.set_return(crate::level0a::core::scheduler::sid_of(pid));
+                    return;
+                }
+            }
+        }
+
+        // ioctl(fd, request, arg) -- yalnizca on plan grubu.
+        //
+        // Linux'ta `tcgetpgrp`/`tcsetpgrp` libc sarmalayicilaridir ve bu
+        // iki istege iner. Geri kalan istekler `ENOTTY`: TCMK'de termios
+        // yok (bkz. README), ve bilinmeyen bir istege "basarili" demek
+        // cagirani ayarinin uygulandigina inandirirdi.
+        SYS_IOCTL => {
+            const TIOCGPGRP: usize = 0x540F;
+            const TIOCSPGRP: usize = 0x5410;
+            use crate::level0b1::tty::{self, TtyError};
+            let me = crate::level0a::core::scheduler::current_id();
+            let to_errno = |e: TtyError| match e {
+                TtyError::NotATty => -ENOTTY,
+                TtyError::Stopped => -EINTR,
+                TtyError::NoSuchGroup => -ESRCH,
+                TtyError::OtherSession => -EPERM,
+            };
+            match arg2 {
+                TIOCGPGRP => {
+                    if !crate::level0a::core::mmu::is_user_accessible(arg3)
+                        || !crate::level0a::core::mmu::is_user_accessible(arg3 + 3)
+                    {
+                        -EFAULT
+                    } else {
+                        match tty::foreground_group(me, arg1) {
+                            Ok(pgid) => {
+                                // SAFETY: isaretci yukarida dogrulandi.
+                                unsafe { (arg3 as *mut i32).write_unaligned(pgid as i32) };
+                                0
+                            }
+                            Err(e) => to_errno(e),
+                        }
+                    }
+                }
+                TIOCSPGRP => {
+                    if !crate::level0a::core::mmu::is_user_accessible(arg3)
+                        || !crate::level0a::core::mmu::is_user_accessible(arg3 + 3)
+                    {
+                        -EFAULT
+                    } else {
+                        // SAFETY: isaretci yukarida dogrulandi.
+                        let pgid = unsafe { (arg3 as *const i32).read_unaligned() };
+                        if pgid < 0 {
+                            -EINVAL
+                        } else {
+                            match tty::set_foreground_group(me, arg1, pgid as usize) {
+                                Ok(()) => 0,
+                                // Arka plandan terminale dokunuldu: grup
+                                // `SIGTTOU` aldi. Okumadaki gibi, cagri
+                                // `SIGCONT` sonrasi yeniden calismali.
+                                Err(TtyError::Stopped) => {
+                                    if restart_or_eintr(frame, SYS_IOCTL, from_interrupt) {
+                                        return;
+                                    }
+                                    -EINTR
+                                }
+                                Err(e) => to_errno(e),
+                            }
+                        }
+                    }
+                }
+                _ => -ENOTTY,
             }
         }
 

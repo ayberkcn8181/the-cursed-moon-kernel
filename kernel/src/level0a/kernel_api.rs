@@ -56,6 +56,14 @@ pub enum KernelError {
     /// dene" diyor. Ikisini ayni sayiyla bildirmek, okuyan tarafi
     /// erken cikmaya ikna ederdi.
     WouldBlock,
+    /// Arka plandaki bir surec terminali okumak istedi ve `SIGTTIN`
+    /// yok sayili ya da engelli -- POSIX `EIO`.
+    ///
+    /// Sinyal gonderilemiyor (engelli bir sinyal hic teslim edilmez ve
+    /// surec ayni cagriyi sonsuza kadar tekrar ederdi), okumaya da izin
+    /// verilemiyor (klavyeyi on plan isinden calmak olurdu). Geriye
+    /// tek cevap kaliyor: hata.
+    TerminalIo,
 }
 
 /// Program break (heap siniri) -- **surec basina**.
@@ -507,10 +515,30 @@ fn read_stdin_blocking(slice: &mut [u8]) -> Result<usize, KernelError> {
     loop {
         // Pencere her turda yeniden araniyor: bekleme sirasinda
         // kapanmis olabilir.
-        let window = match crate::level0a::wm::first_window_of(owner) {
+        //
+        // Gorevin kendi penceresi yoksa oturumun terminali okunuyor
+        // (bkz. `level0b1::tty`): kabugun cocuklari ayni terminali
+        // paylasir. Uzun sure penceresiz bir cocuk burada dosya sonu
+        // aliyordu -- paylasilan bir terminal yoktu.
+        let window = match crate::level0b1::tty::input_window_of(owner) {
             Some(w) => w,
             None => return Ok(0),
         };
+
+        // Is denetimi **veri olup olmadigindan once**: arka plan isi
+        // tampon doluyken de okuyamamali.
+        match crate::level0b1::tty::check_read(owner, window) {
+            crate::level0b1::tty::ReadVerdict::Allowed => {}
+            // Grup `SIGTTIN` aldi. Cagri bolunuyor ve -- sinyalin
+            // varsayilani durdurmak oldugu icin -- `SIGCONT` sonrasi
+            // **yeniden baslayacak** (bkz. `signal::restart_after_signal`).
+            crate::level0b1::tty::ReadVerdict::Stopped => {
+                return Err(KernelError::Interrupted);
+            }
+            crate::level0b1::tty::ReadVerdict::Denied => {
+                return Err(KernelError::TerminalIo);
+            }
+        }
 
         let mut read = 0usize;
         while read < slice.len() {
@@ -539,7 +567,7 @@ fn read_stdin_blocking(slice: &mut [u8]) -> Result<usize, KernelError> {
             // Kesmeler kapaliyken son bakis. Pencere kaybolduysa da
             // uyumamaliyiz: kimse uyandirmayacak.
             !crate::level0a::gui_api::has_key(window)
-                && crate::level0a::wm::first_window_of(owner) == Some(window)
+                && crate::level0b1::tty::input_window_of(owner) == Some(window)
         });
 
         if crate::level0b1::signal::interrupts_call(owner)
@@ -772,7 +800,7 @@ pub fn readiness(fd_num: u32) -> u16 {
         },
         None if fd_num == FD_STDIN => {
             let owner = scheduler::current_id();
-            match crate::level0a::wm::first_window_of(owner) {
+            match crate::level0b1::tty::input_window_of(owner) {
                 Some(window) if crate::level0a::gui_api::has_key(window) => POLLIN,
                 _ => 0,
             }

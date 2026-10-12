@@ -930,6 +930,20 @@ fn execute(line: &str) {
             write_num(crate::level0b1::stack::STACK_MAX / 1024);
             write_str(" KiB");
             newline();
+            // Is denetimi: arka plandan okuyup durdurulanlar, okumasi
+            // `EIO` ile reddedilenler, terminale dokunup durdurulanlar,
+            // ve on plan devirleri. Ilk ikisinin toplami "arka plan isi
+            // klavyeye uzandi" demek.
+            let (ttin, eio, ttou, handoffs) = crate::level0b1::tty::stats();
+            write_str("terminal: SIGTTIN ");
+            write_num(ttin);
+            write_str("  EIO ");
+            write_num(eio);
+            write_str("  SIGTTOU ");
+            write_num(ttou);
+            write_str("  on plan devri ");
+            write_num(handoffs);
+            newline();
             let (chld_sent, chld_suppressed, chld_reaped) = signal::child_stats();
             write_str("SIGCHLD: gonderilen ");
             write_num(chld_sent as usize);
