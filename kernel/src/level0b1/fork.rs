@@ -186,7 +186,9 @@ extern "C" fn child_task() -> ! {
         pending = crate::level0a::launcher::take_exec(id);
     }
 
-    // Cocuk `sys_exit` cagirdi.
+    // Cocuk `sys_exit` cagirdi. Oturum lideriyse ve penceresi terminalse,
+    // on plan grubu `SIGHUP` almali -- pencere kapanmadan once.
+    crate::level0b1::tty::leader_exiting(id);
     crate::level0a::wm::close_owned_by(id);
 
     // Adres uzayini BURADA birak.

@@ -1597,6 +1597,13 @@ pub fn handled_mask(task: usize) -> u64 {
     mask
 }
 
+/// Yetim grupta atilan durdurma sinyalleri.
+static ORPHAN_STOPS_DROPPED: AtomicU32 = AtomicU32::new(0);
+
+pub fn orphan_stops_dropped() -> u32 {
+    ORPHAN_STOPS_DROPPED.load(Ordering::Relaxed)
+}
+
 pub fn delivered_count() -> u32 {
     DELIVERED.load(Ordering::Relaxed)
 }
@@ -1739,6 +1746,18 @@ pub unsafe fn deliver_pending(frame: &mut SyscallFrame, from_interrupt: bool) {
                     scheduler::set_current_exit_signal(signo);
                     // Donmez.
                     crate::level0a::kernel_api::exit_current_task(0);
+                }
+                DefaultAction::Stop if scheduler::pgrp_orphaned(scheduler::pgid_of(task)) => {
+                    // Yetim grupta **terminal kaynakli** durdurma sinyalleri
+                    // (`SIGTSTP`, `SIGTTIN`, `SIGTTOU`) atiliyor. POSIX'in
+                    // kurali ve sebebi yetimligin tanimi: grubu devam
+                    // ettirebilecek kimse kalmadi, durdurulan surec sonsuza
+                    // kadar durur. `SIGSTOP` ayrik -- o terminalden gelmez,
+                    // onu gonderen devam ettirmeyi de ustlenmis sayilir.
+                    // Buraya hic gelmiyor: kuyruga girmeden `raise`ta
+                    // durduruluyor, istisnayi o yol sagliyor.
+                    ORPHAN_STOPS_DROPPED.fetch_add(1, Ordering::Relaxed);
+                    continue;
                 }
                 DefaultAction::Stop => {
                     // `SIGTSTP` yakalanmadi: varsayilan durdurmak.

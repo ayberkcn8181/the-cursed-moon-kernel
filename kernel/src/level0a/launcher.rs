@@ -153,6 +153,7 @@ static KNOWN_APPS: &[(&str, &str, &str)] = &[
     ("sigchld", "/bin/sigchld", "sigchld"),
     ("stackgrow", "/bin/stackgrow", "stackgrow"),
     ("jobctl", "/bin/jobctl", "jobctl"),
+    ("orphan", "/bin/orphan", "orphan"),
     // Windows ikilisi: yol .exe ile biter, cekirdek bicimi magic'ten
     // anlar (bkz. vfs::format) ve PE yukleyicisine yonlendirir. Yol iki
     // mimaride de aynidir; VFS'te duran ikilinin PE32 mi PE32+ mi oldugu
@@ -406,7 +407,9 @@ extern "C" fn app_task() -> ! {
     }
 
     // Uygulama bitti: penceresi de kapanmali. Adres uzayini `process`
-    // zaten birakti.
+    // zaten birakti. Terminal liderin penceresi oldugu icin `SIGHUP`
+    // karari pencere kapanmadan **once** veriliyor.
+    crate::level0b1::tty::leader_exiting(scheduler::current_id());
     crate::level0a::wm::close_owned_by(scheduler::current_id());
     scheduler::terminate_current()
 }

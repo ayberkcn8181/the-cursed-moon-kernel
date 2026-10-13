@@ -959,11 +959,15 @@ pub fn terminate_current() -> ! {
     // Yuva asagida birakilabilir ve birakilinca sifirlanir; oturum ve
     // grup simdiden aliniyor (bkz. `release_dead_foreground`).
     let (leaving_sid, leaving_pgid) = (sid_of(leaving), pgid_of(leaving));
+    // Yetim kalacak gruplar **cikistan once** hesaplaniyor: "yeni" yetim
+    // olmayi anlamak icin cikmadan onceki hal gerekiyor.
+    let (hangup, hangup_n) = groups_to_hangup(leaving);
 
     crate::arch::cpu::without_interrupts(|| unsafe {
         let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
         let current = CURRENT.load(Ordering::Relaxed);
         (*tasks.add(current)).state = TaskState::Terminated;
+        reparent_children(current);
         // Is parcacigi: kodu sakla, yuvayi tutma.
         if reclaim_thread_slot(
             current,
@@ -998,6 +1002,7 @@ pub fn terminate_current() -> ! {
     detach_session(leaving, leaving_sid);
     release_dead_foreground(leaving_sid, leaving_pgid);
     notify_parent_exit(leaving);
+    hangup_groups(&hangup[..hangup_n]);
 
     loop {
         yield_now();
@@ -1375,6 +1380,144 @@ fn release_dead_foreground(sid: usize, pgid: usize) {
     }
     if !group_exists(pgid) {
         SESSION_FG[sid].store(NO_FOREGROUND, Ordering::Relaxed);
+    }
+}
+
+// --- Yetim surec gruplari ----------------------------------------------
+
+/// "Ebeveyni yok" -- ebeveyni olmus ve surecinde canli akis kalmamis
+/// gorevlerin `parent` alani.
+///
+/// Uzun sure boyle bir deger yoktu: ebeveyni olen canli bir gorev
+/// `parent` alaninda olunun numarasini tutmaya devam ediyordu. Yuva
+/// yeniden kullanilinca **ilgisiz yeni bir surec** baskasinin yetimini
+/// cocugu sanirdi -- `SIGCHLD`ini alir, `waitpid(-1)` ile toplayabilirdi.
+/// Yetim grup kurali da ayni alana dayaniyor: "ebeveyn canli mi" sorusu
+/// olu bir numarayla cevaplanamaz.
+///
+/// Linux yetimleri `init`e (ya da bir alt-toplayiciya) verir. TCMK'de
+/// `init` yok; yetimin ebeveyni yoktur, zombisi hemen toplanir
+/// (`reap_orphans`) ve `getppid` 0 doner.
+pub const NO_PARENT: usize = usize::MAX;
+
+fn alive(index: usize) -> bool {
+    index < MAX_TASKS
+        && !matches!(state_of(index), TaskState::Unused | TaskState::Terminated)
+}
+
+/// `pgid` grubu yetim mi, `ignore` gorevi yokmus gibi bakilinca.
+///
+/// POSIX'in tanimi: grubun **hicbir** uyesinin ebeveyni, ayni oturumda
+/// baska bir grupta degil. O ebeveyn grubu "disaridan" denetleyebilecek
+/// tek taraftir -- tipik olarak kabuk. Yoksa grubu kimse `SIGCONT` ile
+/// kaldiramaz ve durmus bir is sonsuza kadar durur.
+fn orphaned_ignoring(pgid: usize, ignore: usize) -> bool {
+    let count = TASK_COUNT.load(Ordering::Relaxed);
+    for i in 0..count {
+        if i == IDLE_TASK || i == ignore || !alive(i) || pgid_of(i) != pgid {
+            continue;
+        }
+        let parent = parent_of(i);
+        if parent == ignore || !alive(parent) {
+            continue;
+        }
+        if pgid_of(parent) != pgid && sid_of(parent) == sid_of(i) {
+            return false;
+        }
+    }
+    true
+}
+
+/// `pgid` grubu yetim mi.
+pub fn pgrp_orphaned(pgid: usize) -> bool {
+    orphaned_ignoring(pgid, NO_PARENT)
+}
+
+fn pgrp_has_stopped_ignoring(pgid: usize, ignore: usize) -> bool {
+    let count = TASK_COUNT.load(Ordering::Relaxed);
+    (0..count).any(|i| {
+        i != ignore && pgid_of(i) == pgid && state_of(i) == TaskState::Stopped
+    })
+}
+
+/// Kac yetim grup `SIGHUP` + `SIGCONT` aldi -- kabuk raporu.
+static ORPHAN_HANGUPS: AtomicUsize = AtomicUsize::new(0);
+
+pub fn orphan_hangups() -> usize {
+    ORPHAN_HANGUPS.load(Ordering::Relaxed)
+}
+
+/// Bu cikis hangi gruplari **yeni** yetim birakacak ve onlardan hangisinde
+/// durmus bir uye var. Cikistan **once** cagrilmali.
+///
+/// POSIX'in kurali: bir grup bir cikis yuzunden yetim kalirsa ve icinde
+/// durmus bir surec varsa, gruptaki herkese once `SIGHUP` sonra `SIGCONT`
+/// gonderilir. Sebep somut: grubu devam ettirebilecek son taraf gitti;
+/// birakilsa durmus is sonsuza kadar durur. `SIGHUP` "terminalin sahibi
+/// gitti", `SIGCONT` "ama durmus kalma -- karar ver".
+///
+/// "Yeni" kosulu onemli: zaten yetim olan bir grup her cikista yeniden
+/// sinyal almamali. Adaylar iki tur: cikanin **kendi** grubu (cocuklarina
+/// disaridan bagi o sagliyor olabilir) ve **cocuklarinin** gruplari.
+fn groups_to_hangup(leaving: usize) -> ([usize; MAX_TASKS], usize) {
+    let mut out = [0usize; MAX_TASKS];
+    let mut n = 0usize;
+    let mut candidates = [usize::MAX; MAX_TASKS];
+    let mut c = 0usize;
+    candidates[c] = pgid_of(leaving);
+    c += 1;
+    let count = TASK_COUNT.load(Ordering::Relaxed);
+    for i in 0..count {
+        if i == leaving || !alive(i) || parent_of(i) != leaving {
+            continue;
+        }
+        let pg = pgid_of(i);
+        if sid_of(i) == sid_of(leaving) && !candidates[..c].contains(&pg) && c < MAX_TASKS {
+            candidates[c] = pg;
+            c += 1;
+        }
+    }
+    for &pg in &candidates[..c] {
+        if !orphaned_ignoring(pg, NO_PARENT)
+            && orphaned_ignoring(pg, leaving)
+            && pgrp_has_stopped_ignoring(pg, leaving)
+            && n < MAX_TASKS
+        {
+            out[n] = pg;
+            n += 1;
+        }
+    }
+    (out, n)
+}
+
+/// Yeni yetim kalan gruplara `SIGHUP` + `SIGCONT`.
+fn hangup_groups(groups: &[usize]) {
+    for &pg in groups {
+        let _ = crate::level0b1::signal::raise_group(pg, crate::level0b1::signal::SIGHUP);
+        let _ = crate::level0b1::signal::raise_group(pg, crate::level0b1::signal::SIGCONT);
+        ORPHAN_HANGUPS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Cikan gorevin cocuklarini yeniden ebeveynler.
+///
+/// Surecin baska canli bir akisi varsa cocuklar ona gecer (grup lideri
+/// tercih ediliyor); yoksa `NO_PARENT`. Kritik bolumde cagrilmali.
+unsafe fn reparent_children(leaving: usize) {
+    let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+    let count = TASK_COUNT.load(Ordering::Relaxed);
+    let group = (*tasks.add(leaving)).group;
+    let heir = if group != leaving && alive(group) {
+        group
+    } else {
+        (0..count)
+            .find(|&i| i != leaving && alive(i) && (*tasks.add(i)).group == group)
+            .unwrap_or(NO_PARENT)
+    };
+    for i in 0..count {
+        if i != leaving && (*tasks.add(i)).parent == leaving {
+            (*tasks.add(i)).parent = heir;
+        }
     }
 }
 
@@ -2161,6 +2304,7 @@ pub fn terminate(index: usize) -> Result<(), &'static str> {
         return Err("calisan gorev bu yoldan sonlandirilamaz");
     }
     let (index_sid, index_pgid) = (sid_of(index), pgid_of(index));
+    let (hangup, hangup_n) = groups_to_hangup(index);
     let space = crate::arch::cpu::without_interrupts(|| unsafe {
         let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
         match (*tasks.add(index)).state {
@@ -2168,6 +2312,7 @@ pub fn terminate(index: usize) -> Result<(), &'static str> {
             TaskState::Terminated => Err("gorev zaten sonlandirilmis"),
             _ => {
                 (*tasks.add(index)).state = TaskState::Terminated;
+                reparent_children(index);
                 let space = (*tasks.add(index)).address_space;
                 (*tasks.add(index)).address_space = 0;
                 // Disaridan oldurulen bir is parcacigi da zombi
@@ -2203,11 +2348,13 @@ pub fn terminate(index: usize) -> Result<(), &'static str> {
     detach_session(index, index_sid);
     release_dead_foreground(index_sid, index_pgid);
     notify_parent_exit(index);
+    hangup_groups(&hangup[..hangup_n]);
 
     // Gorevin izleri: penceresi ekranda kalirsa artik kimsenin cizmedigi
     // olu bir dikdortgen olur; adres uzayi birakilmazsa cerceveler sizar.
     // Normal cikista bunlari surecin kendi yolu yapar (bkz.
     // `level0b1::process`), disaridan oldurmede buraya duser.
+    crate::level0b1::tty::leader_exiting(index);
     crate::level0a::wm::close_owned_by(index);
     // Tanimlayicilar **gruba** ait: bir is parcacigini oldurmek
     // kardeslerinin acik dosyalarini kapatmamali. Yalnizca grubun son

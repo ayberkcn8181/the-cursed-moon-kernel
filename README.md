@@ -28,7 +28,7 @@ masaustu sunuyor.
 | Ikili bicimleri | ELF32/ELF64 · PE32/PE32+ (ithal tablosu cozulur) |
 | POSIX cagrilari | 77 (+ ELF yardimci vektoru, dosya destekli `mmap`, `clone`, `futex`, `SIGPIPE`, `EINTR`/`SA_RESTART`, is denetimi ve terminal (`setsid`, `tcsetpgrp`, `SIGTTIN`/`SIGTTOU`), `SA_SIGINFO`, `sigaltstack`, gercek-zamanli sinyaller, `sigtimedwait`) |
 | NT/Win32 cagrilari | 99 (`KERNEL32.dll` 76 ihracat + `TCMKGUI.dll`) |
-| Ring 3 uygulamalari | 43 ELF + 22 PE (ucu yalnizca x86_64) |
+| Ring 3 uygulamalari | 44 ELF + 22 PE (ucu yalnizca x86_64) |
 | Kalici depolama | ATA PIO + MBR + TCMKFS (yazilabilir, iki mimari) + takas |
 | Kod | ~30 bin satir cekirdek + ~17 bin satir userland |
 
@@ -60,7 +60,7 @@ artik POSIX yuzunde de **yakalanip duzeltilebiliyor**
 gucte cevap veriyor.
 
 Her yetenek QEMU'da **olculerek** dogrulanmistir: `probe` (16 sinav),
-`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (6), `bigfile` (6), `heap` (5), `swapx` (6), `jobs` (6), `winsusp` (6), `winctx` (7), `sigfault` (7), `winunwind` (7), `altstack` (7), `winnest` (6), `rtsig` (7), `winapc` (7), `sigwait` (7), `winpdata` (7), `sigchld` (7), `winvunw` (7), `stackgrow` (7), `winunwex` (7), `jobctl` (11), `winprio` (10), `bequest`
+`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (6), `bigfile` (6), `heap` (5), `swapx` (6), `jobs` (6), `winsusp` (6), `winctx` (7), `sigfault` (7), `winunwind` (7), `altstack` (7), `winnest` (6), `rtsig` (7), `winapc` (7), `sigwait` (7), `winpdata` (7), `sigchld` (7), `winvunw` (7), `stackgrow` (7), `winunwex` (7), `jobctl` (11), `winprio` (10), `orphan` (10), `bequest`
 (6), `nested` (4), `winenv` (4) gibi programlar sonucu hem ekrana hem
 seri gunluge yaziyor. Olcumler yol boyunca gercek hatalar buldu -- dolan
 VFS tablosu, `CreateFileA`'nin cevrilmeyen Windows yollari, `GDT`
@@ -6282,11 +6282,10 @@ bir boru hattinda ucunde de ayni sayi gorunur.
 
 ### Bilerek yapilmayanlar
 
-* **Terminal surec grubu yok.** `tcsetpgrp`/`tcgetpgrp`, on plan/arka
-  plan ayrimi ve `SIGTTIN`/`SIGTTOU` yok. Durdurma acikca gonderiliyor,
-  terminalden degil.
-* **Oturum (session) yok.** `setsid` ve oturum lideri kavrami yok;
-  `SIGHUP` yayini da yok.
+* ~~**Terminal surec grubu yok.**~~ ~~**Oturum (session) yok.**~~
+  Geldi -- bkz. [Terminali kim okur](#terminali-kim-okur-oturum-on-plan-sigttin);
+  lider cikinca `SIGHUP` yayini ve yetim grup kurali da bkz.
+  [Kabuk gidince](#kabuk-gidince-sighup-ve-yetim-gruplar).
 * ~~**`SIGCHLD` yok.**~~ Geldi -- bkz.
   [Cocugun durumu](#cocugun-durumu-itilen-bilgi). Ebeveyn artik
   sormadan ogreniyor; `si_code` ne oldugunu, `si_status` da sayisini
@@ -8555,11 +8554,8 @@ TCMK'de grup bir sayi oldugu icin ayni sonucu bir bekci deger veriyor
 
 ### Bu batida olmayanlar
 
-* **Lider cikinca `SIGHUP` yok.** Oturumun terminali kopuyor (uyeler
-  artik onu okuyamiyor) ama on plan grubuna `SIGHUP` gitmiyor.
-* **Yetim grup kurali yok.** Linux, ebeveyni oturumun disinda kalmis
-  bir gruptan gelen arka plan okumasina `SIGTTIN` yerine `EIO` verir
-  (durdurulursa onu kimse devam ettiremez). TCMK ayrim yapmiyor.
+* ~~**Lider cikinca `SIGHUP` yok.**~~ ~~**Yetim grup kurali yok.**~~
+  Ikisi de geldi -- bkz. [Kabuk gidince](#kabuk-gidince-sighup-ve-yetim-gruplar).
 * **`termios` yok, `TOSTOP` dahil.** Arka plandan terminale **yazmak**
   serbest; `SIGTTOU` yalnizca `tcsetpgrp`da gonderiliyor.
 * **`TIOCSCTTY`/`TIOCNOTTY` yok.** Terminal her zaman liderin ilk
@@ -8717,6 +8713,118 @@ hic kosmuyordu, cunku isi ana akis yapiyordu.
   seferinde yazdigi icin bunu yalnizca kabuktan baslatilan bir surecin
   eski bir yuvayi almasi gosterebilir ve bu deterministik degil.
 
+## Kabuk gidince: `SIGHUP` ve yetim gruplar
+
+Is denetimi batisi terminali **kimin** okuyabilecegini getirdi. Eksik
+kalan, isi denetleyen tarafin **gittigi** an: kabuk penceresi kapandi,
+ya da bir isi baslatan surec cikti. POSIX'in iki kurali var:
+
+```text
+  oturum lideri cikti           -> on plan grubuna SIGHUP + SIGCONT
+  grup YETIM kaldi ve icinde    -> gruptaki herkese SIGHUP + SIGCONT
+  durmus biri var
+  yetim grup arka plandan okudu -> SIGTTIN degil, EIO
+  yetim gruba SIGTSTP/TTIN/TTOU -> ATILIR (SIGSTOP atilmaz)
+```
+
+**Yetim** grup: hicbir uyesinin ebeveyni ayni oturumda **baska** bir
+grupta degil. O ebeveyn -- tipik olarak kabuk -- grubu disaridan
+`SIGCONT` ile kaldirabilecek tek taraftir. Yoksa durdurulan bir is
+sonsuza kadar durur; kurallarin hepsi bu tek gozlemden cikiyor.
+
+```
+[orphan] A lider olunce HUP: gecti (lider cikti, on plandaki torun SIGHUP aldi)
+[orphan] B ardindan CONT: gecti (SIGHUP'tan sonra SIGCONT geldi)
+[orphan] C arka plan HUP ALMAZ: gecti (arka plan grubu sinyal almadi, kendi suresince yasadi)
+[orphan] D yetim+durmus grup: gecti (ebeveyn cikti, durmus cocuk SIGHUP sonra SIGCONT aldi)
+[orphan] E yetim okuma EIO: gecti (yetim grubun okumasi EIO aldi, durdurulmadi)
+[orphan] F yetim SIGTSTP ATILIR: gecti (yetim grupta SIGTSTP atildi, surec durmadi)
+[orphan] G SIGSTOP atilmaz: gecti (yetim grupta SIGSTOP yine durdurdu, SIGCONT ile surdu)
+[orphan] H yetim degilse durur: gecti (ebeveyni canli grupta SIGTSTP durdurdu)
+[orphan] I yetim baskasina gecmez: gecti (yetimin ebeveyni 0; olunun yuvasini alan surecin cocugu yok)
+[orphan] J zaten yetim HUP ALMAZ: gecti (uye cikti, zaten yetim grubun durmus uyesi sinyal almadi)
+```
+
+![orphan](docs/screenshot-orphan.png)
+
+Sinavlar ciftler halinde okunmali. F tek basina "hic durdurulmadi"yi da
+gecerdi; G (`SIGSTOP` yine durdurur) ve H (yetim olmayan grupta
+`SIGTSTP` durdurur) atmanin **secici** oldugunu gosteriyor. D "yeni
+yetim kalan gruba HUP"u olcuyor, J ise "yeni" kosulunu.
+
+### Once yeniden ebeveynleme gerekti
+
+"Grubun uyelerinin ebeveyni canli mi" sorusu TCMK'de cevaplanamiyordu:
+ebeveyni olen canli bir surec `parent` alaninda olunun **numarasini**
+tutmaya devam ediyordu. Yuva yeniden kullanilinca o numara ilgisiz yeni
+bir sureci gosterir. Bu kendi basina eski bir hataydi -- yeni surec
+baskasinin yetimini cocugu sanir, `SIGCHLD`ini alir, `waitpid(-1)` ile
+toplayabilirdi (I bunu olcuyor).
+
+Artik cikan gorevin cocuklari yeniden ebeveynleniyor
+(`reparent_children`): surecin baska canli bir akisi varsa ona (grup
+lideri tercih ediliyor), yoksa `NO_PARENT`a. Linux yetimleri `init`e
+verir; TCMK'de `init` yok, yetimin ebeveyni yok ve `getppid` 0 donuyor.
+
+### "Yeni yetim" cikistan once hesaplanmali
+
+Kural yalnizca bir cikis **yuzunden** yetim kalan gruplara sinyal
+gonderir; zaten yetim bir grup her cikista yeniden `SIGHUP` almamali.
+"Once yetim degildi" sorusu cikistan sonra cevaplanamaz, bu yuzden
+`groups_to_hangup` gorev olmeden hesapliyor, sinyaller ise
+`notify_parent_exit`ten sonra gidiyor. Adaylar iki tur: cikanin kendi
+grubu (cocuklarinin disaridan bagi o olabilir) ve ayni oturumdaki
+cocuklarinin gruplari.
+
+Lider cikisinin kendi zamanlama sorunu var: oturumun terminali liderin
+penceresi, ve cikis yolu pencereleri zamanlayiciya ulasmadan kapatiyor.
+`tty::leader_exiting` bu yuzden pencere kapanmadan **once** cagriliyor
+(normal cikis, `fork` cocugunun cikisi ve `terminate` yollarinin ucunde
+de).
+
+### Olu bir kosul
+
+Ilk surumde yetim durdurmayi atan kol `signo != SIGSTOP` kosulunu
+tasiyordu. Kosulu kaldiran bozma sinavi hicbir seyi kirmadi -- sinav
+zayif oldugu icin degil, kosul **olu** oldugu icin: `SIGSTOP` kuyruga
+hic girmiyor, `raise` hedefi dogrudan durduruyor. Kosul kaldirildi,
+yorum gercek sebebi soyluyor; G'yi sinayan gercek bozma o dogrudan yola
+yetim istisnasi eklemek.
+
+### Bozma sinavlari
+
+```text
+  liderin SIGHUP'i yok                  ->  A KALDI (ve B: sira yanlis)
+  liderin SIGCONT'u yok                 ->  B KALDI
+  lider SIGHUP oturumdaki her gruba     ->  C KALDI
+  yetim gruplara sinyal yok             ->  D KALDI
+  "once yetim degildi" kosulu yok       ->  J KALDI
+  yetim okumada EIO yok                 ->  E KALDI (SIGTTIN ile durdu)
+  yetim grupta durdurma atilmiyor       ->  F KALDI
+  durdurma her grupta atiliyor          ->  H KALDI
+  SIGSTOP da yetimde atiliyor           ->  G KALDI
+  yeniden ebeveynleme yok               ->  E/F/G/I KALDI
+```
+
+Ilk kosu 9/9'du ve iki bozma onu gecti: "once yetim degildi" kosulunu
+olcen bir sinav yoktu (J eklendi) ve `SIGSTOP` kosulu oluydu (yukari
+bkz.). Ucuncu bir bozma -- lider `SIGHUP`ini **butun** gruplara
+gonderiyor -- sinavin kendisini de oldurup sessiz birakti; oturumla
+sinirli surumu C'yi dogru teshisle kiriyor.
+
+### Bu batida olmayanlar
+
+* **`init` / alt-toplayici yok.** Yetimin ebeveyni yok, `getppid` 0
+  donuyor (Linux'ta 1 ya da `PR_SET_CHILD_SUBREAPER` sureci). Yetim
+  zombiler hemen toplaniyor; kimse cikis kodlarini okuyamiyor.
+* **Lider penceresiz ise `SIGHUP` yok.** Terminal liderin ilk
+  penceresi; penceresi olmayan bir lider terminalsiz sayiliyor.
+* **`TIOCSCTTY`/`TIOCNOTTY` ve `termios` hala yok** (bkz.
+  [Terminali kim okur](#terminali-kim-okur-oturum-on-plan-sigttin)).
+* **Grup numaralari hala yuva numarasi.** Yetim kontrolu canli gorevlere
+  bakiyor, ama `kill(-pgid)` olmus bir grubun numarasini alan yeni bir
+  surece ulasabilir.
+
 ## Alfa'nin bilinen sinirlari
 
 Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
@@ -8765,8 +8873,8 @@ Durustce: bu **minimal grafiksel alfa**dir, masaustu ortami degil.
   `kill(-pgid)`, `waitpid(-pgid)`, `WUNTRACED`/`WCONTINUED`,
   `SIGSTOP`/`SIGCONT`/`SIGTSTP` ve `SIGCHLD` calisiyor. ~~Terminal
   tarafi yok~~ -- o da geldi: oturum (`setsid`/`getsid`), on plan
-  grubu (`tcsetpgrp`/`tcgetpgrp`) ve `SIGTTIN`/`SIGTTOU`. Eksik
-  kalanlar: lider cikinca `SIGHUP`, yetim grup kurali, `TIOCSCTTY`/
+  grubu (`tcsetpgrp`/`tcgetpgrp`), `SIGTTIN`/`SIGTTOU`, lider cikinca
+  `SIGHUP` ve yetim grup kurali. Eksik kalanlar: `TIOCSCTTY`/
   `TIOCNOTTY` ve `termios`'un tamami (`TOSTOP` dahil -- arka plandan
   **yazmak** serbest).
 - **Is-parcacigi yigini sabit 8 KiB**: `dwStackSize` yok sayiliyor ve

@@ -944,6 +944,17 @@ fn execute(line: &str) {
             write_str("  on plan devri ");
             write_num(handoffs);
             newline();
+            // Hangup: lider cikinca on plana giden `SIGHUP`lar, yeni yetim
+            // kalan durmus gruplara gidenler, ve yetim grupta atilan
+            // durdurma sinyalleri.
+            let (leader_hup, orphan_hup) = crate::level0b1::tty::hangup_stats();
+            write_str("hangup: lider ");
+            write_num(leader_hup);
+            write_str("  yetim grup ");
+            write_num(orphan_hup);
+            write_str("  atilan durdurma ");
+            write_num(signal::orphan_stops_dropped() as usize);
+            newline();
             let (chld_sent, chld_suppressed, chld_reaped) = signal::child_stats();
             write_str("SIGCHLD: gonderilen ");
             write_num(chld_sent as usize);

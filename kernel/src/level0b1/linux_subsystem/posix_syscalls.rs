@@ -2399,8 +2399,15 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
         // cagri yine de kayitli degeri doner -- POSIX'te de oyle, orada
         // oksuz surecler init'e devredilir.
         SYS_GETPPID => {
+            // Yetimin ebeveyni yok (`NO_PARENT`): 0 donuyor. Linux burada
+            // `init`in numarasini (1) verir; TCMK'de `init` yok ve 1
+            // numarali gorev ilgisiz bir cekirdek gorevi -- ona
+            // `kill` gonderilmemeli.
             let me = crate::level0a::core::scheduler::current_id();
-            crate::level0a::core::scheduler::parent_of(me) as i32
+            match crate::level0a::core::scheduler::parent_of(me) {
+                crate::level0a::core::scheduler::NO_PARENT => 0,
+                p => p as i32,
+            }
         }
 
         SYS_SETPRIORITY => {
@@ -2642,6 +2649,7 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
                 TtyError::Stopped => -EINTR,
                 TtyError::NoSuchGroup => -ESRCH,
                 TtyError::OtherSession => -EPERM,
+                TtyError::Orphaned => -EIO,
             };
             match arg2 {
                 TIOCGPGRP => {

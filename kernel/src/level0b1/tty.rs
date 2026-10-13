@@ -113,6 +113,15 @@ pub fn check_read(task: usize, window: usize) -> ReadVerdict {
         READS_DENIED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         return ReadVerdict::Denied;
     }
+    // Yetim grup: `SIGTTIN` gonderilmiyor, okuma `EIO` aliyor.
+    //
+    // Sebep yetimligin tanimi: grubu disaridan devam ettirebilecek kimse
+    // yok. Burada durdurulsa sonsuza kadar durur -- kabuk gitmis, `fg`
+    // diyecek kimse kalmamis.
+    if scheduler::pgrp_orphaned(pgid) {
+        READS_DENIED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        return ReadVerdict::Denied;
+    }
     // Butun **gruba** gidiyor: is denetimi isleri durdurur, tek tek
     // surecleri degil. Bir boru hattinin bir ucu arka plandan okursa
     // hattin tamami durmali.
@@ -127,6 +136,8 @@ pub enum ChangeVerdict {
     Allowed,
     /// Grup `SIGTTOU` aldi, cagri bolunmeli.
     Stopped,
+    /// Yetim grup: durdurulsa kimse devam ettiremez -- `EIO`.
+    Orphaned,
 }
 
 /// Bir gorev terminalin ayarini degistirebilir mi (`tcsetpgrp`).
@@ -141,6 +152,9 @@ pub fn check_change(task: usize) -> ChangeVerdict {
     }
     if signal::ignored_or_blocked(task, signal::SIGTTOU) {
         return ChangeVerdict::Allowed;
+    }
+    if scheduler::pgrp_orphaned(pgid) {
+        return ChangeVerdict::Orphaned;
     }
     let _ = signal::raise_group(pgid, signal::SIGTTOU);
     CHANGES_STOPPED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -158,6 +172,8 @@ pub enum TtyError {
     NoSuchGroup,
     /// Grup baska bir oturumda (`EPERM`).
     OtherSession,
+    /// Arka plandaki yetim bir grup terminale dokundu (`EIO`).
+    Orphaned,
 }
 
 /// `fd` bu gorevin terminali mi.
@@ -190,8 +206,10 @@ pub fn set_foreground_group(task: usize, fd: usize, pgid: usize) -> Result<(), T
     if !is_terminal_fd(task, fd) {
         return Err(TtyError::NotATty);
     }
-    if check_change(task) == ChangeVerdict::Stopped {
-        return Err(TtyError::Stopped);
+    match check_change(task) {
+        ChangeVerdict::Allowed => {}
+        ChangeVerdict::Stopped => return Err(TtyError::Stopped),
+        ChangeVerdict::Orphaned => return Err(TtyError::Orphaned),
     }
     if pgid >= scheduler::MAX_TASKS || !scheduler::group_exists(pgid) {
         return Err(TtyError::NoSuchGroup);
@@ -203,6 +221,37 @@ pub fn set_foreground_group(task: usize, fd: usize, pgid: usize) -> Result<(), T
     scheduler::set_foreground(sid, pgid);
     HANDOFFS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     Ok(())
+}
+
+// --- Oturum liderinin cikisi ----------------------------------------------
+
+/// Terminali olan bir oturum lideri cikiyor: on plan grubuna `SIGHUP` ve
+/// `SIGCONT`.
+///
+/// "Hangup" adi seri hatlardan geliyor: modem kapaninca terminalin
+/// sahibi gitmis olur ve onda calisan isler bunu ogrenmeli. Kabuk
+/// penceresi kapaninca bugun de ayni sey oluyor. Varsayilani surec
+/// sonlandirmak; `nohup` tam olarak bu sinyali yok sayan bir sarmalayici.
+/// `SIGCONT` ardindan geliyor ki on plandaki durmus bir is sinyali
+/// gorebilsin.
+///
+/// **Pencere kapanmadan once** cagrilmali: terminal liderin penceresi,
+/// ve cikis yolu pencereleri zamanlayiciya ulasmadan kapatiyor. Sonra
+/// cagrilsaydi "liderin terminali var miydi" sorusu cevaplanamazdi.
+pub fn leader_exiting(leader: usize) {
+    if scheduler::sid_of(leader) != leader || scheduler::ctty_lost(leader) {
+        return;
+    }
+    if crate::level0a::wm::first_window_of(leader).is_none() {
+        return;
+    }
+    let fg = scheduler::foreground_of(leader);
+    if fg >= scheduler::MAX_TASKS || !scheduler::group_exists(fg) {
+        return;
+    }
+    let _ = signal::raise_group(fg, signal::SIGHUP);
+    let _ = signal::raise_group(fg, signal::SIGCONT);
+    HANGUPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 }
 
 // --- Olcum -------------------------------------------------------------
@@ -217,6 +266,16 @@ static READS_DENIED: AtomicUsize = AtomicUsize::new(0);
 static CHANGES_STOPPED: AtomicUsize = AtomicUsize::new(0);
 /// On plan devirleri (`tcsetpgrp` basarili).
 static HANDOFFS: AtomicUsize = AtomicUsize::new(0);
+/// Lider cikisinda on plana giden `SIGHUP`lar.
+static HANGUPS: AtomicUsize = AtomicUsize::new(0);
+
+/// `(lider SIGHUP, yetim grup SIGHUP)` -- kabuk raporu.
+pub fn hangup_stats() -> (usize, usize) {
+    (
+        HANGUPS.load(core::sync::atomic::Ordering::Relaxed),
+        scheduler::orphan_hangups(),
+    )
+}
 
 /// `(SIGTTIN, EIO, SIGTTOU, devir)` -- kabuk raporu.
 pub fn stats() -> (usize, usize, usize, usize) {
