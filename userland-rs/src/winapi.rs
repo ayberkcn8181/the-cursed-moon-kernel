@@ -598,7 +598,27 @@ extern "system" {
     pub fn SetThreadPriority(thread: Handle, priority: i32) -> Bool;
 
     /// Akisin onceligi; hata durumunda `THREAD_PRIORITY_ERROR_RETURN`.
+    ///
+    /// Donen deger **goreli** duzeydir: surecin sinifi degisse de ayni
+    /// kalir.
     pub fn GetThreadPriority(thread: Handle) -> i32;
+
+    /// Cagiran surecin sahte tutamaci (-1). Kapatilmasi gerekmez.
+    pub fn GetCurrentProcess() -> Handle;
+
+    /// Cagiran akisin sahte tutamaci (-2). Kapatilmasi gerekmez.
+    pub fn GetCurrentThread() -> Handle;
+
+    /// Surecin oncelik **sinifini** degistirir.
+    ///
+    /// Windows'ta oncelik iki katmanlidir: surec sinifi bir taban verir,
+    /// akis duzeyi o tabana eklenir. Sinif degisince her akis kendi
+    /// goreli duzeyini korur. `REALTIME_PRIORITY_CLASS` ayricaliksiz bir
+    /// surecte sessizce `HIGH` olur.
+    pub fn SetPriorityClass(process: Handle, class: Dword) -> Bool;
+
+    /// Surecin oncelik sinifi; hata 0.
+    pub fn GetPriorityClass(process: Handle) -> Dword;
 
     /// Bir akisin **tam register durumunu** `CONTEXT` kaydina yazar.
     ///
@@ -769,6 +789,14 @@ pub const THREAD_PRIORITY_ABOVE_NORMAL: i32 = 1;
 pub const THREAD_PRIORITY_HIGHEST: i32 = 2;
 pub const THREAD_PRIORITY_TIME_CRITICAL: i32 = 15;
 
+// Surec oncelik siniflari (`SetPriorityClass` / `CreateProcess` bayraklari).
+pub const IDLE_PRIORITY_CLASS: Dword = 0x0000_0040;
+pub const BELOW_NORMAL_PRIORITY_CLASS: Dword = 0x0000_4000;
+pub const NORMAL_PRIORITY_CLASS: Dword = 0x0000_0020;
+pub const ABOVE_NORMAL_PRIORITY_CLASS: Dword = 0x0000_8000;
+pub const HIGH_PRIORITY_CLASS: Dword = 0x0000_0080;
+pub const REALTIME_PRIORITY_CLASS: Dword = 0x0000_0100;
+
 /// `WaitOnAddress` sure dolunca `GetLastError` bunu verir.
 pub const ERROR_TIMEOUT: Dword = 1460;
 
@@ -905,11 +933,28 @@ pub const ERROR_PROC_NOT_FOUND: Dword = 127;
 ///
 /// TCMK'de is parcacigi yok: `hThread`/`dwThreadId` alanlari surec
 /// degerleriyle **ayni** -- bir gorev = bir surec = bir akis.
+///
+/// ## x86_64'te dolgu
+///
+/// Windows ABI'sinde `HANDLE` isaretci genisligindedir: yapi x64'te
+/// `{8, 8, 4, 4}` = 24 bayt. TCMK'nin `Handle` tipi ise iki mimaride de
+/// 32 bit, ve yapi uzun sure dolgusuzdu. Cekirdek dogru duzeni yaziyordu
+/// ama burada okunan alanlar kaymisti: `thread` her zaman **sifir**
+/// cikiyordu (ilk tutamacin ust yarisi), `process_id` ise aslinda
+/// `hThread`in alt yarisiydi. Oncelik sinavi bunu buldu --
+/// `CloseHandle(pi.hThread)` hicbir zaman cekirdege ulasmiyordu.
+///
+/// Dolgu tutamacin **ust yarisi**: TCMK tutamaclari 32 bite sigdigi
+/// icin alt yari degerin kendisi (little-endian).
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ProcessInformation {
     pub process: Handle,
+    #[cfg(target_arch = "x86_64")]
+    process_high: u32,
     pub thread: Handle,
+    #[cfg(target_arch = "x86_64")]
+    thread_high: u32,
     pub process_id: Dword,
     pub thread_id: Dword,
 }
@@ -918,7 +963,11 @@ impl ProcessInformation {
     pub const fn new() -> Self {
         ProcessInformation {
             process: 0,
+            #[cfg(target_arch = "x86_64")]
+            process_high: 0,
             thread: 0,
+            #[cfg(target_arch = "x86_64")]
+            thread_high: 0,
             process_id: 0,
             thread_id: 0,
         }

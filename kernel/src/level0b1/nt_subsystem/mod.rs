@@ -14,6 +14,8 @@ pub mod nt_syscalls;
 /// x86_64 tablo tabanli SEH: islev tablolari ve `UNWIND_INFO`.
 #[cfg(target_arch = "x86_64")]
 pub mod pdata;
+/// Oncelik siniflari: surec sinifi + akis duzeyi (iki katman).
+pub mod priority;
 /// Windows istisna dagitimi (SEH zinciri + vektorlu isleyiciler).
 pub mod seh;
 pub mod teb;

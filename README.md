@@ -27,8 +27,8 @@ masaustu sunuyor.
 | Mimariler | i386 (Multiboot1, `int 0x80`) · x86_64 (Multiboot2, `syscall`) |
 | Ikili bicimleri | ELF32/ELF64 · PE32/PE32+ (ithal tablosu cozulur) |
 | POSIX cagrilari | 77 (+ ELF yardimci vektoru, dosya destekli `mmap`, `clone`, `futex`, `SIGPIPE`, `EINTR`/`SA_RESTART`, is denetimi ve terminal (`setsid`, `tcsetpgrp`, `SIGTTIN`/`SIGTTOU`), `SA_SIGINFO`, `sigaltstack`, gercek-zamanli sinyaller, `sigtimedwait`) |
-| NT/Win32 cagrilari | 95 (`KERNEL32.dll` 72 ihracat + `TCMKGUI.dll`) |
-| Ring 3 uygulamalari | 43 ELF + 21 PE (ucu yalnizca x86_64) |
+| NT/Win32 cagrilari | 99 (`KERNEL32.dll` 76 ihracat + `TCMKGUI.dll`) |
+| Ring 3 uygulamalari | 43 ELF + 22 PE (ucu yalnizca x86_64) |
 | Kalici depolama | ATA PIO + MBR + TCMKFS (yazilabilir, iki mimari) + takas |
 | Kod | ~30 bin satir cekirdek + ~17 bin satir userland |
 
@@ -60,7 +60,7 @@ artik POSIX yuzunde de **yakalanip duzeltilebiliyor**
 gucte cevap veriyor.
 
 Her yetenek QEMU'da **olculerek** dogrulanmistir: `probe` (16 sinav),
-`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (6), `bigfile` (6), `heap` (5), `swapx` (6), `jobs` (6), `winsusp` (6), `winctx` (7), `sigfault` (7), `winunwind` (7), `altstack` (7), `winnest` (6), `rtsig` (7), `winapc` (7), `sigwait` (7), `winpdata` (7), `sigchld` (7), `winvunw` (7), `stackgrow` (7), `winunwex` (7), `jobctl` (11), `bequest`
+`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (6), `bigfile` (6), `heap` (5), `swapx` (6), `jobs` (6), `winsusp` (6), `winctx` (7), `sigfault` (7), `winunwind` (7), `altstack` (7), `winnest` (6), `rtsig` (7), `winapc` (7), `sigwait` (7), `winpdata` (7), `sigchld` (7), `winvunw` (7), `stackgrow` (7), `winunwex` (7), `jobctl` (11), `winprio` (10), `bequest`
 (6), `nested` (4), `winenv` (4) gibi programlar sonucu hem ekrana hem
 seri gunluge yaziyor. Olcumler yol boyunca gercek hatalar buldu -- dolan
 VFS tablosu, `CreateFileA`'nin cevrilmeyen Windows yollari, `GDT`
@@ -4928,7 +4928,8 @@ gelmiyor -- once **hatali** surumde basarisiz oldugunu gormek gerekiyor.
   calisiyor. Eksik olan `GetThreadContext`/`SetThreadContext`.
 * ~~**Oncelik cagrilari yok**~~ -- `SetThreadPriority`/
   `GetThreadPriority` zamanlayicinin `nice` alanina baglandi (asagi
-  bkz.); `SetPriorityClass` (surec oncelik sinifi) yok.
+  bkz.); ~~`SetPriorityClass` yok~~ -- o da geldi (bkz. iki katmanli
+  oncelik).
 * **`clone`un butun bayraklari desteklenmiyor.** `CLONE_VM|CLONE_FS|
   CLONE_FILES|CLONE_THREAD` bekleniyor; `CLONE_SETTLS`,
   `CLONE_PARENT_SETTID`, `CLONE_CHILD_CLEARTID` yok -- sonuncusu gercek
@@ -6402,11 +6403,12 @@ gorunurdu. Ayirt edici olan tek sey, **bir** `Resume`un yetmemesi.
   onermiyor; TCMK'de cagiran kendini askiya alirsa yalnizca bir
   `ResumeThread` ile kalkabilir ve onu baska bir akis yapmali.
 * **`SetThreadPriority` dilim butcesine yuvarlaniyor.** Yedi duzey dort
-  kademeye dusuyor; okuma yine yedi duzeyden birini veriyor ama
-  aradaki degerler korunmuyor.
-* **Oncelik sinifi (`SetPriorityClass`) yok.** Windows'ta gercek
-  oncelik surec sinifi ile akis duzeyinin **toplami**; burada yalnizca
-  ikincisi var.
+  kademeye dusuyor. ~~Aradaki degerler korunmuyor~~ -- duzey artik
+  ayri saklaniyor ve okuma onu veriyor; gecersiz degerler kirpilmiyor,
+  `ERROR_INVALID_PARAMETER` ile reddediliyor (bkz. iki katmanli
+  oncelik).
+* ~~**Oncelik sinifi (`SetPriorityClass`) yok.**~~ Geldi -- bkz.
+  [Iki katmanli oncelik](#iki-katmanli-oncelik-surec-sinifi--akis-duzeyi).
 
 ## Akis baska bir yerden baslatilabilir: `Get`/`SetThreadContext`
 
@@ -8570,6 +8572,150 @@ TCMK'de grup bir sayi oldugu icin ayni sonucu bir bekci deger veriyor
 * **Stdin bayragi `fork`ta kopyalaniyor, paylasilmiyor.** POSIX'te
   `O_NONBLOCK` acik dosya tanimina aittir ve ebeveyn ile cocuk onu
   paylasir; TCMK'de cocugun koydugu bayrak ebeveyni etkilemiyor.
+
+## Iki katmanli oncelik: surec sinifi + akis duzeyi
+
+POSIX'te oncelik **tek sayidir**: gorev basina bir `nice`. Windows'ta iki
+katmandan olusur ve ikisi ayri yerlerde durur:
+
+```text
+  surec SINIFI   (SetPriorityClass)   -> taban: 4, 6, 8, 10, 13
+  akis DUZEYI    (SetThreadPriority)  -> taban + (-2 .. +2)
+                                         ya da uclar: 1 / 15
+```
+
+Etkin oncelik ikisinin toplami, ve akis duzeyi **goreli**: bir akisi
+`ABOVE_NORMAL` yapip surecin sinifini degistirirsen akis hala
+`ABOVE_NORMAL`dir -- yeni sinifin bir ustunde. TCMK uzun sure duzeyi
+dogrudan `nice`e ceviriyor, `GetThreadPriority` onu `nice`ten geri
+hesapliyordu. Sinif olmadigi surece fark gorunmuyordu.
+
+```
+[winprio] A varsayilan NORMAL:       gecti (yeni surec NORMAL sinifinda)
+[winprio] B gidip geliyor:           gecti (bes sinif yazildi ve ayni geri okundu)
+[winprio] C REALTIME -> HIGH:        gecti (cagri basarili, sinif sessizce HIGH oldu)
+[winprio] D gecersiz reddedilir:     gecti (bilinmeyen sinif, duzey 7 ve iki sinif bayragi reddedildi)
+[winprio] E duzey GORELI:            gecti (uc sinifta da akis ABOVE_NORMAL kaldi)
+[winprio] F sinif CPU PAYINI ...:    gecti (HIGH surec ayni isi IDLE surecten belirgin once bitirdi)
+[winprio] G olusturma bayragi:       gecti (BELOW_NORMAL bayragiyla yaratilan cocuk BELOW_NORMAL)
+[winprio] H miras kurali:            gecti (IDLE ebeveynin cocugu IDLE, HIGH ebeveyninki NORMAL)
+[winprio] I tutamac kapaninca ...:   gecti (16 cocuk sirayla yaratilip kapatildi; tablo dolmadi)
+[winprio] J yeni akis sinifta:       gecti (HIGH surecin YENI akisi IDLE surecinkinden once bitirdi)
+[winprio] isci: ... IDLE 740 ms  HIGH 230 ms  akis: IDLE 940 ms  HIGH 350 ms
+```
+
+![winprio](docs/screenshot-winprio.png)
+
+### Etkin oncelik -> `nice`
+
+Windows'un 1..15 araligi sira koruyan bir tabloyla `nice`e iniyor.
+`NORMAL` sinifinin yedi duzeyi eski eslemenin aynisi -- yani sinif
+kullanmayan programlar icin hicbir sey degismedi. `HIGH` sinifinin
+normal akisi `nice -16`, `IDLE` sinifininki `nice 13`: zamanlayicinin
+dilim butcesinde 8'e 1.
+
+### Kayit degil, davranis
+
+B'den E'ye kadarki her sinav bir **kayit** olcuyor: yazilan deger geri
+okunuyor mu. Bos bir kayit -- yazilani saklayan ama zamanlayiciya hic
+ulastirmayan bir uygulama -- hepsini gecerdi. F bu yuzden var: iki
+surec ayni isi ayni anda (ortak bir saat aninda) baslatiyor, biri
+`IDLE`, biri `HIGH` sinifinda, ve gecen sureler karsilastiriliyor. Is
+miktari once **olculuyor** (QEMU'nun hizi bilinmiyor; sabit bir sayi ya
+farki gizler ya da sinavi susturur). J ayni yarisi `CreateThread` ile
+yaratilan akislarla kosuyor, cunku o ayri bir yol: yeni akis `nice`
+sifirla dogar ve sinif ona ayrica uygulanmali.
+
+### Windows'un iki az bilinen kurali
+
+* **`REALTIME` ayricalik ister.** Ayricaligi olmayan bir surecte cagri
+  **basarili doner** ama sinif sessizce `HIGH` olur. TCMK'de ayricalik
+  modeli yok, yani her surec o ayricaliksiz surectir.
+* **Miras asimetrik.** `CreateProcess`e sinif bayragi verilmezse cocuk
+  `NORMAL` olur -- **ancak** olusturan surec `IDLE` ya da
+  `BELOW_NORMAL` ise cocuk o sinifi devralir. Dusuk oncelikli bir arka
+  plan isinin cocuklari da arka planda kalmali; yuksek oncelikli bir
+  surec bu ayricaligi cocuklarina kendiliginden gecirmemeli.
+
+### Batinin buldugu iki eski hata
+
+**Tutamac kapatmak hicbir sey yapmiyordu.** J'nin ilk kosumunda
+`CreateThread` basarisiz oldu ve sebep oncelikle ilgisizdi: gorev
+tablosu doluydu. `CreateProcess` ile yaratilan cocuklar yalnizca bloke
+eden `WaitForSingleObject` ile toplaniyordu; cikis kodunu
+`GetExitCodeProcess` ile yoklayip tutamacini kapatan bir program **her
+cocukta bir yuva** kaybediyordu. `CloseHandle`in yorumu "yuva zaten
+cikista geri veriliyor" diyordu -- beklenebilir cocuklar icin dogru
+degildi. Windows'ta surec nesnesi son tutamac kapaninca yok olur.
+
+Duzeltmenin bir tuzagi vardi: `CreateProcess` `hProcess` ve `hThread`
+icin **ayni** degeri veriyor (TCMK'de bir gorev = bir surec = bir
+akis). Gercek programlarin en yaygin kalibi `CloseHandle(pi.hThread)`
+deyip `hProcess`i beklemek; tek kapatmada yuvayi birakmak bu kalibi
+bozardi. Tutamaclar artik **sayiliyor**: `CreateProcess` iki, 
+`CreateThread` bir referans veriyor, ve gorev son tutamacla birakiliyor.
+I bunu yuva tavanindan fazla (16) cocukla olcuyor.
+
+**x86_64'te `PROCESS_INFORMATION` kaymisti.** Kullanici tarafinin
+`Handle` tipi iki mimaride de 32 bit, ama Windows ABI'sinde `HANDLE`
+isaretci genisliginde: yapi x64'te 24 bayt. Cekirdek dogru duzeni
+yaziyordu, okunan alanlar ise kaymisti -- `hThread` her zaman **sifir**,
+`dwProcessId` aslinda `hThread`in alt yarisi. Duzeltme i386'da calisip
+x64'te calismayinca gecici bir tani satiri bunu gosterdi: her cocuk
+icin cekirdege **tek** kapatma ulasiyordu. `winprobe`un K sinavi bu
+yuzden yanlis sebeple geciyordu: `dwProcessId != 0` diye bakiyor ve
+`hThread`in alt yarisini okuyordu.
+
+### Bozma sinavlari
+
+On bozma denendi, onu da yakalandi:
+
+```text
+  sinif saklaniyor ama uygulanmiyor   ->  F KALDI (iki sinif ayni hizda)
+  yeni akisa sinif uygulanmiyor       ->  J KALDI (yeni akislar ayni hizda)
+  sinif degisince duzey sifirlaniyor  ->  E KALDI
+  REALTIME oldugu gibi veriliyor      ->  C KALDI
+  gecersiz duzey kabul ediliyor       ->  D KALDI
+  iki sinif bayragi kabul ediliyor    ->  D KALDI (surec yaratildi)
+  IDLE miras yok                      ->  H KALDI
+  HIGH de miras kaliyor               ->  H KALDI
+  CloseHandle yine no-op              ->  I KALDI (tablo doldu)
+  CreateProcess tek tutamac sayiyor   ->  G KALDI (cikis kodu kayboldu)
+```
+
+Sonuncusu sinavin kendisini de duzeltti. Ilk denemede sinav **sustu**:
+`CloseHandle(pi.hThread)` sureci birakiyor, cikis kodu kayboluyor ve
+`GetExitCodeProcess` sonsuza kadar `STILL_ACTIVE` diyordu; sinirli
+beklemeler (iki kez 20 s) duzenegin penceresini asti. Hizli sinavlar (G,
+H) artik yavas yaristan (F) once kosuyor ve zaman asiminda "bitti ama
+kodu kayip" durumu ayri teshis ediliyor: bekleme hemen donuyor ama kod
+hala `STILL_ACTIVE`.
+
+`winprio` ilk kosuda 8/8 verdi; I ve J sonradan, bir **olculmeyen**
+yolu fark edince eklendi: `CreateThread`e eklenen sinif uygulamasi F'de
+hic kosmuyordu, cunku isi ana akis yapiyordu.
+
+### Bu batida olmayanlar
+
+* **Dinamik oncelik yukseltmesi yok.** Windows on plan penceresine ve
+  G/C'si biten akislara gecici yukseltme verir; TCMK vermiyor.
+* **`PROCESS_MODE_BACKGROUND_BEGIN/END` yok** ve `SetThreadPriority`nin
+  `THREAD_MODE_BACKGROUND_*` bicimleri reddediliyor.
+* **POSIX tarafiyla birlesik degil.** Bir PE surecine `setpriority`
+  uygulanirsa `nice` degisir ama saklanan sinif ve duzey degismez;
+  `GetThreadPriority` eski duzeyi gosterir.
+* **Tutamaclar yuva numarasi.** Yuva yeniden kullanilinca eski bir
+  tutamac yeni bir sureci gosterebilir; kapatma yalnizca yaratan
+  surecin tutamaclarini sayiyor ama ayni yaraticinin eski ve yeni
+  cocugunu ayirt edemiyor.
+* **`windeath` B/F pencere tablosuna bagli.** "Sonsuza kadar kosan"
+  cocuk olarak `plasma` kullaniyor; ayni acilista sekiz pencere
+  doluysa `plasma` pencere acamayip hemen cikiyor ve iki sinav yanlis
+  kirmizi veriyor. Regresyonda bulundu (tek basina 6/6); duzeltilmedi.
+* **Yuva sifirlamasi olculemiyor.** Sinif ve duzey yuva yeniden
+  kullanilinca sifirlaniyor; `CreateProcess` yolu sinifi zaten her
+  seferinde yazdigi icin bunu yalnizca kabuktan baslatilan bir surecin
+  eski bir yuvayi almasi gosterebilir ve bu deterministik degil.
 
 ## Alfa'nin bilinen sinirlari
 

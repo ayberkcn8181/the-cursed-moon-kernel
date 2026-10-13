@@ -195,6 +195,9 @@ static WINNEST_EXE: &[u8] = include_bytes!("../../userland/winnest.exe");
 /// APC kuyruklari: kesinti degil, randevu.
 #[cfg(target_arch = "x86")]
 static WINAPC_EXE: &[u8] = include_bytes!("../../userland/winapc.exe");
+/// Iki katmanli oncelik: surec sinifi + akis duzeyi.
+#[cfg(target_arch = "x86")]
+static WINPRIO_EXE: &[u8] = include_bytes!("../../userland/winprio.exe");
 /// FindFirstFileA gosterimi -- ayni dizinler, Win32 yuzu.
 #[cfg(target_arch = "x86")]
 static WINFILES_EXE: &[u8] = include_bytes!("../../userland/winfiles.exe");
@@ -363,6 +366,9 @@ static WINUNWIND_EXE64: &[u8] = include_bytes!("../../userland/winunwind.exe64")
 static WINNEST_EXE64: &[u8] = include_bytes!("../../userland/winnest.exe64");
 #[cfg(target_arch = "x86_64")]
 static WINAPC_EXE64: &[u8] = include_bytes!("../../userland/winapc.exe64");
+/// Iki katmanli oncelik: surec sinifi + akis duzeyi.
+#[cfg(target_arch = "x86_64")]
+static WINPRIO_EXE64: &[u8] = include_bytes!("../../userland/winprio.exe64");
 /// x86_64 tablo tabanli SEH: RtlAddFunctionTable + UNWIND_INFO.
 #[cfg(target_arch = "x86_64")]
 static WINPDATA_EXE64: &[u8] = include_bytes!("../../userland/winpdata.exe64");
@@ -442,6 +448,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/winunwind.exe", WINUNWIND_EXE),
     ("/bin/winnest.exe", WINNEST_EXE),
     ("/bin/winapc.exe", WINAPC_EXE),
+    ("/bin/winprio.exe", WINPRIO_EXE),
     ("/boot/msg.txt", BOOT_MSG),
 ];
 
@@ -508,6 +515,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/winunwind.exe", WINUNWIND_EXE64),
     ("/bin/winnest.exe", WINNEST_EXE64),
     ("/bin/winapc.exe", WINAPC_EXE64),
+    ("/bin/winprio.exe", WINPRIO_EXE64),
     ("/bin/winpdata.exe", WINPDATA_EXE64),
     ("/bin/winvunw.exe", WINVUNW_EXE64),
     ("/bin/winunwex.exe", WINUNWEX_EXE64),

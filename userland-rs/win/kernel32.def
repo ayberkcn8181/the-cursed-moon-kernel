@@ -82,3 +82,7 @@ RtlDeleteFunctionTable@4 @69
 RtlLookupFunctionEntry@12 @70
 RtlVirtualUnwind@32 @71
 RtlUnwindEx@24 @72
+GetCurrentProcess@0 @73
+GetCurrentThread@0 @74
+SetPriorityClass@8 @75
+GetPriorityClass@4 @76

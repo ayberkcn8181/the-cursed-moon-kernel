@@ -514,6 +514,36 @@ static KERNEL32: &[Export] = &[
         // ContextRecord, HandlerData, EstablisherFrame, ContextPointers
         stack_bytes: 32,
     },
+    // Oncelik siniflari ve sahte tutamaclar. `GetCurrentProcess` ve
+    // `GetCurrentThread` uzun sure yoktu -- oysa
+    // `SetThreadPriority(GetCurrentThread(), ...)` gercek programlarda
+    // en yaygin oncelik cagrisi.
+    Export {
+        name: "GetCurrentProcess",
+        ordinal: 73,
+        service: nt::NT_GET_CURRENT_PROCESS,
+        stack_bytes: 0,
+    },
+    Export {
+        name: "GetCurrentThread",
+        ordinal: 74,
+        service: nt::NT_GET_CURRENT_THREAD,
+        stack_bytes: 0,
+    },
+    Export {
+        name: "SetPriorityClass",
+        ordinal: 75,
+        service: nt::NT_SET_PRIORITY_CLASS,
+        // hProcess, dwPriorityClass
+        stack_bytes: 8,
+    },
+    Export {
+        name: "GetPriorityClass",
+        ordinal: 76,
+        service: nt::NT_GET_PRIORITY_CLASS,
+        // hProcess
+        stack_bytes: 4,
+    },
     Export {
         name: "RtlUnwindEx",
         ordinal: 72,

@@ -486,6 +486,9 @@ fn spawn_inner(
         // Ayni gerekce: yuvada kalan bir APC, yeni gorevin kuyrugunda
         // artik gecersiz bir yordam adresi olurdu.
         crate::level0b1::nt_subsystem::apc::reset(index);
+        // Ayni gerekce oncelik sinifi ve akis duzeyi icin: yuvada kalan
+        // bir `HIGH` sinifi, ilgisiz yeni bir surece miras kalirdi.
+        crate::level0b1::nt_subsystem::priority::reset(index);
         // Ayni gerekce islev tablolari icin de gecerli: yuvada kalan
         // bir tablo, yeni gorevin adres uzayinda anlamsiz RVA'lar
         // tasirdi (bkz. yukarida TEB icin anlatilan cokme).
@@ -1111,6 +1114,33 @@ unsafe fn wake_child_watchers(child: usize) {
             task.wait_for = 0;
         }
     }
+}
+
+/// Gorevi **kimse beklemiyor**: bitmisse yuvasi simdi geri verilir,
+/// bitmemisse ciktiginda kendiliginden verilecek.
+///
+/// Windows'ta bir surec nesnesi son tutamaci kapaninca yok olur. TCMK'de
+/// tutamac kapatmak uzun sure hicbir sey yapmiyordu ve `CreateProcess`
+/// ile yaratilan beklenebilir cocuklar `WaitForSingleObject`in bloke
+/// eden yolu disinda **hic toplanmiyordu**: cikis kodunu
+/// `GetExitCodeProcess` ile yoklayip tutamacini kapatan bir program her
+/// cocukta bir yuva kaybediyordu.
+pub fn detach(index: usize) {
+    if index >= MAX_TASKS {
+        return;
+    }
+    crate::arch::cpu::without_interrupts(|| unsafe {
+        let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+        match (*tasks.add(index)).state {
+            TaskState::Unused => {}
+            TaskState::Terminated => {
+                if (*tasks.add(index)).waitable {
+                    release_slot(index);
+                }
+            }
+            _ => (*tasks.add(index)).waitable = false,
+        }
+    });
 }
 
 /// Sonlanmis bir cocugun yuvasini geri verir (`waitpid` toplama).

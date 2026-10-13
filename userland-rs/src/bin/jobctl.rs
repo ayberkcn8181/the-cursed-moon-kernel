@@ -78,7 +78,7 @@
 //! (`take_terminal_back`).
 //!
 //! H bu batinin ortaya cikardigi bir hatayi olcuyor: varsayilani
-//! durdurmak olan bir sinyalin bolduğu cagri, `SIGCONT` sonrasi
+//! durdurmak olan bir sinyalin boldugu cagri, `SIGCONT` sonrasi
 //! `EINTR` ile donuyordu. Linux onu sessizce yeniden baslatir. Fark
 //! is denetiminin kalbinde: arka plandan okuyan bir is `fg` ile on
 //! plana alindiginda okumasi kaldigi yerden surmeli.

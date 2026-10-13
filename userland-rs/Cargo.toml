@@ -149,6 +149,10 @@ name = "winvunw"
 path = "src/win/vunwind.rs"
 
 [[bin]]
+name = "winprio"
+path = "src/win/prio.rs"
+
+[[bin]]
 name = "winunwex"
 path = "src/win/unwindex.rs"
 

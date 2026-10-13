@@ -38,6 +38,7 @@ use super::pdata;
 
 use super::mapping;
 use super::modules;
+use super::priority;
 use super::seh;
 
 /// Gomulu DLL sayisi -- `FreeLibrary` taniticiyi dogrularken kullanir.
@@ -117,6 +118,14 @@ pub const NT_RTL_VIRTUAL_UNWIND: u32 = 0x304F;
 /// `RtlUnwindEx(TargetFrame, TargetIp, ExceptionRecord, ReturnValue,
 ///              ContextRecord, HistoryTable)` -- x64 geri sarmasi.
 pub const NT_RTL_UNWIND_EX: u32 = 0x3050;
+/// `GetCurrentProcess()` -> sahte tutamac (-1).
+pub const NT_GET_CURRENT_PROCESS: u32 = 0x3051;
+/// `GetCurrentThread()` -> sahte tutamac (-2).
+pub const NT_GET_CURRENT_THREAD: u32 = 0x3052;
+/// `SetPriorityClass(hProcess, dwPriorityClass)` -> BOOL.
+pub const NT_SET_PRIORITY_CLASS: u32 = 0x3053;
+/// `GetPriorityClass(hProcess)` -> sinif (hata: 0).
+pub const NT_GET_PRIORITY_CLASS: u32 = 0x3054;
 pub const NT_SLEEP_MS: u32 = 0x3001;
 pub const NT_GET_TICK_COUNT: u32 = 0x3002;
 pub const NT_WIN32_CLOSE_HANDLE: u32 = 0x3003;
@@ -299,49 +308,36 @@ const CREATE_SUSPENDED: u32 = 0x0000_0004;
 /// `GetThreadPriority` hata donusu.
 const THREAD_PRIORITY_ERROR_RETURN: i32 = 0x7FFF_FFFFu32 as i32;
 
-/// Win32 oncelik duzeyi -> POSIX `nice`.
+/// Sahte tutamaclar: `GetCurrentProcess()` ve `GetCurrentThread()`.
 ///
-/// Iki olcek zit yonlu ve bu bir ayrinti degil, tasarim farki:
+/// Windows'ta ikisi de gercek bir tutamac degil, "beni" anlamina gelen
+/// sabit bir degerdir (-1 / -2) ve kapatilmalari gerekmez. Alt 32 bitle
+/// karsilastiriliyor: x86_64'te ayni deger `DWORD` olarak okundugunda
+/// ust yarisi sifir gelir.
+const PSEUDO_PROCESS: u32 = 0xFFFF_FFFF;
+const PSEUDO_THREAD: u32 = 0xFFFF_FFFE;
+
+/// Bir surec/akis tutamacini gorev numarasina cevirir.
 ///
-/// ```text
-///   Win32  buyuk sayi = daha oncelikli   (-15 .. +15)
-///   POSIX  buyuk sayi = daha NAZIK       (+19 .. -20)
-/// ```
-///
-/// Eslemede yedi adlandirilmis duzey **tam olarak** gidip geliyor
-/// (bkz. `priority_of_nice`); aradaki degerler en yakinina kirpiliyor.
-/// Birebir bir eslesme uydurmak, olmayan bir cozunurluk vaat etmek
-/// olurdu -- zamanlayicinin dilim butcesi zaten dort kademeli.
-fn nice_of_priority(priority: i32) -> i8 {
-    match priority {
-        i32::MIN..=-15 => 19,  // THREAD_PRIORITY_IDLE
-        -14..=-2 => 10,        // THREAD_PRIORITY_LOWEST
-        -1 => 5,               // THREAD_PRIORITY_BELOW_NORMAL
-        0 => 0,                // THREAD_PRIORITY_NORMAL
-        1 => -5,               // THREAD_PRIORITY_ABOVE_NORMAL
-        2..=14 => -10,         // THREAD_PRIORITY_HIGHEST
-        _ => -20,              // THREAD_PRIORITY_TIME_CRITICAL
+/// Sahte tutamaclar cagiranin kendisi. Gercek tutamaclar `PROCESS_HANDLE_
+/// FLAG | gorev`; gorev canli olmali.
+fn task_of_handle(handle: usize) -> Option<usize> {
+    let me = crate::level0a::core::scheduler::current_id();
+    match handle as u32 {
+        PSEUDO_PROCESS | PSEUDO_THREAD => return Some(me),
+        _ => {}
+    }
+    let task = handle.checked_sub(PROCESS_HANDLE_FLAG)?;
+    if task >= crate::level0a::core::scheduler::MAX_TASKS {
+        return None;
+    }
+    match crate::level0a::core::scheduler::state_of(task) {
+        crate::level0a::core::scheduler::TaskState::Unused
+        | crate::level0a::core::scheduler::TaskState::Terminated => None,
+        _ => Some(task),
     }
 }
 
-/// POSIX `nice` -> Win32 oncelik duzeyi.
-fn priority_of_nice(nice: i8) -> i32 {
-    match nice {
-        19 => -15,
-        10 => -2,
-        5 => -1,
-        0 => 0,
-        -5 => 1,
-        -10 => 2,
-        -20 => 15,
-        // Adlandirilmis duzeylerden biri degil: isaretine gore en
-        // yakin komsuya yuvarlaniyor.
-        n if n > 10 => -15,
-        n if n > 0 => -1,
-        n if n < -10 => 15,
-        _ => 2,
-    }
-}
 
 /// Gorev basina **aski sayisi** (`SuspendThread` / `ResumeThread`).
 ///
@@ -1229,16 +1225,23 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
             // (bkz. `PROCESS_HANDLE_FLAG`), cunku iki tur ayni sayi
             // araligini kullaniyor.
             //
-            // Surec tutamacini kapatmak **basarili bir no-op**: TCMK'de
-            // nesne sayaci yok, gorev yuvasi zaten cikista geri veriliyor.
-            // Hata dondurmek, tutamacini duzgunce kapatan bir programi
-            // yaniltirdi.
+            // Surec/akis tutamacini kapatmak uzun sure **no-op**tu ve
+            // gerekcesi "yuva zaten cikista geri veriliyor"du. Bu,
+            // beklenebilir cocuklar icin dogru degildi: onlar yalnizca
+            // bloke eden `WaitForSingleObject` ile toplaniyordu ve cikis
+            // kodunu yoklayip tutamacini kapatan bir program her cocukta
+            // bir yuva kaybediyordu. Oncelik sinavi bunu gorev tablosunu
+            // doldurarak buldu. Artik tutamaclar sayiliyor ve son tutamac
+            // kapaninca gorev birakiliyor (bkz. `close_task_handle`).
             //
             // Ucuncu tur esleme nesnesi (`CreateFileMapping`). Onu
             // kapatmak **gorunumleri kaldirmaz**: Windows'ta da bellek,
             // son gorunum `UnmapViewOfFile` ile kaldirilana kadar durur.
             match arg(args, 0) {
-                Some(handle) if handle as usize & PROCESS_HANDLE_FLAG != 0 => WIN32_TRUE,
+                Some(handle) if handle as usize & PROCESS_HANDLE_FLAG != 0 => {
+                    close_task_handle(handle as usize);
+                    WIN32_TRUE
+                }
                 Some(handle) if mapping::is_mapping(handle as usize) => {
                     let task = crate::level0a::core::scheduler::current_id();
                     if mapping::close(task, handle as usize) {
@@ -2111,6 +2114,17 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
                 return;
             }
 
+            // `dwCreationFlags` (arg5): oncelik sinifi bitleri. Uzun
+            // sure hic okunmuyordu. Denetim surec **yaratilmadan once**:
+            // reddedilen bir cagri arkasinda calisan bir surec
+            // birakmamali.
+            let creation_flags = arg(args, 5).unwrap_or(0);
+            if !priority::creation_flags_valid(creation_flags) {
+                set_last_error(ERROR_INVALID_PARAMETER);
+                return_win32(frame, WIN32_FALSE);
+                return;
+            }
+
             // `lpEnvironment` (arg6) ve `lpCurrentDirectory` (arg7).
             //
             // Windows ortami **duz bir blok** olarak gecirir:
@@ -2130,6 +2144,13 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
 
             match crate::level0a::launcher::spawn_child_app_block(program, block) {
                 Ok(id) => {
+                    priority::assign_new_process(
+                        id,
+                        crate::level0a::core::scheduler::current_id(),
+                        creation_flags,
+                    );
+                    // `hProcess` ve `hThread`: iki tutamac.
+                    add_handle_refs(id, 2);
                     if environment != 0 {
                         apply_environment_block(id, environment);
                     }
@@ -2522,6 +2543,13 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
 
             match unsafe { crate::level0b1::thread::create(start, parameter, 0, true) } {
                 Ok(id) => {
+                    // Yeni akis `NORMAL` duzeyde dogar ama surecin
+                    // **sinifinda**: `HIGH` bir surecin akisi `HIGH`
+                    // tabanindan baslamali. `spawn_inner` `nice`i
+                    // sifirliyor, yani sinif burada uygulanmazsa yeni
+                    // akis sessizce `NORMAL` surec gibi kosardi.
+                    priority::apply(id);
+                    add_handle_refs(id, 1);
                     // `CREATE_SUSPENDED`: akis dogar ama **kosmaz**.
                     //
                     // Yeni gorevle bu satir arasinda baglam degisimi
@@ -2597,17 +2625,24 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
         }
 
         // SetThreadPriority(hThread, nPriority) -> BOOL
+        //
+        // Duzey artik **goreli** olarak saklaniyor (bkz. `priority`).
+        // Uzun sure dogrudan `nice`e cevriliyordu ve gecersiz degerler
+        // en yakin duzeye kirpiliyordu; Windows onlari
+        // `ERROR_INVALID_PARAMETER` ile reddeder.
         NT_SET_THREAD_PRIORITY => {
             let handle = arg(args, 0).unwrap_or(0) as usize;
-            let priority = arg(args, 1).unwrap_or(0) as i32;
-            match handle.checked_sub(PROCESS_HANDLE_FLAG) {
-                Some(task)
-                    if crate::level0a::core::scheduler::set_nice(task, nice_of_priority(priority))
-                        .is_ok() =>
-                {
-                    WIN32_TRUE
+            let level = arg(args, 1).unwrap_or(0) as i32;
+            match task_of_handle(handle) {
+                Some(task) => {
+                    if priority::set_level(task, level) {
+                        WIN32_TRUE
+                    } else {
+                        set_last_error(ERROR_INVALID_PARAMETER);
+                        WIN32_FALSE
+                    }
                 }
-                _ => {
+                None => {
                     set_last_error(ERROR_INVALID_HANDLE);
                     WIN32_FALSE
                 }
@@ -2615,16 +2650,57 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
         }
 
         // GetThreadPriority(hThread) -> oncelik (hata: THREAD_PRIORITY_ERROR_RETURN)
+        //
+        // Saklanan **duzey** donuyor, `nice`ten geri hesaplanan deger
+        // degil. Fark sinif degisince gorunuyor: `ABOVE_NORMAL` bir akis
+        // `HIGH` bir surecte hala `ABOVE_NORMAL`dir, ama `nice`i bambaska.
         NT_GET_THREAD_PRIORITY => {
             let handle = arg(args, 0).unwrap_or(0) as usize;
-            match handle.checked_sub(PROCESS_HANDLE_FLAG) {
-                Some(task) if task < crate::level0a::core::scheduler::MAX_TASKS => {
-                    let nice = crate::level0a::core::scheduler::nice_of(task);
-                    priority_of_nice(nice) as usize
-                }
-                _ => {
+            match task_of_handle(handle) {
+                Some(task) => priority::level_of(task) as usize,
+                None => {
                     set_last_error(ERROR_INVALID_HANDLE);
                     THREAD_PRIORITY_ERROR_RETURN as usize
+                }
+            }
+        }
+
+        // GetCurrentProcess() / GetCurrentThread() -- sahte tutamaclar.
+        NT_GET_CURRENT_PROCESS => usize::MAX,
+        NT_GET_CURRENT_THREAD => usize::MAX - 1,
+
+        // SetPriorityClass(hProcess, dwPriorityClass) -> BOOL
+        //
+        // Surecin **butun** akislari yeniden hesaplaniyor; her biri
+        // kendi goreli duzeyini koruyor. `REALTIME` ayricaliksiz bir
+        // surecte oldugu gibi sessizce `HIGH` oluyor.
+        NT_SET_PRIORITY_CLASS => {
+            let handle = arg(args, 0).unwrap_or(0) as usize;
+            let class = arg(args, 1).unwrap_or(0);
+            match task_of_handle(handle) {
+                Some(task) => {
+                    if priority::set_class(task, class) {
+                        WIN32_TRUE
+                    } else {
+                        set_last_error(ERROR_INVALID_PARAMETER);
+                        WIN32_FALSE
+                    }
+                }
+                None => {
+                    set_last_error(ERROR_INVALID_HANDLE);
+                    WIN32_FALSE
+                }
+            }
+        }
+
+        // GetPriorityClass(hProcess) -> sinif; hata 0.
+        NT_GET_PRIORITY_CLASS => {
+            let handle = arg(args, 0).unwrap_or(0) as usize;
+            match task_of_handle(handle) {
+                Some(task) => priority::class_of_task(task) as usize,
+                None => {
+                    set_last_error(ERROR_INVALID_HANDLE);
+                    0
                 }
             }
         }
@@ -3496,6 +3572,54 @@ fn store_out(block: usize, index: usize, value: u32) {
 pub fn forget_exit(task: usize) {
     if task < crate::level0a::core::scheduler::MAX_TASKS {
         REAPED_EXIT[task].store(u32::MAX, core::sync::atomic::Ordering::Relaxed);
+        // Tutamac sayaci da yuvaya bagli: yeniden kullanilan bir yuvada
+        // onceki surecin acik tutamaclari sayilmamali.
+        HANDLE_REFS[task].store(0, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Bir gorevi gosteren acik tutamac sayisi.
+///
+/// `CreateProcess` **iki** tutamac verir (`hProcess`, `hThread`) ve TCMK'de
+/// ikisi ayni deger -- bir gorev = bir surec = bir akis. Sayac olmadan
+/// tek bir `CloseHandle` sureci birakirdi; oysa gercek programlarin en
+/// yaygin kalibi tam olarak `CloseHandle(pi.hThread)` deyip `hProcess`i
+/// beklemektir.
+static HANDLE_REFS: [core::sync::atomic::AtomicU32; crate::level0a::core::scheduler::MAX_TASKS] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; crate::level0a::core::scheduler::MAX_TASKS];
+
+fn add_handle_refs(task: usize, count: u32) {
+    if task < crate::level0a::core::scheduler::MAX_TASKS {
+        HANDLE_REFS[task].fetch_add(count, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Bir surec/akis tutamacini kapatir; son tutamacsa gorevi birakir.
+///
+/// Yalnizca **yaratan surecin** tutamaclari sayiliyor. TCMK'de tutamac
+/// yuva numarasinin kendisi; yuva yeniden kullanildiginda eski bir
+/// tutamac yeni ve ilgisiz bir sureci gosterir, ve onu kapatmak o sureci
+/// birakmamali.
+fn close_task_handle(handle: usize) {
+    use crate::level0a::core::scheduler;
+    let Some(task) = handle.checked_sub(PROCESS_HANDLE_FLAG) else {
+        return;
+    };
+    if task >= scheduler::MAX_TASKS {
+        return;
+    }
+    let me = scheduler::current_id();
+    if scheduler::group_of(scheduler::parent_of(task)) != scheduler::group_of(me) {
+        return;
+    }
+    let refs = &HANDLE_REFS[task];
+    let previous = refs.load(core::sync::atomic::Ordering::Relaxed);
+    if previous == 0 {
+        return;
+    }
+    refs.store(previous - 1, core::sync::atomic::Ordering::Relaxed);
+    if previous == 1 {
+        scheduler::detach(task);
     }
 }
 
