@@ -691,6 +691,10 @@ unsafe fn enter_ring3(
     // calismis onceki program `O_NONBLOCK` biraktiysa yeni program
     // beklemeyen bir stdin ile baslar ve sebebini hic ogrenemez.
     crate::level0a::core::fd::reset_std_flags(scheduler::current_group());
+    // `FD_CLOEXEC` tasiyan tanimlayicilar yeni imaja gecmiyor. Yer
+    // onemli: imaj **yuklendikten sonra**. `execve` basarisiz olursa
+    // eski program devam ediyor ve tanimlayicilari hala acik olmali.
+    crate::level0a::core::fd::close_on_exec(scheduler::current_group());
 
     // Ring 3 -> Ring 0 gecisleri icin **gorev yuvasinin kendi** cekirdek
     // yigini kullaniliyor.

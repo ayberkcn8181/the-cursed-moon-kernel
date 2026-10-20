@@ -28,7 +28,7 @@ masaustu sunuyor.
 | Ikili bicimleri | ELF32/ELF64 · PE32/PE32+ (ithal tablosu cozulur) |
 | POSIX cagrilari | 77 (+ ELF yardimci vektoru, dosya destekli `mmap`, `clone`, `futex`, `SIGPIPE`, `EINTR`/`SA_RESTART`, is denetimi ve terminal (`setsid`, `tcsetpgrp`, `SIGTTIN`/`SIGTTOU`), `SA_SIGINFO`, `sigaltstack`, gercek-zamanli sinyaller, `sigtimedwait`) |
 | NT/Win32 cagrilari | 99 (`KERNEL32.dll` 76 ihracat + `TCMKGUI.dll`) |
-| Ring 3 uygulamalari | 44 ELF + 23 PE (ucu yalnizca x86_64) |
+| Ring 3 uygulamalari | 45 ELF + 23 PE (ucu yalnizca x86_64) |
 | Kalici depolama | ATA PIO + MBR + TCMKFS (yazilabilir, iki mimari) + takas |
 | Kod | ~30 bin satir cekirdek + ~17 bin satir userland |
 
@@ -60,7 +60,7 @@ artik POSIX yuzunde de **yakalanip duzeltilebiliyor**
 gucte cevap veriyor.
 
 Her yetenek QEMU'da **olculerek** dogrulanmistir: `probe` (16 sinav),
-`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (6), `bigfile` (6), `heap` (5), `swapx` (6), `jobs` (6), `winsusp` (6), `winctx` (7), `sigfault` (7), `winunwind` (7), `altstack` (7), `winnest` (6), `rtsig` (7), `winapc` (7), `sigwait` (7), `winpdata` (7), `sigchld` (7), `winvunw` (7), `stackgrow` (7), `winunwex` (7), `jobctl` (11), `winprio` (10), `orphan` (10), `winalert` (8), `bequest`
+`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (6), `bigfile` (6), `heap` (5), `swapx` (6), `jobs` (6), `winsusp` (6), `winctx` (7), `sigfault` (7), `winunwind` (7), `altstack` (7), `winnest` (6), `rtsig` (7), `winapc` (7), `sigwait` (7), `winpdata` (7), `sigchld` (7), `winvunw` (7), `stackgrow` (7), `winunwex` (7), `jobctl` (11), `winprio` (10), `orphan` (10), `winalert` (8), `ofd` (10), `bequest`
 (6), `nested` (4), `winenv` (4) gibi programlar sonucu hem ekrana hem
 seri gunluge yaziyor. Olcumler yol boyunca gercek hatalar buldu -- dolan
 VFS tablosu, `CreateFileA`'nin cevrilmeyen Windows yollari, `GDT`
@@ -3441,7 +3441,10 @@ Boylece varsayilan davranis bir **ozel durum** degil, "yonlendirme
 yoksa" halidir. `close(1)` yuvayi bosaltir ve konsol geri gelir; POSIX'te
 de `close` yonlendirmeyi kaldirmanin yoludur.
 
-### Bilerek yapilmayan: paylasilan konum
+### ~~Bilerek yapilmayan: paylasilan konum~~
+
+Artik var -- bkz. [Tanimlayici ve tanim](#tanimlayici-ve-tanim-iki-ayri-katman).
+O batiya kadar gecerli olan eski not:
 
 Gercek POSIX'te `dup` **ayni acik dosya tanimini** paylastirir: iki
 tanimlayici tek bir konumu kullanir, birinden okumak digerinin konumunu
@@ -5329,13 +5332,12 @@ degil, **iki goreve** aitmis.
   kadar yazmalarin **bolunmeden** yapilacagini garanti eder; TCMK'de
   tampon 1 KiB ve kisa donus her boyda mumkun. Iki yazicinin satirlari
   birbirine karisabilir.
-* **`O_NONBLOCK` disindaki `F_SETFL` bayraklari suzuluyor.** Kabul edip
-  uygulamamak, uygulandigini saniyormus gibi davranmak olurdu.
-* **Bayraklar tanimlayici basina, acik dosya tanimi basina degil.**
-  POSIX'te `dup` ile kopyalanan iki tanimlayici ayni bayraklari
-  **paylasir**; TCMK'de tablo tanimlayici basina oldugu icin `dup`
-  bayraklari kopyaliyor. Birinde `O_NONBLOCK` acmak otekini
-  etkilemiyor.
+* **`O_NONBLOCK` ve `O_APPEND` disindaki `F_SETFL` bayraklari
+  suzuluyor.** Kabul edip uygulamamak, uygulandigini saniyormus gibi
+  davranmak olurdu.
+* ~~**Bayraklar tanimlayici basina, acik dosya tanimi basina degil.**~~
+  Artik acik dosya tanimina ait ve `dup`/`fork` kopyalari paylasiyor --
+  bkz. [Tanimlayici ve tanim](#tanimlayici-ve-tanim-iki-ayri-katman).
 * **`lpPipeAttributes` okunmuyor.** `bInheritHandles` gibi miras
   ayarlari yok sayiliyor; TCMK'de `execve` tanimlayicilari zaten
   devrediyor.
@@ -8563,9 +8565,12 @@ TCMK'de grup bir sayi oldugu icin ayni sonucu bir bekci deger veriyor
 * **Grup numaralari yeniden kullaniliyor.** On plan icin bekci deger
   var (K), ama genel sorun duruyor: `kill(-pgid)` olmus bir grubun
   numarasini alan yeni bir surece ulasabilir.
-* **Stdin bayragi `fork`ta kopyalaniyor, paylasilmiyor.** POSIX'te
-  `O_NONBLOCK` acik dosya tanimina aittir ve ebeveyn ile cocuk onu
-  paylasir; TCMK'de cocugun koydugu bayrak ebeveyni etkilemiyor.
+* **Yonlendirilmemis stdin'in bayragi `fork`ta kopyalaniyor,
+  paylasilmiyor.** Yonlendirilmis tanimlayicilar artik acik dosya
+  tanimini paylasiyor (bkz.
+  [Tanimlayici ve tanim](#tanimlayici-ve-tanim-iki-ayri-katman));
+  yonlendirilmemis 0/1/2 ise bir dosya degil, ve bilincli olarak ayri
+  kaliyor.
 
 ## Iki katmanli oncelik: surec sinifi + akis duzeyi
 
@@ -8951,6 +8956,158 @@ B'den kuyrukta kalan APC'ydi. Ikisinin de artik kendi tanisi var.
   bosaltmanin ve ozel APC'lerin yolu yok.
 * **Kat siniri sabit** (dort). Sinirda APC kaybolmuyor ama bekleme bos
   donuyor; gercek Windows'ta boyle bir durum yok.
+
+## Tanimlayici ve tanim: iki ayri katman
+
+POSIX'te bir tanimlayici aslinda iki seydir. TCMK uzun sure ikisini
+tek bir degerde tutuyordu:
+
+```text
+  tanimlayici (fd)       surec basina bir numara; tek bayragi FD_CLOEXEC
+  acik dosya tanimi      open() basina bir kayit; KONUM, O_NONBLOCK,
+                         O_APPEND burada
+```
+
+`dup`, `dup2` ve `fork` yeni bir **tanimlayici** yaratir ama onu **ayni
+tanima** baglar. Bu yuzden iki tanimlayici tek bir konumu paylasir.
+Kabugun en siradan kalibi buna dayaniyor:
+
+```text
+  (echo cocuk; echo ebeveyn) > f
+
+  ortak tanim:   konum 0 -> cocuk yazar -> konum 6 -> ebeveyn yazar
+                 f = "cocuk\nebeveyn\n"
+
+  eski TCMK:     cocugun konumu ilerler, ebeveyninki 0'da kalir
+                 f = "ebeveyn\n"   <- cocugun satiri EZILDI
+```
+
+```
+[ofd] A dup konumu paylasir: gecti (kopya asliyla, asil kopyayla devam etti (4-8-12))
+[ofd] B lseek paylasilir: gecti (kopyada lseek(10), aslinin konumu da 10)
+[ofd] C ayri open ayri konum: gecti (ikinci open bastan okudu, ilkinin konumuna dokunmadi)
+[ofd] D fork konumu paylasir: gecti (cocuk 5 bayt okudu, ebeveyn 5. bayttan devam etti)
+[ofd] E O_NONBLOCK dup: gecti (kopyaya konan O_NONBLOCK aslinda goruldu)
+[ofd] F O_NONBLOCK fork: gecti (cocugun koydugu bayrak ebeveynde, bos boru EAGAIN)
+[ofd] G FD_CLOEXEC yuvaya ait: gecti (dup kopyasinda yok, F_DUPFD_CLOEXEC'te >= 10 numarada var)
+[ofd] H exec kapatir: gecti (O_CLOEXEC'li kapandi, digeri acik ve konumu (3) korundu)
+[ofd] I O_APPEND: gecti (lseek(0) sonrasi yazma sona gitti: aaaabb)
+[ofd] J paylasilan yazma: gecti (dosyada ikisi de, sirayla: cocuk + ebeveyn)
+```
+
+![ofd](docs/screenshot-ofd.png)
+
+Sinavlar iki yonden soruyor. A-B-D-J "paylasiliyor mu", C ise "fazla
+mi paylasiliyor" diye. "Ayni dugume giden her open ayni tanimi alsin"
+diyen bir tablo da A, B ve D'yi gecerdi. G ayni soruyu bayraklar icin
+soruyor: `FD_CLOEXEC` tanima degil yuvaya ait, `dup` onu tasimamali.
+I ve J yazma istiyor; RAMFS salt okunur oldugu icin disk yoksa
+atlaniyor (`atlandi`, `KALDI` degil).
+
+### Yapi
+
+```text
+  SLOTS[surec][fd]   { used, file, cloexec }          surec basina
+        |
+        v
+  FILES[i]           { refs, kind, node, offset, flags }  global havuz
+        |
+        v
+  boru / dizin / VFS dugumu
+```
+
+Dis gorunus degismedi: `fd::get` hala tek bir `FileDescriptor`
+donduruyor, ama alanlari artik iki katmandan geliyor. Cekirdegin geri
+kalani -- `read`, `write`, `lseek`, `getdents`, Win32'nin tutamaclari --
+bu yuzden degismedi. Degisen yazma ve konum yollari: `seek`, `advance`
+ve `set_flags` **tanima** yaziyor.
+
+Bir yan etkisi de sayaclarda. Boru ve dizin nesneleri eskiden tanimlayici
+basina sayiliyordu (`dup` ve `fork` sayaci artiriyordu); simdi tanim
+basina bir kez sayiliyorlar ve son tanim kapaninca birakiliyorlar. Iki
+`add_ref` fonksiyonu boylece tamamen kalkti. "Yazan kalmadi" bilgisi
+tanim basina sayimla da ayni: ucun son tanimi kapaninca.
+
+### `O_APPEND` ve `FD_CLOEXEC`
+
+`O_APPEND` tanima ait: her yazma, konumu once **dosya sonuna**
+tasiyor. Ayri `open`larla acilmis iki surec (ayri tanimlar, ayri
+konumlar) boylece birbirinin ustune yazmiyor. Gunluk dosyalarinin
+kalibi bu.
+
+`FD_CLOEXEC` yuvaya ait. `execve` yeni imaji yukledikten **sonra**
+bayrakli yuvalari kapatiyor; `execve` basarisiz olursa eski program
+tanimlayicilariyla devam ediyor. Kalanlar yeni programa **ayni
+tanimlarla** geciyor, konum dahil (H: 3 bayt okunmus bir tanimlayici
+yeni imajda konum 3'te). `O_CLOEXEC` bayragi tanimlayici dogarken
+konuyor; `open` + `fcntl` arasinda `fork` eden bir akis bayraksiz bir
+kopya alirdi. `F_DUPFD` ve `F_DUPFD_CLOEXEC` de eklendi -- kabuklar
+yonlendirmeden once 0/1/2'yi 10'un ustune saklamak icin bunlari
+kullaniyor.
+
+Yonlendirilmemis 0/1/2 bilincli olarak disarida kaliyor. Onlar bir
+dosya degil, cekirdegin numaradan tanidigi klavye ve konsol. Bayraklari
+`fork`ta kopyalaniyor, paylasilmiyor (bkz. is denetimi bolumu).
+
+### Bozma sinavlari
+
+```text
+  dup tanimi kopyaliyor (paylasmiyor)    ->  A, B, E KALDI
+  fork tanimi kopyaliyor                 ->  D, F, J KALDI
+  ayni dugume giden open ayni tanim      ->  C KALDI (fazla paylasim), I KALDI
+  dup FD_CLOEXEC'i tasiyor               ->  G KALDI
+  execve kapatmiyor                      ->  H KALDI (O_CLOEXEC'li acik)
+  execve hepsini kapatiyor               ->  H KALDI (bayraksiz da kapandi)
+  O_APPEND yok sayiliyor                 ->  I KALDI
+  open'da O_CLOEXEC yok sayiliyor        ->  H KALDI
+  her birakista nesne kapaniyor          ->  F KALDI (bos boru EOF dondu)
+```
+
+Ilk kosu iki mimaride 10/10'du, ve ilk bozma iki zayiflik buldu. A
+yalnizca "kopya asliyla devam ediyor mu" diye soruyordu; `dup` aninda
+konumu **kopyalayan** bir tablo da bunu geciyordu. A artik iki yonlu:
+kopyadan okuduktan sonra asil de oradan devam etmeli (4-8-12). C ise
+"ilkinin konumu 10'da mi" diye bakiyordu, yani B kalinca C de "fazla
+paylasim" diye yanlis teshisle kaliyordu. C simdi kendi oncesini
+olcuyor.
+
+Ucuncu bozmada I'nin tanisi tam isabetli degil. Ayni dugume giden
+iki `open` tek tanimi paylasinca, `O_APPEND`li ikinci `open` ilkinin
+bayraksiz tanimina dusuyor. I bunu "O_APPEND yok sayildi" diye
+raporluyor; kok sebebi C gosteriyor.
+
+### Ekran goruntusunun buldugu eski hata
+
+Regresyon temizdi; ekran goruntusu kosusu 8/10 verdi ve I ile J kaldi.
+Fark tek bir adimdaydi: o kosuda disk **zaten bicimliydi**, icinde
+onceki kosunun dosyalari vardi, ve betik yine de `format onayla`
+gonderdi. Ayni VM'de `ofd`, `format onayla`, `ofd` sirasi hatayi her
+seferinde tekrarliyordu; dosya varken ama bicimlendirmeden kosmak ise
+temiz geciyordu.
+
+Sebep bu batidan eski. `tcmkfs::format` diskteki inode tablosunu
+sifirliyor, ama isim uzayindaki disk dugumleri eski inode numaralarini
+tutmaya devam ediyordu. Bicimlendirmeden sonra `/home/ofd.txt` bayat
+bir dugume cozuluyor ve yazma artik var olmayan bir inode'a gidiyordu.
+`format` artik basarili olunca `vfs::forget_disk_nodes` ile diskten
+gelen dugumleri unutuyor. RAMFS dugumlerine dokunulmuyor. Duzeltmeden
+sonra ayni sira iki mimaride de 10/10 + 10/10.
+
+### Bu batida olmayanlar
+
+* **Bicimlendirme acik tanimlayicilari gecersiz kilmiyor.** Diskteki
+  bir dosyayi acik tutan surec, `format`tan sonra eski inode'a
+  yazabilir. Linux bagli bir aygiti bicimlendirmeyi zaten reddeder.
+* **`O_APPEND` surecler arasi atomik degil.** Konumu sona tasimak ve
+  yazmak tek bir kritik bolge degil; disk yazmasi beklerken baska bir
+  surec araya girebilir. Tek CPU'da ve siradaki yazmalarda (I, J)
+  gorunmuyor.
+* **`dup3`, `F_GETOWN`, `F_SETLK` (kilitler) yok.**
+* **Win32 tutamac mirasi yok.** `bInheritHandles` ve
+  `HANDLE_FLAG_INHERIT` okunmuyor; Windows'un `FD_CLOEXEC` karsiligi
+  tersine isliyor (varsayilan miras YOK).
+* **Tanim havuzu sabit** (`MAX_TASKS x MAX_FDS` = 192). Her yuva ayri
+  bir `open` olsa bile yetiyor; dolmasi mumkun degil.
 
 ## Alfa'nin bilinen sinirlari
 

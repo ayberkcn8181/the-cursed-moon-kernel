@@ -771,10 +771,13 @@ fn restart_or_eintr(frame: &mut SyscallFrame, number: u32, from_interrupt: bool)
 fn fcntl(fd_num: usize, command: usize, argument: usize) -> i32 {
     use crate::level0a::core::fd;
 
+    const F_DUPFD: usize = 0;
     const F_GETFD: usize = 1;
     const F_SETFD: usize = 2;
     const F_GETFL: usize = 3;
     const F_SETFL: usize = 4;
+    const F_DUPFD_CLOEXEC: usize = 1030;
+    const FD_CLOEXEC: usize = 1;
 
     // Yonlendirilmemis 0/1/2 tabloda yer tutmuyor ama **acik**: cekirdek
     // onlari numaradan taniyip konsola/pencereye bagliyor. Yalnizca
@@ -787,20 +790,40 @@ fn fcntl(fd_num: usize, command: usize, argument: usize) -> i32 {
     match command {
         F_GETFL => fd::flags(fd_num) as i32,
         F_SETFL => {
-            // POSIX'te `F_SETFL` yalnizca birkac bayragi degistirebilir;
-            // erisim kipi (`O_RDONLY` vb.) ve yaratma bayraklari yok
-            // sayilir. TCMK'de degistirilebilen tek sey `O_NONBLOCK`,
-            // o yuzden gerisi sessizce suzuluyor -- kabul edip
-            // uygulamamak, uygulandigini saniyormus gibi davranmak
-            // olurdu.
-            fd::set_flags(fd_num, argument as u32 & fd::O_NONBLOCK);
+            // POSIX'te `F_SETFL` yalnizca durum bayraklarini
+            // degistirebilir; erisim kipi (`O_RDONLY` vb.) ve yaratma
+            // bayraklari yok sayilir. TCMK'de degisebilenler
+            // `O_NONBLOCK` ve `O_APPEND`, gerisi suzuluyor.
+            //
+            // Degisiklik **acik dosya tanimina** yaziliyor: `dup`
+            // kopyasi ve `fork` cocugu da gorur.
+            fd::set_flags(fd_num, argument as u32 & fd::STATUS_FLAGS);
             0
         }
-        // close-on-exec: TCMK'de `execve` tanimlayicilari devrediyor ve
-        // kapatma bayragi tutulmuyor. Sifir dondurmek, "hicbiri
-        // kapanmayacak" demek -- ve bu dogru.
-        F_GETFD => 0,
-        F_SETFD => 0,
+        // `FD_CLOEXEC`: tanimlayicinin **kendi** tek bayragi. `F_SETFL`
+        // ile karistirilmamali -- o tanima yazar, bu yuvaya.
+        // Yonlendirilmemis 0/1/2 yuva tutmuyor; bayraklari hep kapali.
+        F_GETFD => match fd::cloexec(fd_num) {
+            Some(true) => FD_CLOEXEC as i32,
+            _ => 0,
+        },
+        F_SETFD => {
+            fd::set_cloexec(fd_num, argument & FD_CLOEXEC != 0);
+            0
+        }
+        // `F_DUPFD(_CLOEXEC)`: `dup`, ama `argument`tan baslayan en kucuk
+        // bos numaraya. Kabuklar yonlendirme oncesi 0/1/2'yi 10'un
+        // ustune saklamak icin kullanir.
+        F_DUPFD | F_DUPFD_CLOEXEC => {
+            if argument >= fd::MAX_FDS {
+                return -EINVAL;
+            }
+            match fd::dup_from(fd_num, argument, command == F_DUPFD_CLOEXEC) {
+                Some(new_fd) => new_fd as i32,
+                None if fd::get(fd_num).is_none() => -EBADF,
+                None => -EMFILE,
+            }
+        }
         _ => -EINVAL,
     }
 }
@@ -916,12 +939,18 @@ pub fn dispatch(frame: &mut SyscallFrame, from_interrupt: bool) {
                 // `O_TRUNC` bu cagriya kadar **yok sayiliyordu** ve bu
                 // sessiz bir hataydi: uzun bir dosyanin uzerine kisa bir
                 // metin yazan program, kuyrukta eski icerigi birakiyordu.
+                //
+                // `O_APPEND` (0x400) ve `O_NONBLOCK` (0x800) acik dosya
+                // tanimina, `O_CLOEXEC` (0x80000) tanimlayiciya gidiyor.
                 Some(path) => {
+                    use crate::level0a::core::fd;
                     let create = arg2 & 0x40 != 0;
+                    let status = arg2 as u32 & fd::STATUS_FLAGS;
+                    let cloexec = arg2 as u32 & fd::O_CLOEXEC != 0;
                     let opened = if arg2 & 0x200 != 0 {
-                        kernel_api::open_truncating(path, create)
+                        kernel_api::open_truncating_with(path, create, status, cloexec)
                     } else {
-                        kernel_api::open(path, create)
+                        kernel_api::open_with(path, create, status, cloexec)
                     };
                     match opened {
                         Ok(fd) => fd as i32,

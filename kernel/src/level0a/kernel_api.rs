@@ -196,9 +196,18 @@ pub unsafe fn write(fd_num: u32, buf: *const u8, len: usize) -> Result<usize, Ke
             // Dizine yazmak da oyle: icerigi dosya sistemi belirler.
             fd::FdKind::Dir => Err(KernelError::BadFileDescriptor),
             fd::FdKind::File => {
-                let written = vfs::write_at(entry.node, entry.offset, bytes)
+                // `O_APPEND`: konum her yazmada **dosya sonu**. Ayni dosyayi
+                // ayri `open`larla acmis iki surec (ayri tanimlar, ayri
+                // konumlar) boylece birbirinin ustune yazmiyor -- gunluk
+                // dosyalarinin kalibi. Bayraksiz iki tanim ayni yere yazardi.
+                let at = if entry.flags & fd::O_APPEND != 0 {
+                    vfs::size(entry.node).unwrap_or(entry.offset)
+                } else {
+                    entry.offset
+                };
+                let written = vfs::write_at(entry.node, at, bytes)
                     .map_err(|_| KernelError::NotSupported)?;
-                fd::advance(fd_num as usize, written);
+                fd::seek(fd_num as usize, at + written);
                 Ok(written)
             }
         },
@@ -398,6 +407,19 @@ pub fn setenv(name: &str, value: &str) -> Result<(), KernelError> {
 /// POSIX'te de boyledir: `open` dizinlerde calisir, ayrim `read` ile
 /// `getdents` arasindadir.
 pub fn open(path: &str, create: bool) -> Result<usize, KernelError> {
+    open_with(path, create, 0, false)
+}
+
+/// `open` bayraklariyla: `status` (`O_APPEND`, `O_NONBLOCK`) yeni acik
+/// dosya tanimina, `cloexec` (`O_CLOEXEC`) tanimlayiciya. Ikisi de
+/// tanimlayici **dogarken** konuyor; sonradan `fcntl` ile koymak, arada
+/// `fork` eden bir akisa bayraksiz bir kopya birakirdi.
+pub fn open_with(
+    path: &str,
+    create: bool,
+    status: u32,
+    cloexec: bool,
+) -> Result<usize, KernelError> {
     let mut buf = [0u8; PATH_MAX];
     let path = resolve(path, &mut buf).ok_or(KernelError::NotFound)?;
 
@@ -412,7 +434,7 @@ pub fn open(path: &str, create: bool) -> Result<usize, KernelError> {
         None if create => vfs::create_file(path).map_err(|_| KernelError::NotFound)?,
         None => return Err(KernelError::NotFound),
     };
-    fd::allocate(node).ok_or(KernelError::TooManyOpenFiles)
+    fd::allocate_with(node, status, cloexec).ok_or(KernelError::TooManyOpenFiles)
 }
 
 /// Kesme istegiyle acar (POSIX `O_TRUNC`, Win32 `CREATE_ALWAYS`).
@@ -427,7 +449,17 @@ pub fn open(path: &str, create: bool) -> Result<usize, KernelError> {
 /// okumak icin `O_TRUNC` gonderen (nadir ama gecerli) bir cagriyi
 /// bozardi.
 pub fn open_truncating(path: &str, create: bool) -> Result<usize, KernelError> {
-    let fd_num = open(path, create)?;
+    open_truncating_with(path, create, 0, false)
+}
+
+/// `open_truncating`in bayrakli bicimi (bkz. `open_with`).
+pub fn open_truncating_with(
+    path: &str,
+    create: bool,
+    status: u32,
+    cloexec: bool,
+) -> Result<usize, KernelError> {
+    let fd_num = open_with(path, create, status, cloexec)?;
     if let Some(entry) = fd::get(fd_num) {
         if entry.kind == fd::FdKind::File {
             let _ = vfs::truncate(entry.node, 0);

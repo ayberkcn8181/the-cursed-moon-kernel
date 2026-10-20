@@ -321,19 +321,6 @@ pub fn close_end(index: usize, writer: bool) {
     }
 }
 
-/// Bir ucun sahibi cogaldi (`fork`: cocuk tanimlayicilari devralir).
-///
-/// Sayaclar olmasa cocugun kapattigi uc boruyu tumden oldururdu; iki
-/// taraf da kapatana kadar acik kalmasi gerekir.
-pub fn add_ref(index: usize, writer: bool) {
-    if index >= MAX_PIPES || !PIPES[index].used.load(Ordering::Relaxed) {
-        return;
-    }
-    let pipe = &PIPES[index];
-    let counter = if writer { &pipe.writers } else { &pipe.readers };
-    counter.store(counter.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
-}
-
 /// Kabuk raporu: kac boru acik.
 pub fn open_count() -> usize {
     PIPES

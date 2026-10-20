@@ -1412,6 +1412,21 @@ pub const F_SETFL: usize = 4;
 
 /// Bloke olmama bayragi (Linux'ta i386 ve x86_64'te ayni sayi).
 pub const O_NONBLOCK: usize = 0x800;
+/// `O_APPEND`: her yazma dosya sonuna (acik dosya tanimina ait).
+pub const O_APPEND: usize = 0x400;
+/// `O_CLOEXEC`: tanimlayici `execve`de kapanir (tanimlayiciya ait).
+pub const O_CLOEXEC: usize = 0x8_0000;
+pub const F_DUPFD: usize = 0;
+pub const F_GETFD: usize = 1;
+pub const F_SETFD: usize = 2;
+pub const F_DUPFD_CLOEXEC: usize = 1030;
+/// `F_GETFD`/`F_SETFD` bayragi.
+pub const FD_CLOEXEC: usize = 1;
+
+/// Ham `fcntl`.
+pub fn fcntl(fd: usize, command: usize, argument: usize) -> isize {
+    unsafe { syscall3(SYS_FCNTL, fd, command, argument) as isize }
+}
 
 /// Bir tanimlayicinin acik-dosya bayraklarini okur.
 pub fn get_flags(fd: usize) -> isize {

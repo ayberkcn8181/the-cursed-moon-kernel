@@ -1167,6 +1167,17 @@ fn execute(line: &str) {
             write_str("acik dosya: ");
             write_num(fd::open_count());
             newline();
+            // Acik dosya **tanimlari**: kac tane, kacina birden fazla
+            // tanimlayici bakiyor (`dup`/`fork` kopyasi), ve kac
+            // tanimlayici `FD_CLOEXEC` yuzunden `execve`de kapandi.
+            let (open, shared, closed) = fd::stats();
+            write_str("acik tanim: ");
+            write_num(open);
+            write_str("  paylasilan ");
+            write_num(shared);
+            write_str("  exec'te kapanan ");
+            write_num(closed);
+            newline();
         }
         "ls" => {
             // Argumansiz: her sey. Argumanla: yalnizca o dizinin altindaki
@@ -1446,6 +1457,9 @@ fn execute(line: &str) {
             } else {
                 match tcmkfs::format("TCMK") {
                     Ok(()) => {
+                        // Isim uzayindaki eski disk dugumleri bayat: inode
+                        // numaralari artik bos ya da baska dosyanin.
+                        let _ = crate::level0a::core::vfs::forget_disk_nodes();
                         write_str("bicimlendirildi: ");
                         write_num(tcmkfs::total_kib() as usize / 1024);
                         write_line(" MiB kullanilabilir");

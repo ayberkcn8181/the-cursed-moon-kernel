@@ -75,19 +75,6 @@ pub fn open(path: &str) -> Option<usize> {
     })
 }
 
-/// Yuvanin sayacini artirir (`fork` / `dup`).
-pub fn add_ref(index: usize) {
-    if index >= MAX_OPEN_DIRS {
-        return;
-    }
-    crate::arch::cpu::without_interrupts(|| unsafe {
-        let entry = &mut *slot(index);
-        if entry.refs != 0 {
-            entry.refs += 1;
-        }
-    });
-}
-
 /// Sayaci dusurur; sifira inince yuva serbest kalir.
 pub fn release(index: usize) {
     if index >= MAX_OPEN_DIRS {

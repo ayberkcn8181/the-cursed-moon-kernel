@@ -183,6 +183,9 @@ static JOBCTL_ELF: &[u8] = include_bytes!("../../userland/jobctl.elf");
 /// Terminalin sahibi gidince: SIGHUP ve yetim gruplar.
 #[cfg(target_arch = "x86")]
 static ORPHAN_ELF: &[u8] = include_bytes!("../../userland/orphan.elf");
+/// Tanimlayici ile acik dosya tanimi.
+#[cfg(target_arch = "x86")]
+static OFD_ELF: &[u8] = include_bytes!("../../userland/ofd.elf");
 /// Sayilan aski: CREATE_SUSPENDED, SuspendThread/ResumeThread.
 #[cfg(target_arch = "x86")]
 static WINSUSP_EXE: &[u8] = include_bytes!("../../userland/winsusp.exe");
@@ -334,6 +337,9 @@ static JOBCTL64: &[u8] = include_bytes!("../../userland/jobctl.elf64");
 /// Terminalin sahibi gidince: SIGHUP ve yetim gruplar.
 #[cfg(target_arch = "x86_64")]
 static ORPHAN64: &[u8] = include_bytes!("../../userland/orphan.elf64");
+/// Tanimlayici ile acik dosya tanimi.
+#[cfg(target_arch = "x86_64")]
+static OFD64: &[u8] = include_bytes!("../../userland/ofd.elf64");
 
 /// **Windows (PE32+) uygulamalari** -- i386'dakilerle ayni kaynak, ayni
 /// ithal kutuphaneleri; degisen yalnizca hedef. Taban 0x140000000
@@ -443,6 +449,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/stackgrow", STACKGROW_ELF),
     ("/bin/jobctl", JOBCTL_ELF),
     ("/bin/orphan", ORPHAN_ELF),
+    ("/bin/ofd", OFD_ELF),
     ("/bin/winclock.exe", WINCLOCK_EXE),
     ("/bin/winpad.exe", WINPAD_EXE),
     ("/bin/winfiles.exe", WINFILES_EXE),
@@ -512,6 +519,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/stackgrow", STACKGROW64),
     ("/bin/jobctl", JOBCTL64),
     ("/bin/orphan", ORPHAN64),
+    ("/bin/ofd", OFD64),
     ("/bin/winclock.exe", WINCLOCK_EXE64),
     ("/bin/winpad.exe", WINPAD_EXE64),
     ("/bin/winfiles.exe", WINFILES_EXE64),

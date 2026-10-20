@@ -405,6 +405,27 @@ pub fn remove_file(path: &str) -> Result<(), tcmkfs::FsError> {
     Ok(())
 }
 
+/// Diskten gelen butun dugumleri unutur (`format` sonrasi). Doner: kac.
+///
+/// Bicimlendirme diskteki inode tablosunu sifirliyor ama isim uzayindaki
+/// disk dugumleri eski inode numaralarini tutmaya devam ediyordu. Ayni
+/// oturumda bicimlendirilen bir diskte `/home/x` bayat bir dugume
+/// cozuluyor ve okuma/yazma artik var olmayan bir inode'a gidiyordu.
+/// RAMFS dugumlerine dokunulmuyor.
+pub fn forget_disk_nodes() -> usize {
+    crate::arch::cpu::without_interrupts(|| unsafe {
+        let mut forgotten = 0;
+        for i in 0..NODE_COUNT.load(Ordering::Relaxed) {
+            let node = &mut *nodes_mut().add(i);
+            if node.used && node.source == Source::Disk {
+                node.used = false;
+                forgotten += 1;
+            }
+        }
+        forgotten
+    })
+}
+
 /// Yazma sonrasi dugum tablosunu tazeler (boyut/inode degismis olabilir).
 fn refresh_disk_node(path: &str) {
     let inode = match tcmkfs::lookup(path) {
