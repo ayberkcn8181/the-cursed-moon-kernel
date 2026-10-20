@@ -207,6 +207,9 @@ static WINPRIO_EXE: &[u8] = include_bytes!("../../userland/winprio.exe");
 /// Bolunebilir uyarilabilir bekleme ve ic ice APC.
 #[cfg(target_arch = "x86")]
 static WINALERT_EXE: &[u8] = include_bytes!("../../userland/winalert.exe");
+/// Tutamac mirasi: bInheritHandles ve STARTUPINFO.
+#[cfg(target_arch = "x86")]
+static WINHERIT_EXE: &[u8] = include_bytes!("../../userland/winherit.exe");
 /// FindFirstFileA gosterimi -- ayni dizinler, Win32 yuzu.
 #[cfg(target_arch = "x86")]
 static WINFILES_EXE: &[u8] = include_bytes!("../../userland/winfiles.exe");
@@ -387,6 +390,9 @@ static WINPRIO_EXE64: &[u8] = include_bytes!("../../userland/winprio.exe64");
 /// Bolunebilir uyarilabilir bekleme ve ic ice APC.
 #[cfg(target_arch = "x86_64")]
 static WINALERT_EXE64: &[u8] = include_bytes!("../../userland/winalert.exe64");
+/// Tutamac mirasi: bInheritHandles ve STARTUPINFO.
+#[cfg(target_arch = "x86_64")]
+static WINHERIT_EXE64: &[u8] = include_bytes!("../../userland/winherit.exe64");
 /// x86_64 tablo tabanli SEH: RtlAddFunctionTable + UNWIND_INFO.
 #[cfg(target_arch = "x86_64")]
 static WINPDATA_EXE64: &[u8] = include_bytes!("../../userland/winpdata.exe64");
@@ -470,6 +476,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/winapc.exe", WINAPC_EXE),
     ("/bin/winprio.exe", WINPRIO_EXE),
     ("/bin/winalert.exe", WINALERT_EXE),
+    ("/bin/winherit.exe", WINHERIT_EXE),
     ("/boot/msg.txt", BOOT_MSG),
 ];
 
@@ -540,6 +547,7 @@ static RAMFS_FILES: &[(&str, &[u8])] = &[
     ("/bin/winapc.exe", WINAPC_EXE64),
     ("/bin/winprio.exe", WINPRIO_EXE64),
     ("/bin/winalert.exe", WINALERT_EXE64),
+    ("/bin/winherit.exe", WINHERIT_EXE64),
     ("/bin/winpdata.exe", WINPDATA_EXE64),
     ("/bin/winvunw.exe", WINVUNW_EXE64),
     ("/bin/winunwex.exe", WINUNWEX_EXE64),

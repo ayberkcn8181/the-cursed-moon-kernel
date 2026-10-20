@@ -126,6 +126,56 @@ pub const NT_GET_CURRENT_THREAD: u32 = 0x3052;
 pub const NT_SET_PRIORITY_CLASS: u32 = 0x3053;
 /// `GetPriorityClass(hProcess)` -> sinif (hata: 0).
 pub const NT_GET_PRIORITY_CLASS: u32 = 0x3054;
+/// `SetHandleInformation(hObject, dwMask, dwFlags)` -> BOOL.
+pub const NT_SET_HANDLE_INFORMATION: u32 = 0x3055;
+/// `GetHandleInformation(hObject, lpdwFlags)` -> BOOL.
+pub const NT_GET_HANDLE_INFORMATION: u32 = 0x3056;
+/// `GetStdHandle(nStdHandle)` -> HANDLE.
+pub const NT_GET_STD_HANDLE: u32 = 0x3057;
+
+/// `HANDLE_FLAG_INHERIT`.
+const HANDLE_FLAG_INHERIT: usize = 1;
+/// `STARTUPINFO.dwFlags`: `hStdInput`/`hStdOutput`/`hStdError` gecerli.
+const STARTF_USESTDHANDLES: u32 = 0x100;
+
+/// `SECURITY_ATTRIBUTES.bInheritHandle` dogru mu (NULL: hayir).
+///
+/// Yapi `{ DWORD nLength; LPVOID lpSecurityDescriptor; BOOL
+/// bInheritHandle; }`: alan i386'da 8., x86_64'te isaretci hizalamasi
+/// yuzunden 16. baytta. Guvenlik tanimlayicisi yok sayiliyor.
+fn security_inherits(attributes: usize) -> bool {
+    let offset = 2 * core::mem::size_of::<usize>();
+    attributes != 0
+        && mmu::is_user_accessible(attributes)
+        && mmu::is_user_accessible(attributes + offset + 3)
+        && unsafe { ((attributes + offset) as *const u32).read_unaligned() } != 0
+}
+
+/// `STARTUPINFOA`dan `STARTF_USESTDHANDLES` ile verilen uc tutamac.
+///
+/// Yerlesim: i386'da `dwFlags` 44., tutamaclar 56/60/64. baytta; x86_64'te
+/// isaretciler 8 bayt oldugu icin `dwFlags` 60., tutamaclar 80/88/96.
+/// Bayrak yoksa ucu de `None`.
+fn startup_std_handles(info: usize) -> [Option<usize>; 3] {
+    let wide = core::mem::size_of::<usize>() == 8;
+    let (flags_at, first, step) = if wide { (60, 80, 8) } else { (44, 56, 4) };
+    if info == 0
+        || !mmu::is_user_accessible(info)
+        || !mmu::is_user_accessible(info + first + 3 * step - 1)
+    {
+        return [None; 3];
+    }
+    let flags = unsafe { ((info + flags_at) as *const u32).read_unaligned() };
+    if flags & STARTF_USESTDHANDLES == 0 {
+        return [None; 3];
+    }
+    let mut out = [None; 3];
+    for (i, slot) in out.iter_mut().enumerate() {
+        let h = unsafe { ((info + first + i * step) as *const u32).read_unaligned() } as usize;
+        *slot = Some(h);
+    }
+    out
+}
 pub const NT_SLEEP_MS: u32 = 0x3001;
 pub const NT_GET_TICK_COUNT: u32 = 0x3002;
 pub const NT_WIN32_CLOSE_HANDLE: u32 = 0x3003;
@@ -1326,7 +1376,14 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
                     } else {
                         kernel_api::open(path, create)
                     } {
-                        Ok(handle) => handle,
+                        Ok(handle) => {
+                            // `lpSecurityAttributes->bInheritHandle`:
+                            // tutamac `CreateProcess` ile cocuga gecebilir.
+                            if security_inherits(arg_ptr(args, 3).unwrap_or(0)) {
+                                crate::level0a::core::fd::set_inherit(handle, true);
+                            }
+                            handle
+                        }
                         Err(e) => {
                             set_last_error(win32_error_of(e));
                             INVALID_HANDLE_VALUE
@@ -2036,9 +2093,10 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
         // **magic'ten** secilir. Yani `CreateProcessA` ile bir **ELF**
         // baslatmak da mumkun -- projenin butun iddiasi tek satirda.
         //
-        // Desteklenmeyenler bilerek yok sayiliyor: guvenlik
-        // tanimlayicilari, oncelik siniflari, `STARTUPINFO` (TCMK'de
-        // pencere/konsol devralma kavrami yok).
+        // `bInheritHandles` (arg4) ve `STARTUPINFO` (arg8) okunuyor:
+        // miras bayrakli tutamaclar cocuga ayni numarayla gecer,
+        // `STARTF_USESTDHANDLES` cocugun 0/1/2'sini kurar. Guvenlik
+        // tanimlayicilari ve pencere alanlari yok sayiliyor.
         NT_CREATE_PROCESS_A => {
             let mut path_storage = [0u8; PATH_MAX];
             let mut line_storage = [0u8; PATH_MAX];
@@ -2156,8 +2214,21 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
                 .map(|p| p.len())
                 .map(|len| normalize_win_path(&mut path_storage, len));
 
-            match crate::level0a::launcher::spawn_child_app_block(program, block) {
+            let inherit_handles = arg(args, 4).unwrap_or(0) != 0;
+            let std_handles = startup_std_handles(arg_ptr(args, 8).unwrap_or(0));
+
+            // Cocuk yaratildigi andan kurulum bitene kadar **kosmamali**:
+            // ilk talimati stdout'a yazmak olabilir, ve o an stdout'u
+            // henuz kurulmamissa yazi konsola giderdi. Cekirdek kipinde de
+            // zamanlayici kesmesi baglam degistirebiliyor, o yuzden
+            // bolge preemption'a kapali. Ortam, dizin ve oncelik de ayni
+            // bolgede -- onlar da cocuk kosmadan once kurulmali ve uzun
+            // sure bu korumasiz yapiliyordu.
+            crate::level0a::core::scheduler::preempt_disable();
+            let spawned = crate::level0a::launcher::spawn_child_app_block(program, block);
+            let value = match spawned {
                 Ok(id) => {
+                    crate::level0a::core::fd::inherit_into(id, inherit_handles, std_handles);
                     priority::assign_new_process(
                         id,
                         crate::level0a::core::scheduler::current_id(),
@@ -2203,7 +2274,9 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
                     set_last_error(ERROR_FILE_NOT_FOUND);
                     WIN32_FALSE
                 }
-            }
+            };
+            crate::level0a::core::scheduler::preempt_enable();
+            value
         }
 
         // WaitForSingleObject(hHandle, dwMilliseconds) -> DWORD
@@ -2728,6 +2801,70 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
         }
 
         // GetPriorityClass(hProcess) -> sinif; hata 0.
+        // SetHandleInformation(hObject, dwMask, dwFlags) -> BOOL
+        //
+        // Tek anlamli bit `HANDLE_FLAG_INHERIT`. Klasik kullanim: ebeveyn
+        // miras alinabilir bir boru yaratir, **kendi** ucunun bayragini
+        // kapatir ve yalnizca cocugun ucunu devreder. Unutulursa cocuk
+        // ebeveynin ucunu da tasir ve boru hic "kapanmaz". POSIX'teki
+        // karsiligi `fcntl(F_SETFD, FD_CLOEXEC)`, ama varsayilani ters.
+        // `HANDLE_FLAG_PROTECT_FROM_CLOSE` kabul edilip yok sayiliyor.
+        NT_SET_HANDLE_INFORMATION => {
+            let handle = arg(args, 0).unwrap_or(0) as usize;
+            let mask = arg(args, 1).unwrap_or(0) as usize;
+            let flags = arg(args, 2).unwrap_or(0) as usize;
+            let known = crate::level0a::core::fd::inherit(handle).is_some();
+            if !known {
+                set_last_error(ERROR_INVALID_HANDLE);
+                WIN32_FALSE
+            } else {
+                if mask & HANDLE_FLAG_INHERIT != 0 {
+                    crate::level0a::core::fd::set_inherit(
+                        handle,
+                        flags & HANDLE_FLAG_INHERIT != 0,
+                    );
+                }
+                WIN32_TRUE
+            }
+        }
+
+        // GetHandleInformation(hObject, lpdwFlags) -> BOOL
+        NT_GET_HANDLE_INFORMATION => {
+            let handle = arg(args, 0).unwrap_or(0) as usize;
+            match crate::level0a::core::fd::inherit(handle) {
+                Some(on) => {
+                    write_u32_out(
+                        arg_ptr(args, 1).unwrap_or(0),
+                        if on { HANDLE_FLAG_INHERIT as u32 } else { 0 },
+                    );
+                    WIN32_TRUE
+                }
+                None => {
+                    set_last_error(ERROR_INVALID_HANDLE);
+                    WIN32_FALSE
+                }
+            }
+        }
+
+        // GetStdHandle(nStdHandle) -> HANDLE
+        //
+        // `STD_INPUT_HANDLE` (-10), `STD_OUTPUT_HANDLE` (-11),
+        // `STD_ERROR_HANDLE` (-12). TCMK'de standart tutamaclar 0/1/2
+        // numaralari: yonlendirilmemisse klavye/konsol, `CreateProcess`in
+        // `STARTF_USESTDHANDLES`i ile kurulduysa ebeveynin verdigi boru
+        // ya da dosya. Gercek Windows surec basina ayri bir tablo tutar
+        // ve `SetStdHandle` onu degistirir; burada o tablo yuvanin
+        // kendisi.
+        NT_GET_STD_HANDLE => match arg(args, 0).unwrap_or(0) {
+            0xFFFF_FFF6 => 0,
+            0xFFFF_FFF5 => 1,
+            0xFFFF_FFF4 => 2,
+            _ => {
+                set_last_error(ERROR_INVALID_PARAMETER);
+                INVALID_HANDLE_VALUE
+            }
+        },
+
         NT_GET_PRIORITY_CLASS => {
             let handle = arg(args, 0).unwrap_or(0) as usize;
             match task_of_handle(handle) {
@@ -3000,6 +3137,14 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
             } else {
                 match kernel_api::create_pipe() {
                     Ok((read_fd, write_fd)) => {
+                        // `lpPipeAttributes->bInheritHandle` iki uca da
+                        // gidiyor. Klasik kalip: ebeveyn kendi ucunun
+                        // bayragini `SetHandleInformation` ile kapatir,
+                        // yoksa cocuk o ucu da devralir.
+                        if security_inherits(arg_ptr(args, 2).unwrap_or(0)) {
+                            crate::level0a::core::fd::set_inherit(read_fd, true);
+                            crate::level0a::core::fd::set_inherit(write_fd, true);
+                        }
                         // Tanitici = tanimlayici: TCMK'de Win32 tarafi
                         // ayni tabloyu kullaniyor (bkz. `NT_READ_FILE`).
                         unsafe {

@@ -545,6 +545,27 @@ static KERNEL32: &[Export] = &[
         stack_bytes: 4,
     },
     Export {
+        name: "SetHandleInformation",
+        ordinal: 77,
+        service: nt::NT_SET_HANDLE_INFORMATION,
+        // hObject, dwMask, dwFlags
+        stack_bytes: 12,
+    },
+    Export {
+        name: "GetHandleInformation",
+        ordinal: 78,
+        service: nt::NT_GET_HANDLE_INFORMATION,
+        // hObject, lpdwFlags
+        stack_bytes: 8,
+    },
+    Export {
+        name: "GetStdHandle",
+        ordinal: 79,
+        service: nt::NT_GET_STD_HANDLE,
+        // nStdHandle
+        stack_bytes: 4,
+    },
+    Export {
         name: "RtlUnwindEx",
         ordinal: 72,
         service: nt::NT_RTL_UNWIND_EX,

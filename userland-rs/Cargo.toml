@@ -160,6 +160,10 @@ path = "src/win/unwindex.rs"
 name = "winalert"
 path = "src/win/alert.rs"
 
+[[bin]]
+name = "winherit"
+path = "src/win/inherit.rs"
+
 [profile.dev]
 panic = "abort"
 opt-level = 1

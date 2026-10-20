@@ -28,7 +28,7 @@ masaustu sunuyor.
 | Ikili bicimleri | ELF32/ELF64 · PE32/PE32+ (ithal tablosu cozulur) |
 | POSIX cagrilari | 77 (+ ELF yardimci vektoru, dosya destekli `mmap`, `clone`, `futex`, `SIGPIPE`, `EINTR`/`SA_RESTART`, is denetimi ve terminal (`setsid`, `tcsetpgrp`, `SIGTTIN`/`SIGTTOU`), `SA_SIGINFO`, `sigaltstack`, gercek-zamanli sinyaller, `sigtimedwait`) |
 | NT/Win32 cagrilari | 99 (`KERNEL32.dll` 76 ihracat + `TCMKGUI.dll`) |
-| Ring 3 uygulamalari | 45 ELF + 23 PE (ucu yalnizca x86_64) |
+| Ring 3 uygulamalari | 45 ELF + 24 PE (ucu yalnizca x86_64) |
 | Kalici depolama | ATA PIO + MBR + TCMKFS (yazilabilir, iki mimari) + takas |
 | Kod | ~30 bin satir cekirdek + ~17 bin satir userland |
 
@@ -60,7 +60,7 @@ artik POSIX yuzunde de **yakalanip duzeltilebiliyor**
 gucte cevap veriyor.
 
 Her yetenek QEMU'da **olculerek** dogrulanmistir: `probe` (16 sinav),
-`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (6), `bigfile` (6), `heap` (5), `swapx` (6), `jobs` (6), `winsusp` (6), `winctx` (7), `sigfault` (7), `winunwind` (7), `altstack` (7), `winnest` (6), `rtsig` (7), `winapc` (7), `sigwait` (7), `winpdata` (7), `sigchld` (7), `winvunw` (7), `stackgrow` (7), `winunwex` (7), `jobctl` (11), `winprio` (10), `orphan` (10), `winalert` (8), `ofd` (10), `bequest`
+`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (6), `bigfile` (6), `heap` (5), `swapx` (6), `jobs` (6), `winsusp` (6), `winctx` (7), `sigfault` (7), `winunwind` (7), `altstack` (7), `winnest` (6), `rtsig` (7), `winapc` (7), `sigwait` (7), `winpdata` (7), `sigchld` (7), `winvunw` (7), `stackgrow` (7), `winunwex` (7), `jobctl` (11), `winprio` (10), `orphan` (10), `winalert` (8), `ofd` (10), `winherit` (9), `bequest`
 (6), `nested` (4), `winenv` (4) gibi programlar sonucu hem ekrana hem
 seri gunluge yaziyor. Olcumler yol boyunca gercek hatalar buldu -- dolan
 VFS tablosu, `CreateFileA`'nin cevrilmeyen Windows yollari, `GDT`
@@ -2891,8 +2891,9 @@ ustlendi, ve `CreateProcessA` cocugu artik `spawn_child` ile (POSIX
 
 ### Bilerek yapilmayanlar
 
-* **`STARTUPINFO` yok sayiliyor**: TCMK'de pencere/konsol devralma
-  kavrami yok, `bInheritHandles` da oyle.
+* ~~**`STARTUPINFO` yok sayiliyor**~~ -- `bInheritHandles` ve
+  `STARTF_USESTDHANDLES` artik okunuyor, bkz. [Tutamac mirasi](#tutamac-mirasi-binherithandles-ve-startupinfo). Pencere
+  alanlari hala yok sayiliyor.
 * **`lpEnvironment` yok sayiliyor.** Cocuk ortami oturum tablosundan
   aliyor; POSIX tarafinda ayni sey `execve`nin ucuncu parametresiyle
   yapilabiliyor (bkz. yukarisi).
@@ -4553,8 +4554,8 @@ sinamak degil.
 
 * **`argv` sekiz elemanla sinirli**, blok 96 bayt. Cekirdekte surec
   basina dinamik tahsis yapmamak genel tercih.
-* **`CreateProcessA` hala `STARTUPINFO`yu ve `bInheritHandles`i yok
-  sayiyor.** TCMK'de pencere/konsol devralma kavrami yok.
+* ~~**`CreateProcessA` hala `STARTUPINFO`yu ve `bInheritHandles`i yok
+  sayiyor.**~~ Artik okuyor -- bkz. [Tutamac mirasi](#tutamac-mirasi-binherithandles-ve-startupinfo).
 * **Ortam blogunda genisletme yok**: Windows `%AD%` bicimini
   `ExpandEnvironmentStrings` ile acar, TCMK acmaz.
 
@@ -5338,9 +5339,8 @@ degil, **iki goreve** aitmis.
 * ~~**Bayraklar tanimlayici basina, acik dosya tanimi basina degil.**~~
   Artik acik dosya tanimina ait ve `dup`/`fork` kopyalari paylasiyor --
   bkz. [Tanimlayici ve tanim](#tanimlayici-ve-tanim-iki-ayri-katman).
-* **`lpPipeAttributes` okunmuyor.** `bInheritHandles` gibi miras
-  ayarlari yok sayiliyor; TCMK'de `execve` tanimlayicilari zaten
-  devrediyor.
+* ~~**`lpPipeAttributes` okunmuyor.**~~ `bInheritHandle` alani artik iki
+  uca da miras bayragi koyuyor -- bkz. [Tutamac mirasi](#tutamac-mirasi-binherithandles-ve-startupinfo).
 * **`nSize` yok sayiliyor** -- boru tamponu sabit 1 KiB. Windows'ta da
   `nSize` bir oneridir, ama orada cekirdek onu genelde dikkate alir.
 * **Adlandirilmis boru yok.** `CreateNamedPipe`/`ConnectNamedPipe` ve
@@ -9103,11 +9103,123 @@ sonra ayni sira iki mimaride de 10/10 + 10/10.
   surec araya girebilir. Tek CPU'da ve siradaki yazmalarda (I, J)
   gorunmuyor.
 * **`dup3`, `F_GETOWN`, `F_SETLK` (kilitler) yok.**
-* **Win32 tutamac mirasi yok.** `bInheritHandles` ve
-  `HANDLE_FLAG_INHERIT` okunmuyor; Windows'un `FD_CLOEXEC` karsiligi
-  tersine isliyor (varsayilan miras YOK).
+* ~~**Win32 tutamac mirasi yok.**~~ Geldi -- bkz. [Tutamac mirasi](#tutamac-mirasi-binherithandles-ve-startupinfo).
 * **Tanim havuzu sabit** (`MAX_TASKS x MAX_FDS` = 192). Her yuva ayri
   bir `open` olsa bile yetiyor; dolmasi mumkun degil.
+
+## Tutamac mirasi: bInheritHandles ve STARTUPINFO
+
+Bir onceki bati POSIX tarafinda tanimlayici ile acik dosya tanimini
+ayirdi. Windows tarafinda ayni soru bambaska bir varsayilanla soruluyor:
+cocuk **neyi** devralir?
+
+```text
+  POSIX    fork + execve: cocuk HER SEYI devralir.
+           Kapatmak icin bayrak gerekir (FD_CLOEXEC).
+
+  Windows  CreateProcess: cocuk HICBIR SEYI devralmaz.
+           Gecmesi icin iki kosul BIRLIKTE gerekir:
+             tutamac miras alinabilir   SECURITY_ATTRIBUTES.bInheritHandle
+                                        ya da SetHandleInformation
+             cagri izin veriyor         bInheritHandles = TRUE
+```
+
+Uzun sure `CreateProcessA` bu iki parametreyi de, `STARTUPINFO`yu da
+yok sayiyordu; Win32 cocugu hicbir tutamac devralmiyordu. Bir Windows
+programinin cocugunun ciktisini okumasinin tek yolu da buydu:
+yonlendirme POSIX'teki gibi `fork` ile `execve` arasinda kurulmuyor,
+`STARTUPINFO.hStdOutput` ile **anlatiliyor**.
+
+```
+[winherit] A varsayilan GECMEZ: gecti (nitelik vermeden acilan dosya cocukta YOK)
+[winherit] B miras alinabilir gecer: gecti (cocuk ayni numarayla okudu, bayrak cocukta da acik)
+[winherit] C bInheritHandles=FALSE: gecti (bInheritHandles=FALSE ile hicbir tutamac gecmedi)
+[winherit] D ayni konum: gecti (cocuk 4. bayttan, ebeveyn sonra 8. bayttan devam etti)
+[winherit] E SetHandleInformation: gecti (bayrak kapaninca tutamac gecmedi)
+[winherit] F stdout boruya: gecti (cocugun stdout'u boruda: merhaba, sonra boru kapandi)
+[winherit] G stdin borudan: gecti (cocuk stdin'den 5 bayt okudu ve boru sonunu gordu)
+[winherit] H sizan uc: gecti (devralinan yazma ucu boruyu cocugun omru boyunca acik tuttu)
+[winherit] I miras alinamayan std: gecti (bayraksiz boru cocugun stdout'u OLMADI)
+```
+
+![winherit](docs/screenshot-winherit.png)
+
+Sinavlar ciftler halinde: A/B ayni kalip, tek fark bayrak; B/C ayni
+bayrak, tek fark `bInheritHandles`. F ile H de bir cift. F'de ebeveyn
+kendi ucunu dogru kapatiyor, boru cocuk bitince kapaniyor. H'de yazma
+ucunu devralan ilgisiz bir cocuk boruyu kendi omru boyunca -- olcumde
+**1020 ms** -- "acik" tutuyor. Bu, Windows programlarinin en bilinen
+tuzagi ve `SetHandleInformation`in varlik sebebi.
+
+### Bayrak yuvada, nesne tanimda
+
+Bayrak tanimlayici yuvasinda ayri bir alan (`inherit`). `FD_CLOEXEC`
+de yuvada ve ikisi bilerek ayri: biri "execve'den gecme", oteki
+"CreateProcess'ten gec" diyor, varsayilanlari da ters.
+
+`CreateProcess(bInheritHandles=TRUE)` bayrakli yuvalari cocuga **ayni
+numarayla** ve **ayni acik dosya tanimiyla** geciriyor (D: ebeveyn ve
+cocuk tek bir konumu paylasiyor). Bayrak cocukta da acik kaliyor, yani
+torunlar da devralabilir. `STARTF_USESTDHANDLES` cocugun 0/1/2
+yuvalarini kuruyor; TCMK'de standart tutamaclar bu numaralar ve
+`GetStdHandle` onlari donduruyor.
+
+Windows bu tutamaclarin miras alinabilir olmasini ve `bInheritHandles`in
+acik olmasini istiyor; TCMK de oyle (I). Gercek Windows'ta kosulu
+saglamayan tutamac cocukta gecersiz bir deger olur. TCMK'de yuva
+varsayilanda kaliyor, yani cikti konsola gidiyor.
+
+### Kesintisiz kurulum
+
+Cocuk yaratildigi anda `Ready`. Cekirdek kipinde de zamanlayici
+kesmesi baglam degistirebildigi icin, ilk talimati stdout'a yazmak olan
+bir cocuk, ebeveyn onun stdout'unu kurmadan kosabilirdi. `CreateProcessA`
+artik cocugu ve butun kurulumunu (tutamaclar, oncelik, ortam, dizin)
+bir `preempt_disable` bolgesinde yapiyor. Ortam ve dizin uzun sure bu
+korumasiz kuruluyordu.
+
+Bu koruma **olculmedi**. Bolgeyi kaldiran bozma, uc kosuda da hicbir
+sinavi kirmadi; yaris penceresi o kadar dar. Koruma bir savunma olarak
+duruyor.
+
+### Bozma sinavlari
+
+```text
+  bayraksiz tutamac da geciyor              ->  A, E KALDI; G (sizan uc)
+  bInheritHandles yok sayiliyor             ->  C KALDI
+  miras tanimi kopyaliyor (paylasmiyor)     ->  D, H KALDI
+  STARTF_USESTDHANDLES kurulmuyor           ->  F, G KALDI
+  CreatePipe nitelikleri okumuyor           ->  F, G, H KALDI
+  CreateFileA nitelikleri okumuyor          ->  B, D KALDI
+  SetHandleInformation etkisiz              ->  E KALDI; G (sizan uc)
+  GetHandleInformation hep 0                ->  B KALDI
+  std tutamaci bayraksiz da kuruluyor       ->  I KALDI
+  kesintisiz bolge yok                      ->  hicbiri (3 kosu)
+```
+
+"Bayraksiz da geciyor" ve "SetHandleInformation etkisiz" G'yi de
+kiriyor ve sebebi ogretici: G'de ebeveyn yazma ucunun bayragini
+kapatiyor. Bayrak islemezse cocuk kendi stdin'inin **yazma** ucunu da
+devraliyor, ve kendi elindeki uc yuzunden borunun sonunu hic goremiyor.
+H'nin tuzagi, bu kez cocugun kendisinde.
+
+Ilk kosu 8/8'di ve iki bozma gecti. "Std tutamaci bayraksiz da
+kuruluyor" bozmasini olcen bir sinav yoktu; I eklendi ve onu
+yakaliyor. Digeri yukaridaki kesintisiz bolge.
+
+### Bu batida olmayanlar
+
+* **`DuplicateHandle` yok.** Bir tutamacin miras alinabilir kopyasini
+  cikarmanin Windows yolu; burada bayrak yalnizca
+  `SetHandleInformation` ile degisiyor.
+* **`SetStdHandle` yok.** TCMK'de standart tutamac yuvanin kendisi,
+  ayri bir tablo degil.
+* **`PROC_THREAD_ATTRIBUTE_HANDLE_LIST` yok.** Windows Vista'dan beri
+  mirasi tek tek tutamaclarla sinirlamanin yolu; H'nin tuzagina modern
+  cevap bu.
+* **Surec ve akis tutamaclari miras alinamiyor.** Miras yalnizca dosya
+  ve boru tutamaclarinda (tanimlayici tablosundakiler).
+* **`HANDLE_FLAG_PROTECT_FROM_CLOSE` kabul edilip yok sayiliyor.**
 
 ## Alfa'nin bilinen sinirlari
 

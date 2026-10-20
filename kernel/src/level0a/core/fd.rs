@@ -95,6 +95,14 @@ struct Slot {
     /// `FD_CLOEXEC`: `execve`de kapanir. Tanimlayiciya ait; `dup` onu
     /// **kopyalamaz** (POSIX: yeni tanimlayicida bayrak kapali).
     cloexec: bool,
+    /// Win32 `HANDLE_FLAG_INHERIT`: `CreateProcess(bInheritHandles=TRUE)`
+    /// ile cocuga gecer.
+    ///
+    /// `FD_CLOEXEC`in **tersi**, ve varsayilanlar da ters: POSIX'te her
+    /// tanimlayici `execve`den gecer, kapatmak icin bayrak gerekir;
+    /// Windows'ta hicbir tutamac gecmez, gecmesi icin bayrak gerekir. Ayni
+    /// yuvada iki ayri alan, cunku iki yuz ayri sorulari soruyor.
+    inherit: bool,
 }
 
 impl Slot {
@@ -102,6 +110,7 @@ impl Slot {
         used: false,
         file: 0,
         cloexec: false,
+        inherit: false,
     };
 }
 
@@ -308,6 +317,7 @@ unsafe fn install(kind: FdKind, node: usize, flags: u32, cloexec: bool) -> Optio
         used: true,
         file: index,
         cloexec,
+        inherit: false,
     });
     Some(fd)
 }
@@ -413,6 +423,92 @@ pub fn set_cloexec(fd: usize, on: bool) -> bool {
     })
 }
 
+/// Win32 `HANDLE_FLAG_INHERIT` -- tanimlayici yoksa `None`.
+pub fn inherit(fd: usize) -> Option<bool> {
+    if fd >= MAX_FDS {
+        return None;
+    }
+    crate::arch::cpu::without_interrupts(|| unsafe {
+        let slot = *current_table().add(fd);
+        slot.used.then_some(slot.inherit)
+    })
+}
+
+/// `HANDLE_FLAG_INHERIT`i degistirir; yalnizca bu yuva.
+pub fn set_inherit(fd: usize, on: bool) -> bool {
+    if fd >= MAX_FDS {
+        return false;
+    }
+    crate::arch::cpu::without_interrupts(|| unsafe {
+        let table = current_table();
+        if !(*table.add(fd)).used {
+            return false;
+        }
+        (*table.add(fd)).inherit = on;
+        true
+    })
+}
+
+/// `CreateProcess`: cagiranin tutamaclarini yeni surece devreder.
+///
+/// `all` (`bInheritHandles`) dogruysa `HANDLE_FLAG_INHERIT` tasiyan her
+/// yuva cocuga **ayni numarayla** ve **ayni acik dosya tanimiyla**
+/// geciyor -- Windows'ta miras alinan tutamacin degeri cocukta da
+/// aynidir, ve konum paylasilir. Bayrak cocukta da acik kalir (torunlar
+/// da devralabilir).
+///
+/// `std` (`STARTF_USESTDHANDLES`): cocugun 0/1/2'si. Windows bunu ancak
+/// `bInheritHandles` ile ve miras alinabilir tutamaclarla kabul ediyor;
+/// burada da oyle -- kosulu saglamayan tutamac yok sayiliyor ve o yuva
+/// varsayilanda (klavye/konsol) kaliyor.
+///
+/// Doner: cocuga gecen yuva sayisi. Cocugun tablosu bos olmali (yeni
+/// yaratilmis surec).
+pub fn inherit_into(child: usize, all: bool, std: [Option<usize>; FIRST_FREE_FD]) -> usize {
+    if child >= scheduler::MAX_TASKS || !all {
+        return 0;
+    }
+    crate::arch::cpu::without_interrupts(|| unsafe {
+        let parent = current_table();
+        let target = table_of(child);
+        let mut passed = 0;
+        for i in FIRST_FREE_FD..MAX_FDS {
+            let slot = parent.add(i).read();
+            if slot.used && slot.inherit && !(*target.add(i)).used {
+                target.add(i).write(Slot { cloexec: false, ..slot });
+                hold(slot.file);
+                passed += 1;
+            }
+        }
+        for (n, handle) in std.iter().enumerate() {
+            let Some(h) = *handle else { continue };
+            if h >= MAX_FDS {
+                continue;
+            }
+            let slot = parent.add(h).read();
+            if !slot.used || !slot.inherit {
+                continue;
+            }
+            let previous = target.add(n).read();
+            if previous.used {
+                drop_ref(previous.file);
+            }
+            target.add(n).write(Slot { cloexec: false, ..slot });
+            hold(slot.file);
+            passed += 1;
+        }
+        INHERITED.fetch_add(passed, Ordering::Relaxed);
+        passed
+    })
+}
+
+/// `CreateProcess` ile cocuga gecen tutamaclar (kabuk raporu).
+static INHERITED: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+pub fn inherited_total() -> usize {
+    INHERITED.load(Ordering::Relaxed)
+}
+
 /// Bir grubun standart tanimlayici bayraklarini sifirlar.
 ///
 /// `execve` sonrasi yeni program bayraklari devralmamali: POSIX'te
@@ -485,6 +581,7 @@ pub fn dup_from(oldfd: usize, min: usize, cloexec: bool) -> Option<usize> {
                     used: true,
                     file: index,
                     cloexec,
+                    inherit: false,
                 });
                 hold(index);
                 return Some(fd);
@@ -527,6 +624,7 @@ pub fn dup2(oldfd: usize, newfd: usize) -> Option<usize> {
             used: true,
             file: index,
             cloexec: false,
+            inherit: false,
         });
         Some(newfd)
     })

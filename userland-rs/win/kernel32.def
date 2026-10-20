@@ -86,3 +86,6 @@ GetCurrentProcess@0 @73
 GetCurrentThread@0 @74
 SetPriorityClass@8 @75
 GetPriorityClass@4 @76
+SetHandleInformation@12 @77
+GetHandleInformation@8 @78
+GetStdHandle@4 @79

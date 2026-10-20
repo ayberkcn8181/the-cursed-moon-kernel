@@ -1177,6 +1177,8 @@ fn execute(line: &str) {
             write_num(shared);
             write_str("  exec'te kapanan ");
             write_num(closed);
+            write_str("  CreateProcess mirasi ");
+            write_num(fd::inherited_total());
             newline();
         }
         "ls" => {

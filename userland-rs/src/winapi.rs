@@ -620,6 +620,15 @@ extern "system" {
     /// Surecin oncelik sinifi; hata 0.
     pub fn GetPriorityClass(process: Handle) -> Dword;
 
+    /// Tutamacin bayraklarini degistirir (`HANDLE_FLAG_INHERIT`).
+    pub fn SetHandleInformation(object: Handle, mask: Dword, flags: Dword) -> Bool;
+
+    /// Tutamacin bayraklarini okur.
+    pub fn GetHandleInformation(object: Handle, flags: *mut Dword) -> Bool;
+
+    /// Standart tutamaci dondurur (`STD_INPUT`, `STD_OUTPUT`, `STD_ERROR`).
+    pub fn GetStdHandle(std_handle: Dword) -> Handle;
+
     /// Bir akisin **tam register durumunu** `CONTEXT` kaydina yazar.
     ///
     /// POSIX'te karsiligi yok. `ptrace(PTRACE_GETREGS)` benzer is yapar
@@ -971,6 +980,98 @@ impl ProcessInformation {
             process_id: 0,
             thread_id: 0,
         }
+    }
+}
+
+/// `HANDLE_FLAG_INHERIT`: `CreateProcess(bInheritHandles=TRUE)` ile
+/// cocuga gecer.
+pub const HANDLE_FLAG_INHERIT: Dword = 1;
+/// `GetStdHandle` kimlikleri. (`STD_OUTPUT_HANDLE` sabiti TCMK'de
+/// tutamacin **kendisi** -- 1 -- oldugu icin bunlar ayri adla.)
+pub const STD_INPUT: Dword = -10i32 as Dword;
+pub const STD_OUTPUT: Dword = -11i32 as Dword;
+pub const STD_ERROR: Dword = -12i32 as Dword;
+/// `STARTUPINFO.dwFlags`: standart tutamaclar verildi.
+pub const STARTF_USESTDHANDLES: Dword = 0x100;
+
+/// `SECURITY_ATTRIBUTES`. Guvenlik tanimlayicisi yok sayiliyor; anlamli
+/// alan `inherit_handle`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SecurityAttributes {
+    pub length: Dword,
+    pub security_descriptor: usize,
+    pub inherit_handle: Bool,
+}
+
+impl SecurityAttributes {
+    /// Miras alinabilir tutamac isteyen nitelikler.
+    pub const fn inheritable() -> Self {
+        SecurityAttributes {
+            length: core::mem::size_of::<SecurityAttributes>() as Dword,
+            security_descriptor: 0,
+            inherit_handle: 1,
+        }
+    }
+}
+
+/// `STARTUPINFOA`. Isaretci ve tutamac alanlari `usize`: x86_64'te
+/// 8 bayt (bkz. `ProcessInformation` ayni sorun).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct StartupInfo {
+    pub cb: Dword,
+    pub reserved: usize,
+    pub desktop: usize,
+    pub title: usize,
+    pub x: Dword,
+    pub y: Dword,
+    pub x_size: Dword,
+    pub y_size: Dword,
+    pub x_count_chars: Dword,
+    pub y_count_chars: Dword,
+    pub fill_attribute: Dword,
+    pub flags: Dword,
+    pub show_window: u16,
+    pub cb_reserved2: u16,
+    pub reserved2: usize,
+    pub std_input: usize,
+    pub std_output: usize,
+    pub std_error: usize,
+}
+
+impl StartupInfo {
+    pub const fn new() -> Self {
+        StartupInfo {
+            cb: core::mem::size_of::<StartupInfo>() as Dword,
+            reserved: 0,
+            desktop: 0,
+            title: 0,
+            x: 0,
+            y: 0,
+            x_size: 0,
+            y_size: 0,
+            x_count_chars: 0,
+            y_count_chars: 0,
+            fill_attribute: 0,
+            flags: 0,
+            show_window: 0,
+            cb_reserved2: 0,
+            reserved2: 0,
+            std_input: 0,
+            std_output: 0,
+            std_error: 0,
+        }
+    }
+
+    /// `STARTF_USESTDHANDLES` ile uc standart tutamac.
+    pub const fn with_std(input: Handle, output: Handle, error: Handle) -> Self {
+        let mut info = Self::new();
+        info.flags = STARTF_USESTDHANDLES;
+        info.std_input = input as usize;
+        info.std_output = output as usize;
+        info.std_error = error as usize;
+        info
     }
 }
 
