@@ -177,6 +177,7 @@ static KNOWN_APPS: &[(&str, &str, &str)] = &[
     ("winnest", "/bin/winnest.exe", "winnest"),
     ("winapc", "/bin/winapc.exe", "winapc"),
     ("winprio", "/bin/winprio.exe", "winprio"),
+    ("winalert", "/bin/winalert.exe", "winalert"),
     // Yalnizca x86_64'te var: olctugu sey (tablo tabanli SEH) 32-bit'te
     // yok. Kisa ad iki mimaride de listede duruyor ama i386'da yol
     // VFS'te bulunmuyor ve cagri "dosya yok" ile bitiyor -- listeyi

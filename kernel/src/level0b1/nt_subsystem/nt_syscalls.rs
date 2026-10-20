@@ -967,16 +967,30 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
                 return;
             }
 
-            if ms > 0 {
+            if alertable && ms > 0 {
+                // Uyarilabilir uyku **bolunebilir**: uyku sirasinda
+                // kuyruga giren bir APC (`queue` -> `wake_alertable`)
+                // akisi hemen kaldirir. Uyanma kosulu `deliverable`,
+                // `pending` degil: kat siniri doluysa APC kosamaz ve
+                // uyku erken bitip bos donmemeli.
+                //
+                // `INFINITE` gercekten suresiz: yalnizca bir APC kaldirir.
+                let me = crate::level0a::core::scheduler::current_id();
+                let timeout = if ms == 0xFFFF_FFFF { None } else { Some((ms / 10).max(1)) };
+                crate::level0a::core::scheduler::set_alertable(true);
+                let _ = crate::level0a::core::scheduler::wait_for_signal_until(
+                    || apc::deliverable(me),
+                    timeout,
+                );
+                crate::level0a::core::scheduler::set_alertable(false);
+            } else if ms > 0 {
                 crate::level0a::core::scheduler::sleep_ticks((ms / 10).max(1));
             } else {
                 crate::level0a::core::scheduler::yield_now();
             }
 
-            // Uykudan sonra yeniden bakiliyor: kardes bir akisin uyku
-            // sirasinda kuyruga koydugu APC boylece goruluyor. Dongu
-            // icinde `SleepEx(n, TRUE)` cagiran bir akisin APC'leri
-            // gormesinin yolu bu.
+            // Uykudan sonra yeniden bakiliyor: bolunen uykunun APC'si de,
+            // sure dolarken kuyruga giren de burada kosuyor.
             if alertable && unsafe { apc::deliver(frame, from_interrupt) } {
                 return;
             }
@@ -2206,13 +2220,10 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
         // `WaitForSingleObjectEx(h, ms, bAlertable)` ayni arm'da: tek
         // fark, uyarilabilir bicimin **once kuyruga bakmasi**.
         //
-        // Gercek Windows'ta bekleme sirasinda gelen bir APC beklemeyi
-        // boler. TCMK'de bekleme noktasi cagrinin **basi**: kuyrukta
-        // duran bir APC hemen calisir ve cagri `WAIT_IO_COMPLETION`
-        // doner, ama bekleme basladiktan sonra gelen bir APC onu
-        // kaldirmaz. Ayrim bilincli -- zamanlayicida "beklemeyi disaridan
-        // bol" diye bir ilkel yok, ve varmis gibi yapmak bir programi
-        // hic gelmeyecek bir uyanmaya baglardi.
+        // Bekleme sirasinda gelen bir APC uyarilabilir beklemeyi
+        // **boler**: cagri `WAIT_IO_COMPLETION` doner ve cocuk
+        // toplanmaz -- program beklemeyi yeniden kurabilir, cikis kodu
+        // onu bekliyor. Uyarilabilir olmayan bekleme APC'yi gormez.
         NT_WAIT_FOR_SINGLE_OBJECT | NT_WAIT_FOR_SINGLE_OBJECT_EX => {
             let handle = arg(args, 0).unwrap_or(0) as usize;
             let timeout = arg(args, 1).unwrap_or(0);
@@ -2258,7 +2269,30 @@ fn dispatch_win32_api(frame: &mut SyscallFrame, from_interrupt: bool) {
                     } else if timeout == 0 {
                         WAIT_TIMEOUT
                     } else {
-                        let reaped = crate::level0a::core::scheduler::wait_for_task(task);
+                        let alertable = number == NT_WAIT_FOR_SINGLE_OBJECT_EX
+                            && arg(args, 2).unwrap_or(0) != 0;
+                        let me = crate::level0a::core::scheduler::current_id();
+                        if alertable {
+                            crate::level0a::core::scheduler::set_alertable(true);
+                        }
+                        let outcome = crate::level0a::core::scheduler::wait_for_task_or(
+                            task,
+                            || alertable && apc::deliverable(me),
+                        );
+                        if alertable {
+                            crate::level0a::core::scheduler::set_alertable(false);
+                        }
+                        let reaped = match outcome {
+                            crate::level0a::core::scheduler::TaskWait::Done(r) => r,
+                            crate::level0a::core::scheduler::TaskWait::Interrupted => {
+                                if unsafe { apc::deliver(frame, from_interrupt) } {
+                                    return;
+                                }
+                                // Kosul dogruydu ama cerceve kurulamadi:
+                                // bekleme yine de bolundu.
+                                return frame.set_return(apc::WAIT_IO_COMPLETION as usize);
+                            }
+                        };
                         // Saklanmis bir kod varsa ustune yazma. Bir is
                         // parcacigi yuvasini cikarken kendisi biraktigi
                         // icin `wait_for_task` onu **gormus** olmayabilir

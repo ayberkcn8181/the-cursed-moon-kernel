@@ -48,6 +48,22 @@
 //! tramplen `NtContinueApc` cagiriyor; cekirdek kuyrukta baska varsa
 //! sirakini kuruyor, yoksa saklanan baglami geri koyuyor ve bekleme
 //! cagrisina `WAIT_IO_COMPLETION` donduruyor.
+//!
+//! ## Iki uyanma yolu
+//!
+//! Uyarilabilir bir bekleme APC'yi iki anda gorur: **girerken** kuyrukta
+//! duran APC hemen kosar (uyunmaz), ve **beklerken** gelen bir APC
+//! beklemeyi boler -- `queue` hedef uyarilabilir bekliyorsa onu
+//! uyandiriyor (`scheduler::wake_alertable`).
+//!
+//! ## Ic ice teslim
+//!
+//! Bir APC yordami kendi icinde uyarilabilir bekleme cagirabilir; o
+//! bekleme kuyruktaki sonraki APC'yi **icte** kosturur ve yordama
+//! `WAIT_IO_COMPLETION` doner. Gercek Windows boyle yapiyor. Her kat
+//! kendi saklanan baglamini tutuyor (`SAVED` bir yigin), derinlik
+//! `MAX_DEPTH` ile sinirli: sinira gelen bir bekleme APC kosturmaz, APC
+//! kuyrukta kalir ve bir dis katin bosaltmasinda kosar.
 
 use crate::arch::cpu::regs::{SyscallFrame, UserContext};
 use crate::level0a::core::{mmu, scheduler};
@@ -99,24 +115,27 @@ static mut QUEUE: [[Apc; MAX_APC]; scheduler::MAX_TASKS] =
 static QUEUED: [AtomicUsize; scheduler::MAX_TASKS] =
     [const { AtomicUsize::new(0) }; scheduler::MAX_TASKS];
 
-/// Su an bir APC kosuyor mu (akis basina).
+/// Ic ice APC katlarinin en fazla sayisi.
 ///
-/// Ic ice teslimi engelliyor: bir APC yordami kendi icinde uyarilabilir
-/// bekleme cagirirsa ikinci APC **calismaz**, kuyrukta kalir. Gercek
-/// Windows ic ice teslim yapar; buradaki sinir bilincli ve sebebi tek
-/// yuvali saklama (asagi bkz. `SAVED`).
-static RUNNING: [AtomicUsize; scheduler::MAX_TASKS] =
+/// Windows'ta sinir yok; yigin bitene kadar ic ice girilebilir. TCMK'de
+/// saklanan baglamlar statik bir tabloda duruyor ve sinyal tarafindaki
+/// ic ice teslimle ayni derinlik seciliyor.
+pub const MAX_DEPTH: usize = 4;
+
+/// Kac APC kati acik (akis basina). 0 = APC icinde degil.
+static DEPTH: [AtomicUsize; scheduler::MAX_TASKS] =
     [const { AtomicUsize::new(0) }; scheduler::MAX_TASKS];
 
-/// APC'ye girilmeden onceki Ring 3 baglami.
+/// Her katin APC'ye girmeden onceki Ring 3 baglami.
 ///
-/// Akis basina **tek** yuva: ic ice teslim olmadigi icin ikincisine
-/// gerek yok. Sinyal tarafinda dort katmanli bir yigin var, cunku orada
-/// teslim programin izni olmadan olur ve bir isleyicinin icinde ikinci
-/// bir sinyal beklenen bir durumdur. Burada teslim noktasini program
-/// kendisi seciyor, yani ic ice kalmak da onun karari.
-static mut SAVED: [UserContext; scheduler::MAX_TASKS] =
-    [UserContext::ZERO; scheduler::MAX_TASKS];
+/// Uzun sure akis basina **tek** yuva vardi ve ic ice teslim bu yuzden
+/// kapaliydi: ikinci kat birincinin saklanan baglamini ezerdi ve dis
+/// bekleme hic donmezdi. Artik kat basina bir yuva.
+static mut SAVED: [[UserContext; MAX_DEPTH]; scheduler::MAX_TASKS] =
+    [[UserContext::ZERO; MAX_DEPTH]; scheduler::MAX_TASKS];
+
+/// En derin kat (olcum).
+static DEEPEST: AtomicU32 = AtomicU32::new(0);
 
 /// Olcum sayaclari (kabuk `sigs` raporu).
 static QUEUED_TOTAL: AtomicU32 = AtomicU32::new(0);
@@ -173,7 +192,19 @@ pub fn queue(target: usize, proc_addr: usize, param: usize) -> Result<(), ApcErr
         QUEUED_TOTAL.fetch_add(1, Ordering::Relaxed);
         PEAK.fetch_max(used as u32 + 1, Ordering::Relaxed);
         Ok(())
-    })
+    })?;
+    // Hedef uyarilabilir bir beklemedeyse kalksin: APC beklemeyi boler.
+    // Uyarilabilir olmayan bir beklemeye dokunulmuyor (bayrak kapali).
+    scheduler::wake_alertable(target);
+    Ok(())
+}
+
+/// Bir uyarilabilir bekleme **su an** APC kosturabilir mi: kuyrukta APC
+/// var ve kat siniri dolmamis. Bekleme dongulerinin uyanma kosulu.
+pub fn deliverable(task: usize) -> bool {
+    task < scheduler::MAX_TASKS
+        && QUEUED[task].load(Ordering::SeqCst) > 0
+        && DEPTH[task].load(Ordering::SeqCst) < MAX_DEPTH
 }
 
 /// Kuyrugun basindaki APC'yi cikarir.
@@ -212,7 +243,7 @@ pub fn reset(task: usize) {
     }
     crate::arch::cpu::without_interrupts(|| {
         QUEUED[task].store(0, Ordering::SeqCst);
-        RUNNING[task].store(0, Ordering::SeqCst);
+        DEPTH[task].store(0, Ordering::SeqCst);
         // SAFETY: butun satir kendi yuvasi.
         unsafe {
             let row = (core::ptr::addr_of_mut!(QUEUE) as *mut Apc).add(task * MAX_APC);
@@ -221,6 +252,11 @@ pub fn reset(task: usize) {
             }
         }
     });
+}
+
+/// En derin ic ice APC kati -- kabuk raporu.
+pub fn deepest() -> u32 {
+    DEEPEST.load(Ordering::Relaxed)
 }
 
 /// `(kuyruga giren, teslim edilen, reddedilen, en derin)` -- kabuk raporu.
@@ -240,7 +276,7 @@ pub fn stats() -> (u32, u32, u32, u32) {
 /// `resume`da uretilecek.
 ///
 /// `false` donmesinin uc sebebi olabilir ve ucu de "APC kosmadi"
-/// demektir: kuyruk bos, zaten bir APC kosuyor, ya da cerceve
+/// demektir: kuyruk bos, kat siniri dolu (`MAX_DEPTH`), ya da cerceve
 /// kurulamadi (yigin yazilamiyor).
 ///
 /// # Safety
@@ -251,14 +287,13 @@ pub unsafe fn deliver(frame: &mut SyscallFrame, from_interrupt: bool) -> bool {
     if task >= scheduler::MAX_TASKS {
         return false;
     }
-    // Zaten bir APC kosuyorsa ikincisi beklesin. Kuyrukta kaliyor, yani
-    // kaybolmuyor: bir sonraki uyarilabilir beklemede calisacak.
-    if RUNNING[task].load(Ordering::SeqCst) != 0 {
+    // Bir APC icindeysek yeni bir kat aciliyor (ic ice teslim). Sinira
+    // gelindiyse APC kuyrukta kaliyor, yani kaybolmuyor: bir dis katin
+    // bosaltmasinda kosacak.
+    if !deliverable(task) {
         return false;
     }
-    if QUEUED[task].load(Ordering::SeqCst) == 0 {
-        return false;
-    }
+    let depth = DEPTH[task].load(Ordering::SeqCst);
 
     // Baglam **cikarmadan once** saklaniyor: cerceve kurulamazsa APC
     // kuyrukta kalmali, yoksa sessizce kaybolurdu.
@@ -268,9 +303,10 @@ pub unsafe fn deliver(frame: &mut SyscallFrame, from_interrupt: bool) -> bool {
     };
 
     (core::ptr::addr_of_mut!(SAVED) as *mut UserContext)
-        .add(task)
+        .add(task * MAX_DEPTH + depth)
         .write(saved);
-    RUNNING[task].store(1, Ordering::SeqCst);
+    DEPTH[task].store(depth + 1, Ordering::SeqCst);
+    DEEPEST.fetch_max(depth as u32 + 1, Ordering::Relaxed);
     DELIVERED.fetch_add(1, Ordering::Relaxed);
     frame.set_user_context_via(from_interrupt, &next);
     true
@@ -285,12 +321,17 @@ pub unsafe fn deliver(frame: &mut SyscallFrame, from_interrupt: bool) -> bool {
 /// `deliver` ile ayni kosul.
 pub unsafe fn resume(frame: &mut SyscallFrame, from_interrupt: bool) -> bool {
     let task = scheduler::current_id();
-    if task >= scheduler::MAX_TASKS || RUNNING[task].load(Ordering::SeqCst) == 0 {
+    if task >= scheduler::MAX_TASKS {
+        return false;
+    }
+    let depth = DEPTH[task].load(Ordering::SeqCst);
+    if depth == 0 {
         return false;
     }
 
+    // En icteki kat donuyor: onun beklemesinin baglami.
     let saved = (core::ptr::addr_of!(SAVED) as *const UserContext)
-        .add(task)
+        .add(task * MAX_DEPTH + depth - 1)
         .read();
 
     // Kuyrukta baska varsa **ayni** beklemenin icinde kosuyor: Windows
@@ -307,7 +348,7 @@ pub unsafe fn resume(frame: &mut SyscallFrame, from_interrupt: bool) -> bool {
         // bir dongu olurdu.
     }
 
-    RUNNING[task].store(0, Ordering::SeqCst);
+    DEPTH[task].store(depth - 1, Ordering::SeqCst);
     frame.set_user_context_via(from_interrupt, &saved);
     // Baglam geri konduktan **sonra** donus degeri yaziliyor: saklanan
     // baglamdaki EAX/RAX, yarida kalan bekleme cagrisinin ara degeriydi.

@@ -156,6 +156,10 @@ path = "src/win/prio.rs"
 name = "winunwex"
 path = "src/win/unwindex.rs"
 
+[[bin]]
+name = "winalert"
+path = "src/win/alert.rs"
+
 [profile.dev]
 panic = "abort"
 opt-level = 1

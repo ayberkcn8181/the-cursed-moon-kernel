@@ -28,7 +28,7 @@ masaustu sunuyor.
 | Ikili bicimleri | ELF32/ELF64 · PE32/PE32+ (ithal tablosu cozulur) |
 | POSIX cagrilari | 77 (+ ELF yardimci vektoru, dosya destekli `mmap`, `clone`, `futex`, `SIGPIPE`, `EINTR`/`SA_RESTART`, is denetimi ve terminal (`setsid`, `tcsetpgrp`, `SIGTTIN`/`SIGTTOU`), `SA_SIGINFO`, `sigaltstack`, gercek-zamanli sinyaller, `sigtimedwait`) |
 | NT/Win32 cagrilari | 99 (`KERNEL32.dll` 76 ihracat + `TCMKGUI.dll`) |
-| Ring 3 uygulamalari | 44 ELF + 22 PE (ucu yalnizca x86_64) |
+| Ring 3 uygulamalari | 44 ELF + 23 PE (ucu yalnizca x86_64) |
 | Kalici depolama | ATA PIO + MBR + TCMKFS (yazilabilir, iki mimari) + takas |
 | Kod | ~30 bin satir cekirdek + ~17 bin satir userland |
 
@@ -60,7 +60,7 @@ artik POSIX yuzunde de **yakalanip duzeltilebiliyor**
 gucte cevap veriyor.
 
 Her yetenek QEMU'da **olculerek** dogrulanmistir: `probe` (16 sinav),
-`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (6), `bigfile` (6), `heap` (5), `swapx` (6), `jobs` (6), `winsusp` (6), `winctx` (7), `sigfault` (7), `winunwind` (7), `altstack` (7), `winnest` (6), `rtsig` (7), `winapc` (7), `sigwait` (7), `winpdata` (7), `sigchld` (7), `winvunw` (7), `stackgrow` (7), `winunwex` (7), `jobctl` (11), `winprio` (10), `orphan` (10), `bequest`
+`winprobe` (12), `winseh` (9), `winmods` (6), `quoted` (4), `winargv` (4), `mapped` (4), `winmap` (4), `threads` (5), `winthread` (4), `sync` (5), `winsync` (5), `blocking` (9), `winpipe` (7), `intr` (6), `death` (6), `windeath` (6), `stdin` (6), `bigfile` (6), `heap` (5), `swapx` (6), `jobs` (6), `winsusp` (6), `winctx` (7), `sigfault` (7), `winunwind` (7), `altstack` (7), `winnest` (6), `rtsig` (7), `winapc` (7), `sigwait` (7), `winpdata` (7), `sigchld` (7), `winvunw` (7), `stackgrow` (7), `winunwex` (7), `jobctl` (11), `winprio` (10), `orphan` (10), `winalert` (8), `bequest`
 (6), `nested` (4), `winenv` (4) gibi programlar sonucu hem ekrana hem
 seri gunluge yaziyor. Olcumler yol boyunca gercek hatalar buldu -- dolan
 VFS tablosu, `CreateFileA`'nin cevrilmeyen Windows yollari, `GDT`
@@ -7467,13 +7467,11 @@ adrese dus".
 
 ### Bilerek yapilmayanlar
 
-* **Ic ice APC yok.** Bir APC yordami kendi icinde uyarilabilir bekleme
-  cagirirsa ikinci APC calismaz, kuyrukta kalir. Gercek Windows ic ice
-  teslim yapar. Sinyal tarafinda dort katmanli bir baglam yigini var,
-  cunku orada teslim programin izni olmadan olur ve bir isleyicinin
-  icinde ikinci bir sinyal **beklenen** bir durumdur. Burada teslim
-  noktasini program kendisi seciyor, yani ic ice kalmak da onun karari.
-* **Bekleme sirasinda gelen APC beklemeyi bolmez.** TCMK'de uyarilabilir
+* ~~**Ic ice APC yok.**~~ ~~**Bekleme sirasinda gelen APC beklemeyi
+  bolmez.**~~ Ikisi de geldi -- bkz.
+  [Bekleme bolunur](#bekleme-bolunur-uyarilabilir-bekleme-ve-ic-ice-apc).
+  Asagidaki eski gerekce, o batiya kadar gecerliydi:
+  **Bekleme sirasinda gelen APC beklemeyi bolmezdi.** TCMK'de uyarilabilir
   bekleme noktasi cagrinin **basidir**: kuyrukta duran bir APC hemen
   kosar, ama `WaitForSingleObjectEx` bekledigi sirada gelen bir APC onu
   kaldirmaz. Zamanlayicida "beklemeyi disaridan bol" diye bir ilkel yok,
@@ -8824,6 +8822,135 @@ sinirli surumu C'yi dogru teshisle kiriyor.
 * **Grup numaralari hala yuva numarasi.** Yetim kontrolu canli gorevlere
   bakiyor, ama `kill(-pgid)` olmus bir grubun numarasini alan yeni bir
   surece ulasabilir.
+
+## Bekleme bolunur: uyarilabilir bekleme ve ic ice APC
+
+APC batisi bir randevu kurdu: APC yalnizca uyarilabilir bir bekleme
+noktasinda kosar. Ama o noktayi yalnizca **girerken** taniyordu.
+`SleepEx(5000, TRUE)` cagiran bir akisa uykunun ikinci milisaniyesinde
+gelen APC, bes saniye sonra kosuyordu. Windows'ta bekleme bolunur:
+
+```text
+  SleepEx(2500, TRUE)        APC 300. ms'de gelir -> hemen kosar,
+  ......|...................                         WAIT_IO_COMPLETION
+        ^ QueueUserAPC
+
+  SleepEx(800, FALSE)        APC gelir -> HICBIR SEY olmaz,
+                                          APC kuyrukta bekler
+```
+
+Ikinci eksik ic ice teslimdi. Bir APC yordami kendi icinde uyarilabilir
+bekleme cagirirsa kuyruktaki sonraki APC **icte** kosmali. TCMK'de
+saklanan baglam tek yuvaliydi, bu yuzden ikinci APC disari birakiliyordu.
+
+```
+[winalert] A ic ice APC: gecti (ic APC dis APC'nin beklemesinde kostu (O-I-o))
+[winalert] B kat siniri kaybetmez: gecti (dort kat ic ice, sinirda bekleme bos dondu, alti APC de kostu)
+[winalert] C APC'siz uyku surer: gecti (APC yokken uyku tam suresince surdu, 0 dondu)
+[winalert] D uyku bolunur: gecti (2500 ms'lik uyku APC gelince kalkti, WAIT_IO_COMPLETION)
+[winalert] E izinsiz uyku bolunmez: gecti (SleepEx(_,FALSE) APC'ye ragmen surdu; APC sonra kostu)
+[winalert] F surec beklemesi bolunur: gecti (bekleme APC ile kalkti, cocuk hala calisiyordu)
+[winalert] G cocuk kaybolmaz: gecti (ikinci bekleme cocugun cikis kodunu (7) aldi)
+[winalert] H izinsiz bekleme bolunmez: gecti (WaitForSingleObject cocuk bitene kadar surdu; APC sonra kostu)
+[winalert] olcu: D 300 ms  E 800 ms  F 300 ms  H 1200 ms  en derin kat 4
+```
+
+![winalert](docs/screenshot-winalert.png)
+
+Olcu satiri asil kaniti tasiyor: bolunen iki bekleme (D, F) APC'nin
+geldigi anda, **300 ms**de bitti; bolunmeyen iki bekleme (E, H) kendi
+surelerini doldurdu. Sinavlar cift olarak okunmali (D/E, F/H). "Bolunur"
+tek basina "her sey boler"i de gecerdi, o yuzden izinsiz bicimin
+bolunmedigini de gormek gerekiyor.
+
+### Bolunme: yeni ilkel gerekmedi
+
+Zamanlayicida "beklemeyi disaridan bol" diye bir ilkel yoktu. APC
+batisinin gerekcesi de buydu. Ama POSIX tarafi o ilkeli `sigtimedwait`
+icin coktan kurmustu: `wait_for_signal_until(kosul, sure)`. Bekleme
+kosulu kesmeler kapaliyken sinaniyor, uyandiran taraf da gorevi
+`Ready` yapiyor. Uyarilabilir `SleepEx` artik ayni ilkelle uyuyor;
+kosulu `apc::deliverable`. `QueueUserAPC` hedefi kuyruga koyduktan
+sonra `wake_alertable` ile kaldiriyor.
+
+Surec beklemesi (`WaitForSingleObjectEx`) icin `wait_for_task` bir
+kosul aldi (`wait_for_task_or`). Bolunen bekleme cocugu **toplamiyor**:
+yuvasi ve cikis kodu duruyor, program beklemeyi yeniden kurabiliyor
+(G).
+
+Uyanma kosulu `pending` degil, `deliverable`: kuyrukta APC var **ve**
+kat siniri dolmamis. Sinira gelmis bir akista APC kosamaz; `pending`
+kullanilsaydi bekleme hemen kalkip bos donerdi.
+
+### Iki katli koruma
+
+Izinsiz bir beklemeyi APC'den iki sey koruyor:
+
+```text
+  Task.alertable     wake_alertable yalnizca bayragi acik bir
+                     beklemeyi kaldiriyor
+  bekleme kosulu     uyansa bile, izinsiz bekleme kosulunda APC yok:
+                     yeniden kuruluyor
+```
+
+Bozma sinavlari bunu gosterdi: kosulu "izinsiz de bolunsun" diye bozmak
+**hicbir sinavi kirmadi**. Sebebi zayif bir sinav degil: bayrak hala
+kapali oldugu icin izinsiz bekleme hic uyandirilmiyordu. Iki kati
+birlikte bozmak H'yi dogru teshisle kiriyor. Bayrak ayrica sahte
+uyanmalari da onluyor, cunku `SigWait` ve `Waiting` baska beklemelerin
+de durumu.
+
+Ayni iste `wait_for_task` beklemeyi artik her uyanmada **yeniden
+kuruyor**. Eskiden ilk uyanmadan sonra gorev `Ready` kaliyordu ve
+cocuk bitene kadar dongu yoklamayla donuyordu. `wake_child_watchers`
+durma ve devam etmede de uyandirdigi icin bu bolunmeden once de
+olabilirdi; ayrica olculmedi.
+
+### Ic ice: tek yuva yerine yigin
+
+`SAVED` akis basina tek baglamdi. Artik kat basina bir yuva var
+(`MAX_DEPTH` = 4, sinyal tarafindaki ic ice teslimle ayni derinlik).
+`deliver` yeni bir kat aciyor. `resume` en icteki katin kuyrugunu
+bosaltip o katin beklemesine donuyor, ve o bekleme
+`WAIT_IO_COMPLETION` ile bitiyor. Sinira gelen bekleme APC kosturmaz,
+bos doner. APC ise **kaybolmaz**: en icteki katin bosaltmasinda kosar
+(B: alti APC, en fazla dort kat).
+
+Windows'ta sinir yok; yigin bitene kadar ic ice girilebilir. TCMK'nin
+siniri saklanan baglamlarin statik bir tabloda durmasindan geliyor.
+
+### Bozma sinavlari
+
+```text
+  QueueUserAPC uyandirmiyor               ->  D, F KALDI (G olculemedi)
+  uyarilabilir uyku eski duz uyku         ->  D KALDI ("ancak sure dolunca")
+  izinsiz bekleme de bolunuyor (kosul)    ->  hicbiri (bayrak koruyor)
+  ... kosul + bayrak birlikte             ->  H KALDI
+  bolunen bekleme cocugu topluyor         ->  G KALDI (cikis kodu kayboldu)
+  ic ice teslim yok                       ->  A KALDI (O-o-I), B KALDI
+  kat siniri 3                            ->  B KALDI (sinir SIG)
+  donuste kuyruk bosaltilmiyor            ->  B KALDI (APC kayboldu),
+                                              winapc E KALDI
+  tek yuvali saklama (hep 0. kat)         ->  A KALDI (dis bekleme donmedi)
+```
+
+Ilk kosu iki mimaride 8/8'di. Iki bozma bulanik tani verdi ve sinav
+duzeltildi. "Kat siniri 3" genel bir "beklenenden farkli" diyordu.
+"Bosaltma yok" ise C'yi "uyku erken bitti" diye kiriyordu; gercek sebep
+B'den kuyrukta kalan APC'ydi. Ikisinin de artik kendi tanisi var.
+
+### Bu batida olmayanlar
+
+* **Ara sureler yok.** `WaitForSingleObject(Ex)` yalnizca sifiri ve
+  `INFINITE`i ayirt ediyor; uyarilabilir surec beklemesi de oyle.
+  `SleepEx` ise sureli ve bolunebilir.
+* **`WaitForMultipleObjectsEx`, `SignalObjectAndWait`,
+  `MsgWaitForMultipleObjectsEx` yok.** Bolunebilir bekleme ilkeli artik
+  var; bu cagrilarin eksigi nesne tarafi.
+* **`NtTestAlert` ve `QueueUserAPC2` yok.** Bekleme olmadan kuyrugu
+  bosaltmanin ve ozel APC'lerin yolu yok.
+* **Kat siniri sabit** (dort). Sinirda APC kaybolmuyor ama bekleme bos
+  donuyor; gercek Windows'ta boyle bir durum yok.
 
 ## Alfa'nin bilinen sinirlari
 

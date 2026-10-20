@@ -1021,6 +1021,15 @@ fn execute(line: &str) {
                 write_num(mine);
             }
             newline();
+            // Bekleme sirasinda gelen APC'nin kac beklemeyi boldugu ve
+            // en derin ic ice kat.
+            write_str("apc bolme: ");
+            write_num(scheduler::alert_wakes());
+            write_str("  en derin kat ");
+            write_num(crate::level0b1::nt_subsystem::apc::deepest() as usize);
+            write_str("/");
+            write_num(crate::level0b1::nt_subsystem::apc::MAX_DEPTH);
+            newline();
             // x86_64 tablo tabanli SEH: kac tablo kayitli, kac arama
             // yapildi, kacinda kayit bulundu, ve kac cerceve **sanal
             // olarak** geri sarildi. Sonuncusu i386'da karsiligi

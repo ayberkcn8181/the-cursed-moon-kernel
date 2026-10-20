@@ -246,6 +246,14 @@ pub struct Task {
     /// Ayri bir bayrak sart, cunku "0 tik sonra uyan" ile "hic uyanma"
     /// ayni sayiyla ifade edilemez.
     pub wait_timed: bool,
+    /// Gorev **uyarilabilir** bir Win32 beklemesinde mi.
+    ///
+    /// `QueueUserAPC` hedefi uyandirmadan once buna bakiyor: uyarilabilir
+    /// olmayan bir bekleme APC ile bolunmemeli (Windows'un sozlesmesi),
+    /// ve ayni durumu (`SigWait`, `Waiting`) baska sebeplerle kullanan
+    /// beklemeler de var. Bayrak olmadan bir APC, `waitpid`deki bir
+    /// POSIX ebeveynini ya da `SleepEx(_, FALSE)` uykusunu kaldirirdi.
+    pub alertable: bool,
     /// Is parcacigi olurken sifirlanip uyandirilacak kullanici adresi.
     ///
     /// Linux'ta `CLONE_CHILD_CLEARTID`in yaptigi is; `pthread_join`
@@ -286,6 +294,7 @@ impl Task {
             wait_addr: 0,
             wait_kernel: false,
             wait_timed: false,
+            alertable: false,
             clear_child_tid: 0,
         }
     }
@@ -520,6 +529,7 @@ fn spawn_inner(
         (*tasks.add(index)).wait_addr = 0;
         (*tasks.add(index)).wait_kernel = false;
         (*tasks.add(index)).wait_timed = false;
+        (*tasks.add(index)).alertable = false;
         (*tasks.add(index)).clear_child_tid = 0;
 
         // Calisma dizini yuvaya baglidir, imaja degil. Sifirlamanin
@@ -568,6 +578,7 @@ fn release_slot(index: usize) {
         (*tasks.add(index)).wait_addr = 0;
         (*tasks.add(index)).wait_kernel = false;
         (*tasks.add(index)).wait_timed = false;
+        (*tasks.add(index)).alertable = false;
         (*tasks.add(index)).clear_child_tid = 0;
         (*tasks.add(index)).pgid = index;
         (*tasks.add(index)).sid = index;
@@ -1903,6 +1914,53 @@ pub fn wake_signal_waiter(task: usize) {
     }
 }
 
+/// Calisan gorevin uyarilabilir-bekleme bayragi (bkz. `Task::alertable`).
+pub fn set_alertable(on: bool) {
+    let current = CURRENT.load(Ordering::Relaxed);
+    crate::arch::cpu::without_interrupts(|| unsafe {
+        let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+        (*tasks.add(current)).alertable = on;
+    });
+}
+
+/// Kac kez bir APC uyarilabilir bir beklemeyi kaldirdi.
+static ALERT_WAKES: AtomicUsize = AtomicUsize::new(0);
+
+pub fn alert_wakes() -> usize {
+    ALERT_WAKES.load(Ordering::Relaxed)
+}
+
+/// **Uyarilabilir** beklemedeki bir gorevi uyandirir (`QueueUserAPC`).
+///
+/// Yalnizca bayragi acik bir bekleme kalkar; ayni durumu kullanan
+/// uyarilabilir olmayan beklemeler (`SleepEx(_, FALSE)`,
+/// `WaitForSingleObject`, POSIX `waitpid`) dokunulmadan kalir. Kesme
+/// baglamindan da guvenli: kilit almaz, gorev degistirmez.
+pub fn wake_alertable(task: usize) {
+    if task >= TASK_COUNT.load(Ordering::Relaxed) {
+        return;
+    }
+    crate::arch::cpu::without_interrupts(|| unsafe {
+        let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+        let t = &mut *tasks.add(task);
+        if !t.alertable {
+            return;
+        }
+        match t.state {
+            TaskState::SigWait => {
+                t.state = TaskState::Ready;
+                t.wait_timed = false;
+            }
+            TaskState::Waiting => {
+                t.state = TaskState::Ready;
+                t.wait_for = 0;
+            }
+            _ => return,
+        }
+        ALERT_WAKES.fetch_add(1, Ordering::Relaxed);
+    });
+}
+
 /// Kac kez sinyal beklemeye girildi.
 pub fn sig_waits() -> usize {
     SIG_WAITS.load(Ordering::Relaxed)
@@ -2512,24 +2570,43 @@ pub fn exit_code_of(index: usize) -> u32 {
     }
 }
 
-/// `waitpid`: `child` gorevinin bitmesini bekler, cikis kodunu doner.
+/// `wait_for_task_or`in sonucu.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TaskWait {
+    /// Beklenen gorev bitti (`None`: beklenemezdi).
+    Done(Option<(u32, u32)>),
+    /// Gorev bitmeden `interrupted` dogru oldu. Cocuk **toplanmadi**:
+    /// yuvasi ve cikis kodu sonraki bir bekleme icin duruyor.
+    Interrupted,
+}
+
+/// `wait_for_task_or`: `child` gorevinin bitmesini bekler, cikis kodunu doner.
 ///
 /// Beklerken gorev `Waiting` durumundadir ve `pick_next` tarafindan
 /// **atlanir** -- yani bekleyen bir surec CPU harcamaz. Uyanma zamanla
 /// degil, `wake_expired` icinde beklenen gorevin `Terminated` olmasiyla
 /// gerceklesir.
 ///
-/// `None` doner: gecersiz indeks, kendini beklemek, ya da idle gorevinin
+/// `Done(None)` doner: gecersiz indeks, kendini beklemek, ya da idle gorevinin
 /// cagirmasi (idle bloke edilemez -- masaustu dongusudur).
-pub fn wait_for_task(child: usize) -> Option<(u32, u32)> {
+///
+/// Bolunebilir: `interrupted` dogru olunca bitmeden doner -- uyarilabilir
+/// `WaitForSingleObjectEx` icin. Bolunmeyen bekleme `|| false` verir.
+///
+/// `interrupted` kesmeler kapaliyken de sinaniyor: kosul, gorev
+/// `Waiting`e gecmeden hemen once dogru olmus olabilir ve o zaman onu
+/// uyandiracak kimse kalmazdi (`wait_for_io`daki yaris). Bolen taraf
+/// `wake_alertable` ile uyandiriyor; bayrak yalnizca bekleme suresince
+/// acik.
+pub fn wait_for_task_or(child: usize, interrupted: impl Fn() -> bool) -> TaskWait {
     let current = CURRENT.load(Ordering::Relaxed);
     let count = TASK_COUNT.load(Ordering::Relaxed);
     if child >= count || child == current || current == 0 {
-        return None;
+        return TaskWait::Done(None);
     }
 
     if state_of(child) == TaskState::Unused {
-        return None;
+        return TaskWait::Done(None);
     }
 
     // Zaten bitmisse beklemeye gerek yok; toplandigi icin yuva serbest.
@@ -2537,14 +2614,8 @@ pub fn wait_for_task(child: usize) -> Option<(u32, u32)> {
         let code = exit_code_of(child);
         let signal = exit_signal_of(child);
         crate::arch::cpu::without_interrupts(|| release_slot(child));
-        return Some((code, signal));
+        return TaskWait::Done(Some((code, signal)));
     }
-
-    crate::arch::cpu::without_interrupts(|| unsafe {
-        let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
-        (*tasks.add(current)).wait_for = child + 1;
-        (*tasks.add(current)).state = TaskState::Waiting;
-    });
 
     // Bekleyen gorev `Waiting` durumunda oldugu icin zamanlanmaz; dongu
     // ancak cocuk bitince kirilir. Baska hicbir sey kosmuyorsa `yield_now`
@@ -2566,9 +2637,28 @@ pub fn wait_for_task(child: usize) -> Option<(u32, u32)> {
     // Cikis kodu **ve olum sebebi** birlikte aliniyor: ikisi de yuva
     // serbest kalinca siliniyor, yani ikisini de gormusken almak
     // gerekiyor.
+    //
+    // Her tur **yeniden** kuruluyor. Uyanmanin tek sebebi cocugun bitmesi
+    // degil: `wake_child_watchers` durma ve devam etmede de uyandiriyor,
+    // ve bir APC uyarilabilir beklemeyi kaldiriyor. Eskiden ilk uyanmadan
+    // sonra gorev `Ready` kaliyor ve dongu cocuk bitene kadar CPU'yu
+    // yoklamayla harciyordu.
     let mut last = (0u32, 0u32);
     loop {
-        yield_now();
+        let armed = crate::arch::cpu::without_interrupts(|| unsafe {
+            if matches!(state_of(child), TaskState::Terminated | TaskState::Unused)
+                || interrupted()
+            {
+                return false;
+            }
+            let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+            (*tasks.add(current)).wait_for = child + 1;
+            (*tasks.add(current)).state = TaskState::Waiting;
+            true
+        });
+        if armed {
+            yield_now();
+        }
         match state_of(child) {
             TaskState::Terminated => {
                 last = (exit_code_of(child), exit_signal_of(child));
@@ -2577,12 +2667,25 @@ pub fn wait_for_task(child: usize) -> Option<(u32, u32)> {
             TaskState::Unused => break,
             _ => {}
         }
+        if interrupted() {
+            crate::arch::cpu::without_interrupts(|| unsafe {
+                let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+                (*tasks.add(current)).wait_for = 0;
+                (*tasks.add(current)).state = TaskState::Running;
+            });
+            return TaskWait::Interrupted;
+        }
     }
 
+    crate::arch::cpu::without_interrupts(|| unsafe {
+        let tasks = core::ptr::addr_of_mut!(TASKS) as *mut Task;
+        (*tasks.add(current)).wait_for = 0;
+        (*tasks.add(current)).state = TaskState::Running;
+    });
     // Yuva hala bizdeyse geri ver; baskasi verdiyse `release_slot` zaten
     // etkisiz.
     crate::arch::cpu::without_interrupts(|| release_slot(child));
-    Some(last)
+    TaskWait::Done(Some(last))
 }
 
 
